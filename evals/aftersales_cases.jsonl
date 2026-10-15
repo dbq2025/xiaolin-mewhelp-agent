@@ -1,0 +1,12 @@
+{"id": "c01", "text": "订单 20240115001 我昨天申请退款了，什么时候能到账？", "expected": {"order_no": "20240115001", "request_type": "refund", "expected_solution": "refund"}, "detail_keywords": ["退款"]}
+{"id": "c02", "text": "订单 20240115002 昨天就该送到了，现在还没收到，我要退款", "expected": {"order_no": "20240115002", "request_type": "logistics", "expected_solution": "refund"}, "detail_keywords": ["没收到", "未收到", "送"]}
+{"id": "c03", "text": "订单 20240115003 收到的杯子是碎的，我想换一个", "expected": {"order_no": "20240115003", "request_type": "exchange", "expected_solution": "exchange"}, "detail_keywords": ["碎", "杯子", "换"]}
+{"id": "c04", "text": "订单 20240115004 麻烦开一下发票，抬头是某某科技有限公司", "expected": {"order_no": "20240115004", "request_type": "invoice", "expected_solution": "unknown"}, "detail_keywords": ["发票"]}
+{"id": "c05", "text": "订单 20240115005 我不想要了，想退货", "expected": {"order_no": "20240115005", "request_type": "return", "expected_solution": "refund"}, "detail_keywords": ["退货", "不想要"]}
+{"id": "c06", "text": "我的快递三天没动了，一直显示在中转站", "expected": {"order_no": null, "request_type": "logistics", "expected_solution": "unknown"}, "detail_keywords": ["中转站", "没动", "停滞", "快递"]}
+{"id": "c07", "text": "衣服尺码不对，太大了，能换个小的吗", "expected": {"order_no": null, "request_type": "exchange", "expected_solution": "exchange"}, "detail_keywords": ["尺码", "大", "换"]}
+{"id": "c08", "text": "你们这什么效率啊，等了半个月了，太让人失望了", "expected": {"order_no": null, "request_type": "other", "expected_solution": "unknown"}, "detail_keywords": ["效率", "半个月", "失望", "等"]}
+{"id": "c09", "text": "订单 20240115009 少发了一件，只收到一个，我要退款", "expected": {"order_no": "20240115009", "request_type": "logistics", "expected_solution": "refund"}, "detail_keywords": ["少发", "只收到", "退款"]}
+{"id": "c10", "text": "订单 20240115010 用了两次就坏了，质量太差，我要退货并且赔偿", "expected": {"order_no": "20240115010", "request_type": "return", "expected_solution": "compensation"}, "detail_keywords": ["坏", "质量", "赔偿"]}
+{"id": "c11", "text": "你们客服几点下班？", "expected": {"order_no": null, "request_type": "other", "expected_solution": "unknown"}, "detail_keywords": ["下班", "客服", "几点", "时间"]}
+{"id": "c12", "text": "订单 A20240115-0012 一直没有物流更新，麻烦帮我看看", "expected": {"order_no": "A20240115-0012", "request_type": "logistics", "expected_solution": "unknown"}, "detail_keywords": ["物流", "更新", "没"]}
