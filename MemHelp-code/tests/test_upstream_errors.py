@@ -135,7 +135,15 @@ def test_extract_error_uses_the_error_envelope(test_settings):
 
 
 def test_chat_validation_error_uses_the_error_envelope(test_settings):
-    client = TestClient(create_app(settings=test_settings))
+    """请求体非法时也要走 {"error": {...}} 外壳。
+
+    **必须同时注入 model**：FastAPI 先解析依赖、后校验请求体，只注入 settings
+    的话模型依赖会先因「配置缺失」失败，拿到的就是 configuration_error 而不是
+    validation_error（这个差异是实测出来的，不是猜的）。
+    """
+    client = TestClient(
+        create_app(model=FakeChatModel(reply="ok"), settings=test_settings)
+    )
     body = client.post("/api/chat/completions", json={"message": ""}).json()
     assert set(body) == {"error"}
     assert body["error"]["type"] == "validation_error"
@@ -198,3 +206,32 @@ def test_configuration_error_message_is_redacted(monkeypatch):
     )
     assert resp.status_code == 503
     assert "sk-super-secret" not in resp.text
+
+
+# ---------------------------------------------------------------------------
+# 配置完全缺失（既没有 .env 也没有环境变量）
+# ---------------------------------------------------------------------------
+
+
+def test_missing_config_yields_503_not_an_unhandled_exception():
+    """配置全缺时必须给出规范的 503 JSON，不能把未处理异常抛到 ASGI 层。
+
+    这里**刻意不注入 settings**，走 ``get_app_settings`` 的真实分支。
+    此前的实现让 ``pydantic.ValidationError`` 穿透了异常处理器，客户端拿到的是
+    "Exception in ASGI application" 而不是可解析的错误体 —— 这个缺陷由
+    「从 GitHub 全新克隆后跑测试」暴露出来（开发机上有 .env 所以一直没触发）。
+    """
+    from app.config import get_settings
+    from app.main import create_app
+
+    get_settings.cache_clear()
+    client = TestClient(create_app(), raise_server_exceptions=False)
+
+    for stream in (False, True):
+        resp = client.post(
+            "/api/chat/completions", json={"message": "在吗", "stream": stream}
+        )
+        assert resp.status_code == 503, f"stream={stream} 没有得到 503"
+        assert "Exception in ASGI application" not in resp.text
+        if not stream:
+            assert resp.json()["error"]["type"] == "configuration_error"

@@ -143,7 +143,18 @@ def _default_chat_model() -> BaseChatModel:
 
 def get_model(request: Request) -> BaseChatModel:
     model = getattr(request.app.state, "chat_model", None)
-    return model if model is not None else _default_chat_model()
+    if model is not None:
+        return model
+    try:
+        return _default_chat_model()
+    except Exception as exc:  # noqa: BLE001 - 配置缺失是预期内的运维状态
+        # 与 get_app_settings 同样的要求：配置缺失必须变成规范的 503 外壳，
+        # 而不是把 pydantic 的 ValidationError 裸抛到 ASGI 层 —— 那样客户端拿到
+        # 的是 "Exception in ASGI application"，根本没法解析。
+        raise UpstreamError(
+            redact(f"配置缺失或非法，请检查 .env：{exc}"),
+            type_="configuration_error",
+        ) from exc
 
 
 def get_app_settings(request: Request) -> Settings:

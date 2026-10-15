@@ -62,3 +62,38 @@ def _isolate_process_singletons():
     clear()
     yield
     clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_real_env_file(monkeypatch):
+    """让整个测试套件与「宿主机有没有 .env」无关。
+
+    为什么必须放在 conftest 而不是某个测试文件里：``Settings`` 的 ``env_file``
+    指向项目根的真实 ``.env``。开发机上这个文件存在、CI 或干净克隆里不存在，
+    于是**同一份测试在不同机器上结果不同** —— 实测有一个只在干净克隆里失败的
+    用例（``/healthz`` 的配置检查依赖会读到宿主机的 ``.env``，读不到就抛
+    ``ValidationError``，表现为整个用例报错而不是断言失败）。
+
+    做法：清掉 ``OPENAI_*`` 环境变量（环境变量优先级高于 .env），并把 ``env_file``
+    置空。需要真实配置的用例自己显式传 ``_env_file=`` 或注入
+    ``create_app(settings=...)``。
+    """
+    for name in (
+        "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
+        "OPENAI_MODEL",
+        "CONTEXT_TOKEN_BUDGET",
+        "REQUEST_TIMEOUT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    monkeypatch.setattr(
+        "app.config.Settings.model_config",
+        {**Settings.model_config, "env_file": None},
+    )
+
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()

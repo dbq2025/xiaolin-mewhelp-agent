@@ -26,18 +26,9 @@ from app.config import Settings
 #: ``PermissionError``（实测）。所以用工作区里自建的固定目录。
 ENV_FIXTURE_DIR = Path(".uv-cache") / "cfg-fixtures"
 
-
-@pytest.fixture(autouse=True)
-def _clear_openai_env(monkeypatch):
-    """避免宿主的 OPENAI_* 环境变量盖过测试自己写的 .env 文件。"""
-    for name in (
-        "OPENAI_BASE_URL",
-        "OPENAI_API_KEY",
-        "OPENAI_MODEL",
-        "CONTEXT_TOKEN_BUDGET",
-        "REQUEST_TIMEOUT",
-    ):
-        monkeypatch.delenv(name, raising=False)
+# 注：「清掉宿主 OPENAI_* 环境变量」与「把 env_file 置空」现在由 conftest.py 的
+# 全局 autouse fixture 负责 —— 原因见那里：整个套件的结果不能取决于宿主机有没有
+# .env。本文件因此不再需要自己的清理 fixture。
 
 
 @pytest.fixture
