@@ -8,7 +8,7 @@
 from typing import Sequence
 
 from langchain_core.messages import BaseMessage
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder, PromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 # ---------------------------------------------------------------------------
 # 客服 System Prompt
@@ -88,8 +88,11 @@ def build_chat_messages(history: Sequence[BaseMessage], message: str) -> list[Ba
 # 售后信息提取 Prompt
 # ---------------------------------------------------------------------------
 
-EXTRACT_PROMPT: PromptTemplate = PromptTemplate.from_template(
-    """你是一个售后工单信息抽取器。请从下面这段用户描述里，抽取结构化字段。
+EXTRACT_PROMPT: ChatPromptTemplate = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            """你是一个售后工单信息抽取器。请从用户描述里抽取结构化字段。
 
 规则：
 - 只依据用户原文，**不要推测**任何用户没说过的信息。
@@ -98,9 +101,8 @@ EXTRACT_PROMPT: PromptTemplate = PromptTemplate.from_template(
 - 诉求类型与期望方案从给定枚举里选最贴近的一个；实在判断不出来时，
   诉求类型填 other，期望方案填 unknown。
 - detail 用一句话概括用户的问题，保留时间、商品、现象等关键事实，
-  不要加入原文没有的内容。
-
-用户描述：
-{text}
-"""
+  不要加入原文没有的内容。""",
+        ),
+        ("human", "用户描述：\n{text}"),
+    ]
 )

@@ -53,11 +53,12 @@ def test_system_prompt_defines_the_customer_service_role():
 
 
 def test_extract_prompt_renders_text_variable():
-    rendered = EXTRACT_PROMPT.format(text="订单 A123 要退款")
-    assert "订单 A123 要退款" in rendered
+    msgs = EXTRACT_PROMPT.format_messages(text="订单 A123 要退款")
+    assert any("订单 A123 要退款" in str(m.content) for m in msgs)
 
 
 def test_extract_prompt_forbids_fabrication():
-    rendered = EXTRACT_PROMPT.format(text="x")
+    msgs = EXTRACT_PROMPT.format_messages(text="x")
+    body = "\n".join(str(m.content) for m in msgs)
     for keyword in ("不要推测", "null"):
-        assert keyword in rendered
+        assert keyword in body
