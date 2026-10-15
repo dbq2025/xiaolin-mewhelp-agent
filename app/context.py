@@ -53,11 +53,16 @@ class ContextResult:
 
 def build_context(
     history: Sequence[BaseMessage],
-    message: str,
-    system_prompt: str,
+    question: BaseMessage,
+    system_message: SystemMessage,
     budget_tokens: int,
 ) -> ContextResult:
-    """把历史裁剪到预算内，再接上本轮问题，产出最终模型输入。"""
+    """把历史裁剪到预算内，再把 System 与本轮问题接上去。
+
+    只做裁剪与拼装，**不构造消息内容** —— 模板渲染是 ``app.prompts`` 的职责
+    （``build_chat_messages``），这里接收已渲染好的 SystemMessage 与本轮
+    HumanMessage。这样 Prompt 只有一处定义，不会在两个模块里各写一份。
+    """
     history = list(history)
 
     kept = trim_messages(
@@ -76,7 +81,7 @@ def build_context(
         allow_partial=False,
     )
 
-    messages: list[BaseMessage] = [SystemMessage(system_prompt), *kept, HumanMessage(message)]
+    messages: list[BaseMessage] = [system_message, *kept, question]
 
     return ContextResult(
         messages=messages,
@@ -84,5 +89,5 @@ def build_context(
         trimmed_messages=len(history) - len(kept),
         budget_tokens=budget_tokens,
         used_tokens=count_tokens_approximately(kept),
-        system_prompt_tokens=count_tokens_approximately([SystemMessage(system_prompt)]),
+        system_prompt_tokens=count_tokens_approximately([system_message]),
     )
