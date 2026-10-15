@@ -159,3 +159,36 @@ def fake_structured_message(payload: dict[str, Any], name: str = "AfterSalesRequ
             }
         ],
     )
+
+
+class FailingChatModel(FakeChatModel):
+    """每次都抛指定异常的假模型。
+
+    用来离线测「上游不可达 / 认证失败」这类基础设施错误在 HTTP 层被映射成什么 ——
+    不需要真的联网，只要异常类型与消息和真实上游一致即可
+    （例如 ``openai.APIConnectionError`` 的 str 就是 ``"Connection error."``）。
+    """
+
+    error: Exception = Field(default_factory=lambda: RuntimeError("boom"))
+
+    def _raise(self) -> None:
+        raise self.error
+
+    def _generate(self, *args: Any, **kwargs: Any) -> ChatResult:  # type: ignore[override]
+        self._raise()
+
+    async def _astream(self, *args: Any, **kwargs: Any) -> AsyncIterator[ChatGenerationChunk]:  # type: ignore[override]
+        self._raise()
+        yield  # pragma: no cover - 仅为让本方法是异步生成器
+
+    def with_structured_output(self, schema: Any = None, **kwargs: Any):  # type: ignore[override]
+        error = self.error
+
+        class _AlwaysFails:
+            async def ainvoke(self, *args: Any, **kw: Any) -> Any:
+                raise error
+
+            def invoke(self, *args: Any, **kw: Any) -> Any:
+                raise error
+
+        return _AlwaysFails()

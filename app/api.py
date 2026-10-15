@@ -23,7 +23,7 @@ from collections.abc import AsyncIterable
 from functools import lru_cache
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -31,6 +31,10 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from app.chat import astream_chat, complete_chat
 from app.config import Settings, get_settings
+from app.errors import (
+    classify_upstream_error_type,
+    upstream_error_message,
+)
 from app.extract import ExtractionError, extract_request
 from app.llm import get_chat_model
 from app.memory import InMemorySessionStore, get_session_store, new_session_id
@@ -83,24 +87,12 @@ def _jsonable_validation_errors(exc: RequestValidationError) -> list[dict[str, A
 
 
 def _classify_upstream_error(exc: Exception) -> UpstreamError:
-    """把上游异常分类，让使用者知道该去查密钥还是等上游恢复。"""
-    text = f"{type(exc).__name__}: {exc}"
-    lowered = text.lower()
-    if any(
-        k in lowered
-        for k in ("401", "403", "unauthorized", "invalid api key", "authentication")
-    ):
-        return UpstreamError(
-            "上游拒绝了本次请求，请检查 .env 里的 OPENAI_API_KEY / OPENAI_BASE_URL。"
-            f"原始错误：{text}",
-            type_="upstream_auth",
-        )
-    if any(k in lowered for k in ("timeout", "timed out", "connect", "502", "503", "504")):
-        return UpstreamError(
-            f"上游不可用或超时，请稍后重试。原始错误：{text}",
-            type_="upstream_unavailable",
-        )
-    return UpstreamError(text, type_="upstream_error")
+    """把上游异常包装成带类型的 ``UpstreamError``。
+
+    分类规则集中在 ``app.errors``，这里只负责拼装消息。
+    """
+    type_ = classify_upstream_error_type(exc)
+    return UpstreamError(upstream_error_message(exc, type_), type_=type_)
 
 
 def _as_upstream_error(exc: Exception) -> UpstreamError:
