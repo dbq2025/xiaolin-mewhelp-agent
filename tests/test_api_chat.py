@@ -51,7 +51,11 @@ def test_healthz_misconfigured_when_env_missing(monkeypatch):
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_MODEL", raising=False)
-    monkeypatch.setattr("app.config.Settings.model_config", {**Settings.model_config, "env_file": None})
+    # 把 .env 指到一个不存在的路径，模拟「干净克隆、还没配 .env」
+    monkeypatch.setattr(
+        "app.config.Settings.model_config",
+        {**Settings.model_config, "env_file": "/nonexistent/.env"},
+    )
     get_settings.cache_clear()
 
     resp = TestClient(create_app()).get("/healthz")
@@ -70,7 +74,10 @@ def test_healthz_misconfigured_body_does_not_leak_partial_key(monkeypatch):
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-super-secret-partial")
     monkeypatch.delenv("OPENAI_MODEL", raising=False)
-    monkeypatch.setattr("app.config.Settings.model_config", {**Settings.model_config, "env_file": None})
+    monkeypatch.setattr(
+        "app.config.Settings.model_config",
+        {**Settings.model_config, "env_file": "/nonexistent/.env"},
+    )
     get_settings.cache_clear()
 
     body = TestClient(create_app()).get("/healthz").text

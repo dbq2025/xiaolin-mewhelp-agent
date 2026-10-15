@@ -9,16 +9,26 @@
 """
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+#: 项目根目录（``app/`` 的上一级）。
+#:
+#: ``.env`` 的路径**必须绝对**：pydantic-settings 的相对路径是按**当前工作目录**
+#: 解析的，而本仓库的布局是「仓库根 + 代码在 MemHelp-code/ 子目录」（见
+#: ``agent.md``）。如果这里写 ".env"，从仓库根运行 uvicorn 就会找不到配置 ——
+#: 实测过：报 3 个 Field required。用 ``__file__`` 定位则与 CWD 无关。
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+ENV_FILE = PROJECT_ROOT / ".env"
 
 
 class Settings(BaseSettings):
     """从 ``.env`` / 环境变量读取的全部运行配置。"""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=ENV_FILE,
         env_file_encoding="utf-8",
         extra="ignore",
     )

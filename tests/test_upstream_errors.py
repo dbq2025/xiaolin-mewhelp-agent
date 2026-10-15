@@ -188,7 +188,8 @@ def test_configuration_error_message_is_redacted(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-super-secret-partial")
     monkeypatch.delenv("OPENAI_MODEL", raising=False)
     monkeypatch.setattr(
-        "app.config.Settings.model_config", {**Settings.model_config, "env_file": None}
+        "app.config.Settings.model_config",
+        {**Settings.model_config, "env_file": "/nonexistent/.env"},
     )
     get_settings.cache_clear()
 

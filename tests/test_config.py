@@ -1,14 +1,17 @@
 """配置校验测试。
 
-刻意不使用 pytest 的 ``tmp_path``：沙箱下新建目录会被收回权限（见 conftest.py）。
-需要「从 .env 文件读」的场景改用**自建**的可写目录，写完即删 —— 目录必须自建，
-不能假定已存在（例如 ``.uv-cache/`` 被 gitignore，干净克隆上根本没有）。
+**不使用 pytest 的 ``tmp_path``**：DSH 沙箱下测试进程新建的目录在退出后会被
+收回权限（见 ``conftest.py``），而 ``.uv-cache/`` 这类目录被 gitignore、干净克隆
+上也不存在。所以这里用 ``tempfile.mkdtemp`` 之外的策略 —— 直接写进**自建**目录，
+写完即删。
 
-同理，这些测试断言的是「``_env_file`` 里的值生效」。pydantic-settings 的优先级是
-**OS 环境变量 > .env 文件**，所以必须先把宿主环境里的 ``OPENAI_*`` 清掉，否则在
-CI 或任何导出过这些变量的机器上会得到与预期不符的结果。
+**也不需要 ``_env_file`` 的隐式路径**：``Settings`` 的 ``env_file`` 是绝对路径
+（``app.config.ENV_FILE``），与当前工作目录无关。测试通过显式传 ``_env_file=``
+覆盖，并清掉宿主环境变量 —— 否则 pydantic-settings 的优先级
+（OS 环境变量 > .env 文件）会让断言在意料之外的环境下失败。
 """
 
+import os
 from pathlib import Path
 
 import pytest
@@ -16,8 +19,12 @@ from pydantic import ValidationError
 
 from app.config import Settings
 
-#: 放临时 .env 的目录（自建，不依赖工作区里已有目录）
-ENV_FIXTURE_DIR = Path(".uv-cache")
+#: 放临时 .env 的目录，位于工作区内。
+#:
+#: 为什么不用 ``tempfile`` / ``tmp_path``：沙箱会把**测试进程新建的目录**在退出后
+#: 收回权限（见 conftest.py），``tempfile.TemporaryDirectory`` 也一样会撞
+#: ``PermissionError``（实测）。所以用工作区里自建的固定目录。
+ENV_FIXTURE_DIR = Path(".uv-cache") / "cfg-fixtures"
 
 
 @pytest.fixture(autouse=True)
@@ -33,16 +40,22 @@ def _clear_openai_env(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
-def _write_env(tmp_name: str, body: str) -> Path:
-    """把一段 .env 内容写进自建的可写目录，返回 path 对象。"""
+@pytest.fixture
+def env_dir():
+    """一个自建的可写目录，用于放临时 .env 文件。"""
     ENV_FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
-    path = ENV_FIXTURE_DIR / tmp_name
+    return ENV_FIXTURE_DIR
+
+
+def _write_env(env_dir: Path, name: str, body: str) -> Path:
+    path = env_dir / name
     path.write_text(body, encoding="utf-8")
     return path
 
 
-def test_settings_read_from_env_file():
+def test_settings_read_from_env_file(env_dir):
     env = _write_env(
+        env_dir,
         "t-read.env",
         "OPENAI_BASE_URL=https://gw.example.com/v1\n"
         "OPENAI_API_KEY=sk-test\n"
@@ -58,6 +71,48 @@ def test_settings_read_from_env_file():
     assert s.openai_model == "deepseek-chat"
     assert s.context_token_budget == 1234
     assert s.request_timeout == 60.0
+
+
+def test_env_file_is_anchored_to_the_code_dir_not_the_cwd():
+    """``.env`` 必须相对**代码目录**解析，而不是当前工作目录。
+
+    本仓库布局是「仓库根 + 代码在 MemHelp-code/」（见 ``agent.md``），而
+    pydantic-settings 的相对路径按 CWD 解析 —— 实测从仓库根启动报 3 个
+    ``Field required``。所以这里断言：``ENV_FILE`` 与 ``app/`` 同级。
+    """
+    import app
+
+    from app.config import ENV_FILE
+
+    assert ENV_FILE.is_absolute(), "env_file 必须是绝对路径"
+    code_dir = Path(app.__file__).resolve().parent.parent
+    assert ENV_FILE.parent == code_dir, (
+        f".env 应解析到代码目录 {code_dir}，实际是 {ENV_FILE}"
+    )
+    assert ENV_FILE.name == ".env"
+
+
+def test_settings_work_regardless_of_cwd(monkeypatch, env_dir):
+    """换个工作目录也要能读到同一份 .env。
+
+    ``_env_file`` 本身也是按 CWD 解析的，所以这里显式传绝对路径；要证明的是
+    「显式绝对路径 + 任意 CWD」都能读到 —— 生产代码里 ``ENV_FILE`` 正是绝对路径。
+    """
+    env = _write_env(
+        env_dir,
+        "t-cwd.env",
+        "OPENAI_BASE_URL=https://gw.example.com/v1\n"
+        "OPENAI_API_KEY=sk-test\n"
+        "OPENAI_MODEL=cwd-model\n",
+    ).resolve()
+    original = Path.cwd()
+    try:
+        os.chdir(Path.cwd().anchor)  # 换到一个完全无关的工作目录（盘根）
+        s = Settings(_env_file=env)
+        assert s.openai_model == "cwd-model"
+    finally:
+        os.chdir(original)
+        env.unlink(missing_ok=True)
 
 
 def test_settings_strip_surrounding_whitespace():
