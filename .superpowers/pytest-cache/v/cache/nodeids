@@ -1,4 +1,14 @@
 [
+  "tests/test_config.py::test_settings_read_from_env_file",
+  "tests/test_config.py::test_settings_reject_blank_api_key",
+  "tests/test_config.py::test_settings_reject_budget_below_one",
+  "tests/test_config.py::test_settings_reject_non_http_base_url",
+  "tests/test_config.py::test_settings_require_model_name",
+  "tests/test_schemas.py::test_after_sales_request_defaults_when_missing_info",
+  "tests/test_schemas.py::test_after_sales_request_enum_values_are_lowercase_strings",
+  "tests/test_schemas.py::test_after_sales_request_field_descriptions_exist_for_schema",
+  "tests/test_schemas.py::test_after_sales_request_rejects_unknown_request_type",
+  "tests/test_schemas.py::test_chat_request_stream_defaults_true",
   "tests/test_smoke.py::test_fastapi_sse_available",
   "tests/test_smoke.py::test_langchain_importable"
 ]
