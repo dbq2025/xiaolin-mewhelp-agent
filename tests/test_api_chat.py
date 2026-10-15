@@ -42,7 +42,10 @@ def test_healthz_reports_model_and_budget(test_settings):
 
 
 def test_healthz_misconfigured_when_env_missing(monkeypatch):
-    """没有 .env 时 /healthz 要如实报 misconfigured，而不是崩掉或假装健康。"""
+    """没有 .env 时 /healthz 要报 misconfigured，且**状态码是 503**。
+
+    返回 200 会让编排器以为实例健康、持续打流量进来，而每个请求都会 503。
+    """
     from app.config import get_settings
 
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
@@ -51,11 +54,28 @@ def test_healthz_misconfigured_when_env_missing(monkeypatch):
     monkeypatch.setattr("app.config.Settings.model_config", {**Settings.model_config, "env_file": None})
     get_settings.cache_clear()
 
-    body = TestClient(create_app()).get("/healthz").json()
+    resp = TestClient(create_app()).get("/healthz")
+    assert resp.status_code == 503
+    body = resp.json()
     assert body["status"] == "misconfigured"
     assert body["base_url_configured"] is False
     assert body["model"] is None
     assert "hint" in body
+
+
+def test_healthz_misconfigured_body_does_not_leak_partial_key(monkeypatch):
+    """配置错误里 pydantic 会带出 input_value（含密钥前几位），必须脱敏。"""
+    from app.config import get_settings
+
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-super-secret-partial")
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    monkeypatch.setattr("app.config.Settings.model_config", {**Settings.model_config, "env_file": None})
+    get_settings.cache_clear()
+
+    body = TestClient(create_app()).get("/healthz").text
+    assert "sk-super-secret" not in body
+    assert "sk-replace" not in body
 
 
 def test_chat_returns_503_configuration_error_when_env_missing(monkeypatch):

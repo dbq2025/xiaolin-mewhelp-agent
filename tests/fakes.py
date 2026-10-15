@@ -45,6 +45,12 @@ class FakeChatModel(BaseChatModel):
     """一个够用就好的假 chat model。"""
 
     chunks: list[str] = Field(default_factory=list)
+    raw_chunks: list[Any] = Field(default_factory=list)
+    """直接作为 ``content`` 使用的原始块。
+
+    用来模拟「content 是 content-block 列表」的 provider（``[{"type": "text",
+    "text": "..."}]``），以及推理模型那种只有 reasoning 块、没有文本块的情况。
+    """
     reply: str = "ok"
     structured_payload: dict[str, Any] | None = None
     fail_after: int | None = None
@@ -117,6 +123,10 @@ class FakeChatModel(BaseChatModel):
         self._record(messages)
         return ChatResult(generations=[ChatGeneration(message=self._reply_message())])
 
+    def _stream_items(self) -> list[Any]:
+        """要逐个作为 ``content`` 吐出去的块（``raw_chunks`` 优先）。"""
+        return list(self.raw_chunks) if self.raw_chunks else list(self.chunks)
+
     # -- 流式路径 ---------------------------------------------------------
 
     def _stream(
@@ -127,10 +137,10 @@ class FakeChatModel(BaseChatModel):
         **kwargs: Any,
     ) -> Iterator[ChatGenerationChunk]:
         self._record(messages)
-        for index, text in enumerate(self.chunks):
+        for index, content in enumerate(self._stream_items()):
             if self.fail_after is not None and index >= self.fail_after:
                 raise RuntimeError("fake upstream failure mid-stream")
-            yield ChatGenerationChunk(message=AIMessageChunk(content=text))
+            yield ChatGenerationChunk(message=AIMessageChunk(content=content))
 
     async def _astream(
         self,
@@ -140,10 +150,10 @@ class FakeChatModel(BaseChatModel):
         **kwargs: Any,
     ) -> AsyncIterator[ChatGenerationChunk]:
         self._record(messages)
-        for index, text in enumerate(self.chunks):
+        for index, content in enumerate(self._stream_items()):
             if self.fail_after is not None and index >= self.fail_after:
                 raise RuntimeError("fake upstream failure mid-stream")
-            yield ChatGenerationChunk(message=AIMessageChunk(content=text))
+            yield ChatGenerationChunk(message=AIMessageChunk(content=content))
 
 
 def fake_structured_message(payload: dict[str, Any], name: str = "AfterSalesRequest") -> AIMessage:

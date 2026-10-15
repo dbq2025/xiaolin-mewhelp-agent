@@ -1,22 +1,42 @@
 """配置校验测试。
 
 刻意不使用 pytest 的 ``tmp_path``：沙箱下新建目录会被收回权限（见 conftest.py）。
-需要「从 .env 文件读」的场景改用已存在且可写的目录，写完即删。
+需要「从 .env 文件读」的场景改用**自建**的可写目录，写完即删 —— 目录必须自建，
+不能假定已存在（例如 ``.uv-cache/`` 被 gitignore，干净克隆上根本没有）。
+
+同理，这些测试断言的是「``_env_file`` 里的值生效」。pydantic-settings 的优先级是
+**OS 环境变量 > .env 文件**，所以必须先把宿主环境里的 ``OPENAI_*`` 清掉，否则在
+CI 或任何导出过这些变量的机器上会得到与预期不符的结果。
 """
+
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from app.config import Settings
 
-ENV_FIXTURE_DIR = ".uv-cache"
+#: 放临时 .env 的目录（自建，不依赖工作区里已有目录）
+ENV_FIXTURE_DIR = Path(".uv-cache")
 
 
-def _write_env(tmp_name: str, body: str):
-    """把一段 .env 内容写进既有可写目录，返回 path 对象。"""
-    from pathlib import Path
+@pytest.fixture(autouse=True)
+def _clear_openai_env(monkeypatch):
+    """避免宿主的 OPENAI_* 环境变量盖过测试自己写的 .env 文件。"""
+    for name in (
+        "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
+        "OPENAI_MODEL",
+        "CONTEXT_TOKEN_BUDGET",
+        "REQUEST_TIMEOUT",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
-    path = Path(ENV_FIXTURE_DIR) / tmp_name
+
+def _write_env(tmp_name: str, body: str) -> Path:
+    """把一段 .env 内容写进自建的可写目录，返回 path 对象。"""
+    ENV_FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
+    path = ENV_FIXTURE_DIR / tmp_name
     path.write_text(body, encoding="utf-8")
     return path
 

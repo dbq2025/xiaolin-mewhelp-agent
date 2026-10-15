@@ -128,14 +128,49 @@ def test_sse_sends_error_event_when_upstream_fails_midstream(test_settings):
     assert err["message"]
 
 
-def test_sse_error_stream_still_persists_history(test_settings):
-    """上游挂掉也不能让这一轮从历史里消失。"""
+def test_sse_error_stream_persists_only_the_question(test_settings):
+    """上游挂掉：只保留用户那一轮，不落库半截回答（半截会污染下一轮上下文）。"""
     client = _client(
         test_settings, FakeChatModel(chunks=["好", "再也发不出来"], fail_after=1)
     )
     _stream(client, {"session_id": "s1", "message": "在吗"})
     msgs = client.post("/api/chat/sessions/s1/messages").json()["messages"]
-    assert [m["content"] for m in msgs] == ["在吗", "好"]
+    assert [m["content"] for m in msgs] == ["在吗"]
+
+
+def test_sse_emits_error_event_when_upstream_sends_only_empty_chunks(test_settings):
+    """上游只吐空块：客户端要收到 error 事件，而不是「成功但回答是空的」。
+
+    真实上游会这样：推理模型只给 reasoning 分块，或 content 是 content-block
+    列表而文本在别处。以前这种响应会静默变成 finish_reason=stop 的空回答。
+    """
+    text, _ = _stream(
+        _client(test_settings, FakeChatModel(chunks=["", ""])),
+        {"session_id": "s1", "message": "在吗"},
+    )
+    events = _events(text)
+    names = [n for n, _ in events]
+
+    assert names[0] == "meta"
+    assert "done" not in names, "没有内容就不该发 done"
+    assert names[-1] == "error"
+    assert (events[-1][1] or {})["type"] == "upstream_empty_response"
+
+    # 历史里只有用户那一轮
+    msgs = _client(test_settings, FakeChatModel(chunks=["", ""])).post(
+        "/api/chat/sessions/s1/messages"
+    )
+    assert msgs.status_code == 200
+
+
+def test_non_streaming_empty_response_is_an_error_not_empty_content(test_settings):
+    """非流式路径同样不能把空内容当成功返回。"""
+    client = _client(test_settings, FakeChatModel(reply=""))
+    resp = client.post(
+        "/api/chat/completions", json={"session_id": "s1", "message": "在吗", "stream": False}
+    )
+    assert resp.status_code == 502
+    assert resp.json()["error"]["type"] == "upstream_empty_response"
 
 
 def test_every_sse_data_field_is_valid_json(test_settings):

@@ -107,3 +107,38 @@ async def test_extract_does_not_write_to_session_store():
     )
     result = await extract_request("x", model)
     assert isinstance(result, AfterSalesRequest)
+
+
+async def test_extract_requests_function_calling_not_json_schema():
+    """必须显式指定 ``method="function_calling"``。
+
+    langchain-openai 的 ``with_structured_output`` 对 Pydantic schema 默认用
+    ``method="json_schema"``（发 ``response_format``），只在模型名是
+    ``gpt-3*``/``gpt-4*`` 时才自动回退。真实踩到过：DeepSeek 网关返回
+    400 ``This response_format type is unavailable now``。
+
+    这条测试是给「换上游只改 .env」这个承诺兜底的 —— 默认值不可移植，必须钉住。
+    """
+    seen: dict = {}
+
+    class RecordingModel(FakeChatModel):
+        def with_structured_output(self, schema=None, **kwargs):  # type: ignore[override]
+            seen["schema"] = schema
+            seen.update(kwargs)
+            return super().with_structured_output(schema, **kwargs)
+
+    model = RecordingModel(
+        structured_payload={
+            "order_no": None,
+            "request_type": "other",
+            "expected_solution": "unknown",
+            "detail": "x",
+        }
+    )
+    await extract_request("x", model)
+
+    assert seen.get("method") == "function_calling", (
+        "必须显式用 function_calling：json_schema 会带上 response_format，"
+        "许多 OpenAI 兼容网关不支持"
+    )
+    assert seen.get("schema") is AfterSalesRequest

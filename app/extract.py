@@ -20,52 +20,13 @@ langchain 的 tool-call 解析与 pydantic 校验都被真实执行。
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
+from app.errors import is_infrastructure_error
 from app.prompts import EXTRACT_PROMPT
 from app.schemas import AfterSalesRequest
 
 
 class ExtractionError(RuntimeError):
     """模型输出无法解析成 ``AfterSalesRequest``（**不含**上游基础设施错误）。"""
-
-
-def is_infrastructure_error(exc: BaseException) -> bool:
-    """判断异常是不是「上游连不上/认证失败」这类基础设施问题。
-
-    多特征判断，任一命中即为真：``openai`` 自己的异常类型、（链式）原因里的
-    类型、以及消息里的关键词。比只匹配消息文本稳 —— ``openai`` 的异常消息会
-    随版本变（例如 ``APIConnectionError`` 的 str 只有 "Connection error."）。
-    """
-    seen: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        name = type(current).__name__.lower()
-        message = str(current).lower()
-        if any(
-            token in name
-            for token in ("apiconnectionerror", "apitimeouterror", "authenticationerror", "permissiondeniederror")
-        ):
-            return True
-        if any(
-            token in message
-            for token in (
-                "connection error",
-                "connection refused",
-                "name or service not known",
-                "temporary failure in name resolution",
-                "getaddrinfo failed",
-                "timed out",
-                "timeout",
-                "incorrect api key",
-                "invalid api key",
-                "unauthorized",
-                "401",
-                "403",
-            )
-        ):
-            return True
-        current = current.__cause__ or current.__context__
-    return False
 
 
 async def extract_request(text: str, model: BaseChatModel) -> AfterSalesRequest:
@@ -76,7 +37,15 @@ async def extract_request(text: str, model: BaseChatModel) -> AfterSalesRequest:
     :raises ExtractionError: 模型没按 schema 输出，或输出无法通过校验。
     :raises Exception: 上游基础设施错误**原样抛出**，交由 HTTP 层分类。
     """
-    structured = model.with_structured_output(AfterSalesRequest)
+    # 必须显式 method="function_calling"：langchain-openai 对 Pydantic schema
+    # 默认用 method="json_schema"（即发 response_format），只在模型名形如
+    # gpt-3*/gpt-4* 时才自动回退。**这个默认值不可移植** —— 实测 DeepSeek 网关
+    # 直接返回 400 "This response_format type is unavailable now"。
+    # 本项目承诺「换 GPT/Claude/DeepSeek/Ollama 只改 .env」，所以这里取最通用的
+    # tool-calling 路径，并由 tests/test_extract.py 钉住。
+    structured = model.with_structured_output(
+        AfterSalesRequest, method="function_calling"
+    )
     messages = EXTRACT_PROMPT.format_messages(text=text)
 
     try:

@@ -18,6 +18,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 
 from app.context import ContextResult, build_context
+from app.errors import UpstreamEmptyResponse
 from app.memory import InMemorySessionStore
 from app.prompts import build_chat_messages
 
@@ -55,6 +56,39 @@ def _prepare(
     return ctx.messages, ctx
 
 
+def _content_to_text(content: object) -> str:
+    """把消息内容或内容块统一成文本。
+
+    ``content`` 有两种形态：裸字符串，或 content-block 列表
+    （``[{"type": "text", "text": "..."}]``）。不统一处理的话，流式路径会把
+    列表形态的块**整块丢掉**，非流式路径却 ``str()`` 成 Python repr —— 同一个
+    上游响应在两条路径上得到完全不同的结果。
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        pieces: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                pieces.append(block)
+            elif isinstance(block, dict):
+                text = block.get("text")
+                if isinstance(text, str):
+                    pieces.append(text)
+        return "".join(pieces)
+    return str(content)
+
+
+def _message_text(message: object) -> str:
+    """从一条消息取文本，优先用 langchain 自己的 ``.text`` 访问器。"""
+    text = getattr(message, "text", None)
+    if isinstance(text, str):
+        return text
+    return _content_to_text(getattr(message, "content", None))
+
+
 async def astream_chat(
     session_id: str,
     message: str,
@@ -70,6 +104,9 @@ async def astream_chat(
     ``__anext__`` 之前不会执行任何代码，HTTP 层无法从返回值拿到元信息（比如裁剪
     统计来填 SSE 的 ``done`` 事件），所以这里在开始产流**之前**把 ``ChatMeta``
     写进去。这是刻意的妥协，避免为此再造一个包装类型。
+
+    :raises UpstreamEmptyResponse: 上游一个可用文本块都没给。**不能**把空内容
+        当成正常回答落库 —— 否则下一轮模型会以为客服刚说了句空话。
     """
     messages, ctx = _prepare(session_id, message, store, budget_tokens)
 
@@ -79,17 +116,24 @@ async def astream_chat(
     parts: list[str] = []
     try:
         async for chunk in model.astream(messages):
-            delta = chunk.content
+            delta = _message_text(chunk)
             # 空串 delta 是真实上游的行为（流结束时常见），
             # 发出去会让客户端多渲染一个空事件。
-            if isinstance(delta, str) and delta:
+            if delta:
                 parts.append(delta)
                 yield delta
-    finally:
-        store.append(
-            session_id,
-            [HumanMessage(message), AIMessage("".join(parts))],
-        )
+
+        if not parts:
+            raise UpstreamEmptyResponse(
+                "上游返回了空内容（流式响应里没有任何可用文本块）。"
+            )
+    except BaseException:
+        # 失败时只保留用户那一轮，不落库半截或空的 AI 回答
+        # （半截回答会污染下一轮上下文，让模型以为它已经答过了）。
+        store.append(session_id, [HumanMessage(message)])
+        raise
+
+    store.append(session_id, [HumanMessage(message), AIMessage("".join(parts))])
 
 
 async def complete_chat(
@@ -100,11 +144,18 @@ async def complete_chat(
     budget_tokens: int,
     model_name: str,
 ) -> tuple[str, ChatMeta]:
-    """非流式对话，返回完整回复与元信息。"""
+    """非流式对话，返回完整回复与元信息。
+
+    :raises UpstreamEmptyResponse: 上游返回了空内容（与流式路径同样的判定）。
+    """
     messages, ctx = _prepare(session_id, message, store, budget_tokens)
 
     response = await model.ainvoke(messages)
-    text = response.content if isinstance(response.content, str) else str(response.content)
+    text = _message_text(response)
+
+    if not text:
+        store.append(session_id, [HumanMessage(message)])
+        raise UpstreamEmptyResponse("上游返回了空内容（非流式响应里没有文本）。")
 
     store.append(session_id, [HumanMessage(message), AIMessage(text)])
 

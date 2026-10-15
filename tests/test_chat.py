@@ -10,6 +10,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from app.chat import ChatMeta, astream_chat, complete_chat
+from app.errors import UpstreamEmptyResponse
 from app.memory import InMemorySessionStore
 from tests.fakes import FakeChatModel, Recorder
 
@@ -142,8 +143,13 @@ async def test_zero_chunk_upstream_raises_but_question_is_still_persisted():
     assert store.get("s1")[0].content == "问"
 
 
-async def test_midstream_upstream_failure_still_persists_question_and_partial():
-    """上游流到一半挂了：已收到的部分与问题都要落库，异常继续向上抛给 HTTP 层。"""
+async def test_midstream_upstream_failure_persists_only_the_question():
+    """上游流到一半挂了：**只**保留用户那一轮，不落库半截回答。
+
+    这是刻意的契约：半截回答（例如「已收到的一半」）留在历史里，下一轮模型会
+    以为它已经答过了，于是接着半句话往下说 —— 那比丢掉这半截更糟。异常继续向上
+    抛给 HTTP 层，由它补 ``event: error``。
+    """
     store = InMemorySessionStore()
     model = FakeChatModel(chunks=["已收到的一半", "再也发不出来"], fail_after=1)
 
@@ -152,7 +158,59 @@ async def test_midstream_upstream_failure_still_persists_question_and_partial():
             astream_chat("s1", "问", store, model, budget_tokens=2000, model_name="f")
         )
 
-    assert [m.content for m in store.get("s1")] == ["问", "已收到的一半"]
+    assert [m.content for m in store.get("s1")] == ["问"]
+
+
+async def test_all_empty_chunks_raises_instead_of_persisting_empty_answer():
+    """上游只吐空块：必须报错，不能把空回答当成功落库。"""
+    store = InMemorySessionStore()
+    model = FakeChatModel(chunks=["", ""])
+
+    with pytest.raises(UpstreamEmptyResponse):
+        await _collect(
+            astream_chat("s1", "问", store, model, budget_tokens=2000, model_name="f")
+        )
+
+    assert [m.content for m in store.get("s1")] == ["问"]
+
+
+async def test_content_block_list_is_flattened_not_dropped():
+    """content 是 content-block 列表时，文本要抽出来，不能整块丢掉。"""
+    store = InMemorySessionStore()
+    model = FakeChatModel(
+        raw_chunks=[
+            [{"type": "text", "text": "你好"}],
+            [{"type": "text", "text": "，我是小美"}],
+        ]
+    )
+    deltas = await _collect(
+        astream_chat("s1", "问", store, model, budget_tokens=2000, model_name="f")
+    )
+    assert deltas == ["你好", "，我是小美"]
+    assert [m.content for m in store.get("s1")] == ["问", "你好，我是小美"]
+
+
+async def test_reasoning_only_chunks_are_treated_as_empty_response():
+    """只有 reasoning 块、没有文本块 → 视为空响应（不能当回答）。"""
+    store = InMemorySessionStore()
+    model = FakeChatModel(raw_chunks=[[{"type": "reasoning", "text": "让我想想"}]])
+
+    with pytest.raises(UpstreamEmptyResponse):
+        await _collect(
+            astream_chat("s1", "问", store, model, budget_tokens=2000, model_name="f")
+        )
+
+
+async def test_complete_chat_empty_response_raises_and_keeps_question_only():
+    store = InMemorySessionStore()
+    model = FakeChatModel(reply="")
+
+    with pytest.raises(UpstreamEmptyResponse):
+        await complete_chat(
+            "s1", "问", store, model, budget_tokens=2000, model_name="f"
+        )
+
+    assert [m.content for m in store.get("s1")] == ["问"]
 
 
 async def test_meta_out_is_filled_before_streaming():

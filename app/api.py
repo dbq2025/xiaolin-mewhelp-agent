@@ -32,7 +32,9 @@ from langchain_core.messages import AIMessage, HumanMessage
 from app.chat import astream_chat, complete_chat
 from app.config import Settings, get_settings
 from app.errors import (
+    UpstreamFault,
     classify_upstream_error_type,
+    redact,
     upstream_error_message,
 )
 from app.extract import ExtractionError, extract_request
@@ -49,12 +51,15 @@ from app.schemas import (
 from app.sse import SSE_MEDIA_TYPE, sse_frame
 
 
-class UpstreamError(RuntimeError):
-    """上游（模型服务）不可用、拒绝请求，或本地配置缺失。"""
+class UpstreamError(UpstreamFault):
+    """上游（模型服务）不可用、拒绝请求，或本地配置缺失。
+
+    类型与判定规则在 ``app.errors``；这里保留一个别名，让本模块的历史调用点
+    继续可读。
+    """
 
     def __init__(self, message: str, type_: str = "upstream_error") -> None:
-        super().__init__(message)
-        self.type = type_
+        super().__init__(message, type_=type_)
 
 
 # ---------------------------------------------------------------------------
@@ -74,13 +79,15 @@ def _jsonable_validation_errors(exc: RequestValidationError) -> list[dict[str, A
 
     pydantic 的错误上下文里可能带异常对象（例如 ``ValueError`` 实例），
     直接塞进 JSONResponse 会炸，所以只取稳定字段。
+
+    ``input`` 也要脱敏：用户完全可能把密钥粘进某个体字段，而那会被回显在这里。
     """
     return [
         {
             "type": str(item.get("type", "")),
             "loc": [str(p) for p in item.get("loc", ())],
-            "msg": str(item.get("msg", "")),
-            "input": repr(item.get("input"))[:200],
+            "msg": redact(item.get("msg", "")),
+            "input": redact(repr(item.get("input"))[:200]),
         }
         for item in exc.errors()
     ]
@@ -95,8 +102,15 @@ def _classify_upstream_error(exc: Exception) -> UpstreamError:
     return UpstreamError(upstream_error_message(exc, type_), type_=type_)
 
 
-def _as_upstream_error(exc: Exception) -> UpstreamError:
-    return exc if isinstance(exc, UpstreamError) else _classify_upstream_error(exc)
+def _as_upstream_error(exc: Exception) -> UpstreamFault:
+    """已经是本地定义的故障就直接沿用它的 ``type``，否则去分类。
+
+    用例层（``app.chat``）会抛 ``UpstreamEmptyResponse`` 这类带类型的故障；
+    重新分类会把它的类型丢掉，退化成泛泛的 ``upstream_error``。
+    """
+    if isinstance(exc, UpstreamFault):
+        return exc
+    return _classify_upstream_error(exc)
 
 
 def _context_stats(context) -> ContextStats:
@@ -142,7 +156,7 @@ def get_app_settings(request: Request) -> Settings:
         # FastAPI 默认的 {"detail": ...}，会绕过本项目统一的 {"error": {...}}
         # 外壳，导致同一个接口在配置缺失时给出不同形状的错误体。
         raise UpstreamError(
-            f"配置缺失或非法，请检查 .env：{exc}",
+            redact(f"配置缺失或非法，请检查 .env：{exc}"),
             type_="configuration_error",
         ) from exc
 
@@ -203,7 +217,7 @@ async def _chat_stream_body(
     except Exception as exc:  # noqa: BLE001 - 必须转成事件，不能让连接裸断
         err = _as_upstream_error(exc)
         yield sse_frame(
-            "error", {"type": err.type, "message": str(err), "session_id": session_id}
+            "error", {"type": err.type, "message": redact(str(err)), "session_id": session_id}
         )
         return
 
@@ -247,31 +261,42 @@ def create_app(
             422, "validation_error", "请求参数不合法。", _jsonable_validation_errors(exc)
         )
 
-    @app.exception_handler(UpstreamError)
-    async def on_upstream_error(request: Request, exc: UpstreamError):
-        # 配置问题用 503（服务不可用，运维该去修 .env），
-        # 上游问题用 502（服务在，是它依赖的上游出错）。
+    @app.exception_handler(UpstreamFault)
+    async def on_upstream_fault(request: Request, exc: UpstreamFault):
+        # 注册在父类上，让 UpstreamEmptyResponse 之类的子类也被接住。
+        # 只有本地的配置缺失/非法用 503（服务没准备好，运维该去修 .env）；
+        # 其余上游问题一律 502（我们的服务在，是它依赖的上游出错）。
         status = 503 if exc.type == "configuration_error" else 502
-        return _error(status, exc.type, str(exc))
+        return _error(status, exc.type, redact(str(exc)))
 
     @app.exception_handler(ExtractionError)
     async def on_extraction_error(request: Request, exc: ExtractionError):
-        return _error(422, "extraction_failed", str(exc))
+        return _error(422, "extraction_failed", redact(str(exc)))
 
     # -- 健康检查 ---------------------------------------------------------
 
     @app.get("/healthz")
-    async def healthz() -> dict[str, Any]:
+    async def healthz():
+        """健康检查。
+
+        配置缺失时返回 **503**（而不是 200）—— 否则编排器/负载均衡会认为实例健康，
+        持续把流量打进来，而每个请求都会 503。缺配置的实例就该被判为未就绪。
+        """
         try:
             current = app.state.settings if app.state.settings is not None else get_settings()
-        except Exception:  # noqa: BLE001
-            return {
-                "status": "misconfigured",
-                "model": None,
-                "base_url_configured": False,
-                "context_token_budget": None,
-                "hint": "请在项目根目录创建 .env（可参考 .env.example）。",
-            }
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "misconfigured",
+                    "model": None,
+                    "base_url_configured": False,
+                    "context_token_budget": None,
+                    "hint": "请在项目根目录创建 .env（可参考 .env.example）。",
+                    # 脱敏：pydantic 的校验错误会带出 input_value，里面有密钥前几位
+                    "detail": redact(exc),
+                },
+            )
         return {
             "status": "ok",
             "model": current.openai_model,
