@@ -17,19 +17,24 @@
 
 ## 2. 功能演示命令
 
+> 代码在 `MemHelp-code/`，`app` 包也在那里，所以除 pytest 外的命令都要用
+> `--directory MemHelp-code`（或先 `cd` 进去），否则 `ModuleNotFoundError: app`。
+> 详见工作区根的 `agent.md`。
+
 ```powershell
 # 0) 装依赖（本机 uv 不在 PATH）
 $env:UV_CACHE_DIR = "F:\DeepSeek-Harness\memhelp-code-myself\.uv-cache"
 $uv = "C:\Users\dbq\.local\bin\uv.exe"
 & $uv sync
 
-# 1) 配 .env（参考 .env.example；.env 不入库）
+# 1) 配 .env（参考 MemHelp-code/.env.example；.env 不入库）
 #    OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL
 
-# 2) 起服务
-& $uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
+# 2) 起服务（从工作区根，用 --directory）
+& $uv run --directory MemHelp-code uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 # 3) 另一个终端：一键跑完三条验收并存档
+cd MemHelp-code
 powershell -ExecutionPolicy Bypass -File scripts/demo.ps1 -Out dev-notes/acceptance-output.txt
 ```
 
@@ -41,7 +46,7 @@ powershell -ExecutionPolicy Bypass -File scripts/demo.ps1 -Out dev-notes/accepta
 
 ```
 uv run python -m pytest --color=no
-143 passed
+145 passed
 ```
 
 **「不触网」的证据**：把上游指向黑洞 `http://127.0.0.1:1/v1`（环境变量优先级高于
