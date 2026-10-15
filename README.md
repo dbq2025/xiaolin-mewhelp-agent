@@ -63,8 +63,39 @@ REQUEST_TIMEOUT=60
 | POST | `/api/extract` | 售后描述 → 结构化 JSON |
 | GET | `/healthz` | 健康检查（不回显密钥） |
 
-### 7. 开发留痕
+### 7. 演示命令（三条验收标准）
+
+> ⚠️ **沙箱提示**：在 DSH 沙箱里，宿主 shell 的 HTTPS 凭证初始化会被拒绝
+> （`schannel: SEC_E_NO_CREDENTIALS`），所以**由我代为执行**的 `curl` 打到需要
+> 出网的地址会失败。但 Agent 进程自己的 TLS 是正常的，所以下面这些打**本地**
+> 服务的命令不受影响；真要验证上游连通性，请你在普通终端里跑。
+
+**验收 1 · 流式回复**（`-N` 关掉缓冲，才能看到逐块滚出来）
+
+```powershell
+curl.exe -N -X POST http://127.0.0.1:8000/api/chat/completions `
+  -H "Content-Type: application/json" `
+  -d "{\"session_id\":\"acc-1\",\"message\":\"我上周买的耳机还没发货\",\"stream\":true}"
+```
+
+**验收 2 · 两轮接住上下文**
+
+```powershell
+curl.exe -X POST http://127.0.0.1:8000/api/chat/completions -H "Content-Type: application/json" -d "{\"session_id\":\"acc-2\",\"message\":\"我的订单号是 20240115001\",\"stream\":false}"
+curl.exe -X POST http://127.0.0.1:8000/api/chat/completions -H "Content-Type: application/json" -d "{\"session_id\":\"acc-2\",\"message\":\"我刚才说的订单号是多少？\",\"stream\":false}"
+curl.exe -X POST http://127.0.0.1:8000/api/chat/sessions/acc-2/messages
+```
+
+**验收 3 · 结构化 JSON**（第二条刻意不提订单号，用来验「零编造」）
+
+```powershell
+curl.exe -X POST http://127.0.0.1:8000/api/extract -H "Content-Type: application/json" -d "{\"text\":\"订单 20240115001 昨天就该到，现在还没收到，我要退款\"}"
+curl.exe -X POST http://127.0.0.1:8000/api/extract -H "Content-Type: application/json" -d "{\"text\":\"我的快递一直没动\"}"
+```
+
+### 8. 开发留痕
 
 - 设计文档：`docs/superpowers/specs/2026-02-14-ch01-pure-chat-design.md`
 - 实施计划：`docs/superpowers/plans/2026-02-14-ch01-pure-chat-plan.md`
 - 开发过程追记：`dev-notes/ch01.md`
+- 客服 Prompt 行为约束检查清单：`evals/service_prompt_cases.md`
