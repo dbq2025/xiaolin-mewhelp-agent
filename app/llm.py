@@ -1,8 +1,11 @@
 """模型工厂 —— 全项目**唯一**知道上游地址 / 密钥 / 模型名的地方。
 
-除了本模块，任何文件都不得 ``import langchain_openai``：换 GPT / Claude /
-DeepSeek / Ollama 只需要改 ``.env``（必要时改 ``OPENAI_BASE_URL``），业务代码
-零改动。``tests/test_llm.py`` 有一条测试专门钉住这个约束。
+**约束范围说明**：本项目「唯一 import ``langchain_openai``」这条约束作用于
+``app/`` 包。``tests/test_smoke.py`` 会 import 它来做可用性冒烟检查，那是刻意的
+例外；强制这条约束的测试（``tests/test_llm.py``）只扫 ``app/``。
+
+业务代码只依赖 ``langchain_core`` 的抽象（``BaseChatModel``），换 GPT / Claude /
+DeepSeek / Ollama 只需要改 ``.env``（必要时改 ``OPENAI_BASE_URL``），业务代码零改动。
 """
 
 from langchain_core.language_models.chat_models import BaseChatModel

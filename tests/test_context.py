@@ -80,9 +80,33 @@ def test_kept_history_starts_on_human_message():
 
 
 def test_used_tokens_within_budget_when_possible():
-    """Review Focus 3。"""
+    """Review Focus 3：裁剪后历史不能超预算。"""
     result = _build(_history(20), "短问题", 120)
     assert result.used_tokens <= 120
+
+
+def test_total_prompt_tokens_stay_within_budget_plus_overhead():
+    """更贴近真实约束的一条：**总量**（System + 历史 + 本轮）要有界。
+
+    单看 ``used_tokens <= budget`` 近乎恒真（``trim_messages`` 自己就保证了），
+    真正会撑爆上下文窗口的是三者之和。这里把上界写成
+    ``budget + system + question``，超出即说明预算语义被改坏了。
+    """
+    from langchain_core.messages.utils import count_tokens_approximately
+
+    system = SystemMessage(SYSTEM)
+    question = HumanMessage("短问题")
+    result = _build(_history(50), "短问题", 200)
+
+    total = count_tokens_approximately(result.messages)
+    upper_bound = (
+        200
+        + count_tokens_approximately([system])
+        + count_tokens_approximately([question])
+    )
+    assert total <= upper_bound, (
+        f"总量 {total} 超出上界 {upper_bound} —— 裁剪没有把历史压到预算内"
+    )
 
 
 def test_tiny_budget_reports_empty_history_without_raising():
