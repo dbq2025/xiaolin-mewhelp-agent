@@ -77,7 +77,12 @@ def test_chat_returns_503_configuration_error_when_env_missing(monkeypatch):
         "/api/chat/completions", json={"message": "在吗", "stream": False}
     )
     assert resp.status_code == 503
-    assert resp.json()["detail"]["type"] == "configuration_error"
+    body = resp.json()
+    # 必须和本项目其他错误一样走 {"error": {...}} 外壳。
+    # 早期实现用 HTTPException，会得到 FastAPI 默认的 {"detail": {...}}，
+    # 同一个接口在配置缺失时错误体形状不一致 —— 这条断言就是防它回退的。
+    assert "error" in body
+    assert body["error"]["type"] == "configuration_error"
 
 
 def test_non_streaming_chat_returns_full_json(test_settings):

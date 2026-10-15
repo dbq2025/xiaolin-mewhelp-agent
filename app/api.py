@@ -146,12 +146,12 @@ def get_app_settings(request: Request) -> Settings:
     try:
         return get_settings()
     except Exception as exc:  # noqa: BLE001 - 配置缺失是可预期的运维状态
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "type": "configuration_error",
-                "message": f"配置缺失或非法，请检查 .env：{exc}",
-            },
+        # 必须走 UpstreamError 而不是 HTTPException：后者的响应体是
+        # FastAPI 默认的 {"detail": ...}，会绕过本项目统一的 {"error": {...}}
+        # 外壳，导致同一个接口在配置缺失时给出不同形状的错误体。
+        raise UpstreamError(
+            f"配置缺失或非法，请检查 .env：{exc}",
+            type_="configuration_error",
         ) from exc
 
 
@@ -257,7 +257,10 @@ def create_app(
 
     @app.exception_handler(UpstreamError)
     async def on_upstream_error(request: Request, exc: UpstreamError):
-        return _error(502, exc.type, str(exc))
+        # 配置问题用 503（服务不可用，运维该去修 .env），
+        # 上游问题用 502（服务在，是它依赖的上游出错）。
+        status = 503 if exc.type == "configuration_error" else 502
+        return _error(status, exc.type, str(exc))
 
     @app.exception_handler(ExtractionError)
     async def on_extraction_error(request: Request, exc: ExtractionError):
