@@ -22,9 +22,10 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-# 沙箱下 TEMP 指向工作区外，pytest 的原子重命名会撞 WinError 5；
-# 指到工作区内（已被 .superpowers 的自我忽略规则覆盖）即可
-cache_dir = ".superpowers/pytest-cache"
+# 沙箱注意：pytest 若在工作区内自建临时/缓存目录，进程退出后会被沙箱"去供给"
+# 成连列举/删除都被拒的状态（WinError 5），且连 ACL 诊断工具都判定为非权限问题。
+# 所以这里一律不在工作区内建：临时文件走沙箱自带的临时区，缓存直接关掉。
+addopts = "-p no:cacheprovider"
 
 [build-system]
 requires = ["hatchling"]

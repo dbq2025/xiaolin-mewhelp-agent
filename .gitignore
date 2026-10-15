@@ -49,3 +49,6 @@ desktop.ini
 .venv-probe/
 pytest-cache-files-*/
 
+pytest-cache/
+pytest-tmp/
+
