@@ -10,6 +10,7 @@
 
 from fastapi.testclient import TestClient
 
+from app.config import Settings
 from app.main import create_app
 from app.memory import InMemorySessionStore
 from tests.fakes import FakeChatModel
@@ -38,6 +39,45 @@ def test_healthz_reports_model_and_budget(test_settings):
     body = _client(test_settings).get("/healthz").json()
     assert body["model"]
     assert body["context_token_budget"] > 0
+
+
+def test_healthz_misconfigured_when_env_missing(monkeypatch):
+    """没有 .env 时 /healthz 要如实报 misconfigured，而不是崩掉或假装健康。"""
+    from app.config import get_settings
+
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    monkeypatch.setattr("app.config.Settings.model_config", {**Settings.model_config, "env_file": None})
+    get_settings.cache_clear()
+
+    body = TestClient(create_app()).get("/healthz").json()
+    assert body["status"] == "misconfigured"
+    assert body["base_url_configured"] is False
+    assert body["model"] is None
+    assert "hint" in body
+
+
+def test_chat_returns_503_configuration_error_when_env_missing(monkeypatch):
+    """配置缺失时对话接口要给明确的 503 + configuration_error，而不是 500。
+
+    这是对计划 Task 9 里「配置缺失在启动时就报错退出」的**有意偏离**：
+    改成延迟到请求时返回 503 —— 这样 `import app.main` 在没有 .env 的环境下
+    也能成功（CI、文档生成、单元测试都需要），而使用者拿到的仍是可诊断的错误。
+    """
+    from app.config import get_settings
+
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    monkeypatch.setattr("app.config.Settings.model_config", {**Settings.model_config, "env_file": None})
+    get_settings.cache_clear()
+
+    resp = TestClient(create_app()).post(
+        "/api/chat/completions", json={"message": "在吗", "stream": False}
+    )
+    assert resp.status_code == 503
+    assert resp.json()["detail"]["type"] == "configuration_error"
 
 
 def test_non_streaming_chat_returns_full_json(test_settings):
