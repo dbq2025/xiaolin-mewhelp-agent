@@ -76,10 +76,39 @@ class ChatRequest(BaseModel):
 
     session_id: str | None = Field(
         default=None,
-        description="会话 ID。缺省时由服务端生成并在响应中回传。",
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_-]+$",
+        description=(
+            "会话 ID。只允许字母、数字、下划线和连字符，最长 64 字符；"
+            "缺省时由服务端生成并在响应中回传。"
+        ),
     )
     message: str = Field(min_length=1, description="用户本轮消息。")
     stream: bool = Field(default=True, description="true 走 SSE 流式，false 返回完整 JSON。")
+
+
+class SessionId(BaseModel):
+    """路径参数里的会话 ID，校验规则与 ``ChatRequest.session_id`` 保持一致。"""
+
+    session_id: str = Field(
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_-]+$",
+        description="会话 ID。",
+    )
+
+
+class ErrorBody(BaseModel):
+    """统一错误响应体。"""
+
+    type: str = Field(description="错误类型，便于程序判断。")
+    message: str = Field(description="给人看的错误说明。")
+    details: list[dict] | None = Field(default=None, description="校验类错误的明细。")
+
+
+class ErrorResponse(BaseModel):
+    """``{"error": {...}}`` 外壳，所有非 2xx 响应都长这样。"""
+
+    error: ErrorBody = Field(description="错误详情。")
 
 
 class ContextStats(BaseModel):

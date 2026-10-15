@@ -16,6 +16,9 @@ import shutil
 
 import _pytest.pathlib as _pathlib
 import _pytest.tmpdir as _tmpdir
+import pytest
+
+from app.config import Settings
 
 # 会话开始时「扫描并保留最近 N 个基线临时目录」需要枚举目录；沙箱会拒绝，
 # 且真的删除也没有必要（目录本来就指到临时区）。
@@ -28,3 +31,34 @@ _tmpdir.rm_rf = lambda path, *args, **kwargs: shutil.rmtree(path, ignore_errors=
 
 # 会话结束时的死符号链接清理：本仓库不用符号链接，跳过目录枚举。
 _pathlib.cleanup_dead_symlinks = lambda root: None
+
+
+@pytest.fixture
+def test_settings() -> Settings:
+    """写死一份配置，让 HTTP 层测试完全离线（不读 .env、不发请求）。"""
+    return Settings(
+        openai_base_url="https://gw.example.com/v1",
+        openai_api_key="sk-test",
+        openai_model="fake-model",
+        context_token_budget=2000,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_process_singletons():
+    """每个测试前后清掉进程级单例。
+
+    ``get_session_store()`` 与 ``_default_chat_model()`` 都是 ``lru_cache``
+    单例；测试若不显式注入就会共用同一份历史，出现「上一个测试的对话跑到这个
+    测试里」的假失败。这里统一清掉，保证测试彼此独立。
+    """
+    from app.api import _default_chat_model
+    from app.memory import get_session_store
+
+    def clear() -> None:
+        get_session_store()._sessions.clear()  # noqa: SLF001 - 测试清理内部状态
+        _default_chat_model.cache_clear()
+
+    clear()
+    yield
+    clear()
