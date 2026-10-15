@@ -990,6 +990,14 @@ async def extract_request(text: str, model: BaseChatModel) -> AfterSalesRequest:
 
 此时 `result` 会是 `AfterSalesRequest` 实例，`isinstance` 分支通过。若 langchain 的 schema 传参方式与上面的 tool call 名字不匹配（例如它按 `args_schema` 取名），**先跑测试看实际报错再调**，不要凭猜改假模型 —— 这也是 `test_extract_raises_on_unparsable_model_output` 用来兜底的原因。
 
+> **执行期实测补充（Task 3）**：已读 langchain 源码确认 `with_structured_output` 的真实契约是
+> `self.bind_tools([schema], tool_choice="any") | PydanticToolsParser(tools=[schema], first_tool_only=True)`。
+> 两个后果落在本任务上：
+> 1. 假模型**必须**实现 `bind_tools`（基类默认实现会让 `with_structured_output` 直接抛 `NotImplementedError`）。
+> 2. 模型**没产出 tool call** 时，`PydanticToolsParser` 返回 `None` 而**不抛异常** —— 所以上面那个
+>    `isinstance(result, AfterSalesRequest)` 检查是**必需**的，它正是「模型不按 schema 输出」的唯一兜底；
+>    删掉它就会把 `None` 当成成功返回给调用方。
+
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `& $uv run python -m pytest tests/test_extract.py -v --color=no`
