@@ -1,0 +1,150 @@
+"""请求 / 响应 / 结构化输出的数据结构。
+
+本模块只有数据定义，不含任何业务逻辑；字段的 ``description`` 会进入
+JSON Schema 交给模型，因此它们是提取准确率的一部分，不能省略。
+"""
+
+from enum import Enum
+
+from pydantic import BaseModel, Field
+
+# --------------------------------------------------------------------------
+# 售后信息提取（结构化输出）
+# --------------------------------------------------------------------------
+
+
+class RequestType(str, Enum):
+    """用户诉求的类型。"""
+
+    REFUND = "refund"  # 退款
+    RETURN = "return"  # 退货
+    EXCHANGE = "exchange"  # 换货
+    LOGISTICS = "logistics"  # 物流（未发货 / 未送达 / 停滞）
+    INVOICE = "invoice"  # 发票
+    OTHER = "other"  # 其他或无法归类
+
+
+class ExpectedSolution(str, Enum):
+    """用户期望的解决方案。"""
+
+    REFUND = "refund"  # 退款
+    EXCHANGE = "exchange"  # 换货
+    RESHIP = "reshipping"  # 补发
+    REPAIR = "repair"  # 维修
+    COMPENSATION = "compensation"  # 赔偿
+    UNKNOWN = "unknown"  # 用户未表达或无法判断
+
+
+class AfterSalesRequest(BaseModel):
+    """从用户的售后描述里提取出来的固定字段。"""
+
+    order_no: str | None = Field(
+        default=None,
+        description=(
+            "订单号。只填用户原文中明确出现的订单号，原样保留（不要改写成别的格式）。"
+            "用户没有提到订单号时填 null，禁止推测或编造。"
+        ),
+    )
+    request_type: RequestType = Field(
+        description=(
+            "诉求类型。可选值："
+            "refund=退款，return=退货，exchange=换货，"
+            "logistics=物流问题（未发货/未送达/停滞），invoice=发票，"
+            "other=其他或无法归类。"
+        ),
+    )
+    expected_solution: ExpectedSolution = Field(
+        default=ExpectedSolution.UNKNOWN,
+        description=(
+            "用户期望的解决方案。可选值："
+            "refund=退款，exchange=换货，reshipping=补发，repair=维修，"
+            "compensation=赔偿，unknown=用户未表达或无法判断。"
+        ),
+    )
+    detail: str = Field(
+        description="用户问题的一句话摘要，保留关键事实（时间、商品、现象），不要加入用户没说过的信息。",
+    )
+
+
+# --------------------------------------------------------------------------
+# 对话接口
+# --------------------------------------------------------------------------
+
+
+class ChatRequest(BaseModel):
+    """对话请求。"""
+
+    session_id: str | None = Field(
+        default=None,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_-]+$",
+        description=(
+            "会话 ID。只允许字母、数字、下划线和连字符，最长 64 字符；"
+            "缺省时由服务端生成并在响应中回传。"
+        ),
+    )
+    message: str = Field(min_length=1, description="用户本轮消息。")
+    stream: bool = Field(default=True, description="true 走 SSE 流式，false 返回完整 JSON。")
+
+
+class SessionId(BaseModel):
+    """路径参数里的会话 ID，校验规则与 ``ChatRequest.session_id`` 保持一致。"""
+
+    session_id: str = Field(
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_-]+$",
+        description="会话 ID。",
+    )
+
+
+class ErrorBody(BaseModel):
+    """统一错误响应体。"""
+
+    type: str = Field(description="错误类型，便于程序判断。")
+    message: str = Field(description="给人看的错误说明。")
+    details: list[dict] | None = Field(default=None, description="校验类错误的明细。")
+
+
+class ErrorResponse(BaseModel):
+    """``{"error": {...}}`` 外壳，所有非 2xx 响应都长这样。"""
+
+    error: ErrorBody = Field(description="错误详情。")
+
+
+class ContextStats(BaseModel):
+    """本轮对话的上下文裁剪统计。"""
+
+    kept_messages: int = Field(default=0, description="保留在上下文里的历史消息条数。")
+    trimmed_messages: int = Field(default=0, description="因超出 token 预算被裁掉的历史消息条数。")
+    budget_tokens: int = Field(default=0, description="历史消息的 token 预算。")
+    used_tokens: int = Field(default=0, description="保留的历史消息实际占用的近似 token 数。")
+    system_prompt_tokens: int = Field(default=0, description="System Prompt 的近似 token 数（不计入预算）。")
+
+
+class ChatResponse(BaseModel):
+    """非流式对话响应。"""
+
+    session_id: str = Field(description="会话 ID。")
+    content: str = Field(description="模型完整回复。")
+    context: ContextStats = Field(default_factory=ContextStats, description="本轮上下文裁剪统计。")
+
+
+class SessionMessagesResponse(BaseModel):
+    """某会话已保存的历史消息。"""
+
+    session_id: str = Field(description="会话 ID。")
+    messages: list[dict[str, str]] = Field(
+        default_factory=list,
+        description="历史消息，每项形如 {\"role\": \"human\"|\"ai\", \"content\": \"...\"}。",
+    )
+
+
+# --------------------------------------------------------------------------
+# 结构化提取接口
+# --------------------------------------------------------------------------
+
+
+class ExtractRequest(BaseModel):
+    """售后描述提取请求。"""
+
+    text: str = Field(min_length=1, description="用户的售后描述原文。")

@@ -1,0 +1,35 @@
+[project]
+name = "mewhelp"
+version = "0.1.0"
+description = "MewHelp 电商智能客服"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.52.0",
+    "langchain>=1.0.0",
+    "langchain-openai>=1.0.0",
+    "pydantic>=2.13.0",
+    "pydantic-settings>=2.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "httpx>=0.28.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+# 沙箱注意：pytest 若在工作区内自建临时/缓存目录，进程退出后会被沙箱"去供给"
+# 成连列举/删除都被拒的状态（WinError 5），且连 ACL 诊断工具都判定为非权限问题。
+# 所以这里一律不在工作区内建：临时文件走沙箱自带的临时区，缓存直接关掉。
+addopts = "-p no:cacheprovider"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]

@@ -1,0 +1,56 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+.Python
+
+# ---- 虚拟环境 / uv ----
+.venv/
+venv/
+env/
+.uv/
+uv.lock.bak
+
+# ---- 环境变量（绝不入库）----
+.env
+.env.*
+!.env.example
+
+# ---- 测试与覆盖率 ----
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# ---- 日志与运行时数据 ----
+*.log
+logs/
+data/
+uploads/
+
+# ---- 编辑器 / 操作系统 ----
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 沙箱产物（全局 uv cache 无写权限，缓存必须留在工作区内）----
+.uv-cache/
+.venv-probe/
+
+# 沙箱会被「测试进程新建的目录」收回权限，导致这些目录删不掉；
+# 忽略它们以免污染 git 状态。
+pytest-cache-files-*/
+pytest-cache/
+pytest-tmp/
+

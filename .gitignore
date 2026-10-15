@@ -1,45 +1,32 @@
-# ---- Python ----
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-*.egg-info/
-.eggs/
-build/
-dist/
-.Python
+# 工作区根级别的忽略规则。
+#
+# 为什么需要这一份：项目代码与它的 .gitignore 都在 MemHelp-code/ 下，而
+# MemHelp-code/.gitignore 的规则只作用于该目录**内部**，管不到工作区根。
+# 工作区根的工具目录与沙箱产物由本文件负责排除。
+#
+# 代码相关的忽略规则（__pycache__、.env、pytest 缓存等）在 MemHelp-code/.gitignore。
 
-# ---- 虚拟环境 / uv ----
+# ---- 虚拟环境与缓存（留在工作区根，见 agent.md 第 3/4 节）----
 .venv/
+.uv-cache/
 venv/
 env/
-.uv/
-uv.lock.bak
 
-# ---- 环境变量（绝不入库）----
-.env
-.env.*
-!.env.example
-
-# ---- 测试与覆盖率 ----
-.pytest_cache/
-.coverage
-.coverage.*
-htmlcov/
-.tox/
-.mypy_cache/
-.ruff_cache/
-
-# ---- 日志与运行时数据 ----
-*.log
-logs/
-data/
-uploads/
-
-# ---- 编辑器 / 操作系统 ----
+# ---- 编辑器 ----
 .idea/
 .vscode/
 *.swp
 .DS_Store
 Thumbs.db
-desktop.ini
+
+# ---- 沙箱产物 ----
+# DSH 沙箱会把「测试进程新建的目录」在退出后收回权限，导致它们删不掉。
+# 名字来自 pytest 的原子写入；不忽略就会让 git status 反复报 Permission denied 告警。
+pytest-cache-files-*/
+.pytest_cache/
+pytest-tmp/
+pytest-cache/
+
+# ---- 根级 Python 工具产物 ----
+__pycache__/
+*.py[cod]
