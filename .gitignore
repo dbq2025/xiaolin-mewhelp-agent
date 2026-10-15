@@ -43,3 +43,9 @@ uploads/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# ---- 沙箱内 uv（全局 uv cache 无写权限，缓存必须留在工作区内）----
+.uv-cache/
+.venv-probe/
+pytest-cache-files-*/
+

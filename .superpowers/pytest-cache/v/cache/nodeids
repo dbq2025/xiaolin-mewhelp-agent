@@ -1,0 +1,4 @@
+[
+  "tests/test_smoke.py::test_fastapi_sse_available",
+  "tests/test_smoke.py::test_langchain_importable"
+]
