@@ -87,16 +87,41 @@ cd MemHelp-code; & $uv run python -m pytest -v --color=no
 
 退出码：`0` 达标 / `1` 未达标 / `2` 配置缺失或上游故障（会提示「先修 `.env`，不要改 Prompt」）。
 
-### 6. 接口一览
+### 6. 聊天页面
+
+起服务后浏览器打开 **http://127.0.0.1:8000/**（会自动跳到 `/chat/`）：
+
+```powershell
+& $uv run --directory MemHelp-code uvicorn app.main:app --port 8000
+# 然后浏览器访问 http://127.0.0.1:8000/
+```
+
+页面特性：
+
+- 消息气泡排布（客服在左、用户在右），进入即有欢迎语与三个示例问题可点
+- **逐字渲染**：`fetch` 读 SSE 流，`token` 事件的 `delta` 逐个追加；等待时显示三点动画
+- **多轮对话**：`session_id` 存在 `sessionStorage`，刷新页面继续同一会话；「清空」开新会话
+- 顶栏状态灯反映 `/healthz`（绿色=已就绪并显示模型名，红色=配置缺失）
+- 勾选「统计」可在每轮回复下显示上下文裁剪情况（保留/裁掉几条）
+- Enter 发送、Shift+Enter 换行；移动端可用；用户往上翻时不会被强行拉回底部
+
+**技术说明**：这里没用 `EventSource` —— 后端是 `POST` + SSE，而 `EventSource` 只支持
+GET 且不能带请求体。所以用 `fetch` 拿 `ReadableStream` 自己按 SSE 规范切帧
+（`event:` / `data:` / 空行分隔）。前端只有三个静态文件（`web/index.html`、
+`style.css`、`app.js`），**无构建步骤、无 npm 依赖**，由 FastAPI 的 `StaticFiles` 直接托管。
+
+### 7. 接口一览
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
+| GET | `/` | 跳转到 `/chat/` |
+| GET | `/chat/` | 聊天页面（静态） |
 | POST | `/api/chat/completions` | 对话，`stream=true` 走 SSE 逐 token，`false` 返回完整 JSON |
 | POST | `/api/chat/sessions/{session_id}/messages` | 查看该会话已存历史 |
 | POST | `/api/extract` | 售后描述 → 结构化 JSON |
 | GET | `/healthz` | 健康检查（不回显密钥） |
 
-### 7. 演示命令（三条验收标准）
+### 8. 演示命令（三条验收标准）
 
 > ⚠️ **沙箱提示**：在 DSH 沙箱里，宿主 shell 的 HTTPS 凭证初始化会被拒绝
 > （`schannel: SEC_E_NO_CREDENTIALS`），所以**由我代为执行**的 `curl` 打到需要
@@ -126,7 +151,7 @@ curl.exe -X POST http://127.0.0.1:8000/api/extract -H "Content-Type: application
 curl.exe -X POST http://127.0.0.1:8000/api/extract -H "Content-Type: application/json" -d "{\"text\":\"我的快递一直没动\"}"
 ```
 
-### 8. 开发留痕
+### 9. 开发留痕
 
 - 设计文档：`docs/superpowers/specs/2026-02-14-ch01-pure-chat-design.md`
 - 实施计划：`docs/superpowers/plans/2026-02-14-ch01-pure-chat-plan.md`

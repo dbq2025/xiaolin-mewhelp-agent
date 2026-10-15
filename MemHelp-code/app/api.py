@@ -25,12 +25,13 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 
 from app.chat import astream_chat, complete_chat
-from app.config import Settings, get_settings
+from app.config import PROJECT_ROOT, Settings, get_settings
 from app.errors import (
     UpstreamFault,
     classify_upstream_error_type,
@@ -393,5 +394,17 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _as_upstream_error(exc) from exc
         return JSONResponse(status_code=200, content=result.model_dump())
+
+    # -- 聊天页面（静态资源，无构建步骤）----------------------------------
+
+    web_dir = PROJECT_ROOT / "web"
+    if web_dir.is_dir():
+        # html=True 让 /chat/ 直接返回 index.html
+        app.mount("/chat", StaticFiles(directory=web_dir, html=True), name="chat")
+
+        @app.get("/", include_in_schema=False)
+        async def root_redirect() -> RedirectResponse:
+            """根路径直接跳聊天页，省得记地址。"""
+            return RedirectResponse(url="/chat/")
 
     return app

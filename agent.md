@@ -11,6 +11,7 @@
 ```
 MemHelp-code/
 ├─ app/            # 应用代码
+├─ web/            # 聊天页面（静态资源，无构建步骤、无 npm 依赖，由 StaticFiles 托管）
 ├─ tests/          # 测试
 ├─ evals/          # 评估集与脚本
 ├─ docs/           # 设计文档、实施计划（docs/superpowers/**）
