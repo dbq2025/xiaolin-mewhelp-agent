@@ -44,11 +44,13 @@ uploads/
 Thumbs.db
 desktop.ini
 
-# ---- 沙箱内 uv（全局 uv cache 无写权限，缓存必须留在工作区内）----
+# ---- 沙箱产物（全局 uv cache 无写权限，缓存必须留在工作区内）----
 .uv-cache/
 .venv-probe/
-pytest-cache-files-*/
 
+# 沙箱会被「测试进程新建的目录」收回权限，导致这些目录删不掉；
+# 忽略它们以免污染 git 状态。
+pytest-cache-files-*/
 pytest-cache/
 pytest-tmp/
 
