@@ -44,6 +44,38 @@ def test_settings() -> Settings:
     )
 
 
+@pytest.fixture
+def sqlite_session():
+    """一个建好四张表的 SQLite 内存库会话。
+
+    **为什么用 ``StaticPool``**：仓库层把同步 DB 调用交给工作线程跑
+    （``anyio.to_thread.run_sync``，否则会阻塞事件循环，见 repositories.py）。
+    而 SQLite 的 ``:memory:`` 每个连接都是一份**独立**的空库 —— 换线程就换连接，
+    于是仓库层看到的是「表不存在」。``StaticPool`` 让所有线程复用同一个连接，
+    测试与生产的行为差异就被限制在这一处连接池配置上。
+
+    **ENUM 的处理**：模型用原生 ENUM（MySQL 语义）。SQLite 不支持原生 ENUM，
+    SQLAlchemy 自动退化成 ``VARCHAR + CHECK`` 约束 —— 语义更强（非法值同样被拒），
+    所以这一层测出来的约束行为与 MySQL 一致。
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+    from sqlalchemy.pool import StaticPool
+
+    import app.db.models  # noqa: F401 - 必须先 import 才会注册进 metadata
+    from app.db.base import Base
+
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        yield session
+    engine.dispose()
+
+
 @pytest.fixture(autouse=True)
 def _isolate_process_singletons():
     """每个测试前后清掉进程级单例。
@@ -84,6 +116,14 @@ def _isolate_real_env_file(monkeypatch):
         "OPENAI_MODEL",
         "CONTEXT_TOKEN_BUDGET",
         "REQUEST_TIMEOUT",
+        # ch02 新增：不清掉的话，宿主机设了 MYSQL_* 就会让套件结果依赖那台机器
+        "MYSQL_HOST",
+        "MYSQL_PORT",
+        "MYSQL_USER",
+        "MYSQL_PASSWORD",
+        "MYSQL_DATABASE",
+        "TOOL_TIMEOUT_SECONDS",
+        "TOOL_MAX_RETRIES",
     ):
         monkeypatch.delenv(name, raising=False)
 

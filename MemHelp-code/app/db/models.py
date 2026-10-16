@@ -32,6 +32,7 @@ from sqlalchemy import (
     Enum as SAEnum,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     func,
@@ -39,6 +40,15 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
+
+#: 自增主键的类型。
+#:
+#: MySQL 上用 ``BIGINT``（与 DDL 一致）；SQLite 上**必须**退化成 ``INTEGER`` ——
+#: SQLite 只把 ``INTEGER PRIMARY KEY`` 当作 rowid 别名来自增，``BIGINT PRIMARY KEY``
+#: 不会自增，插入时报 ``NOT NULL constraint failed: conversations.id``。
+#: 用 ``with_variant`` 表达这个方言差异，而不是让测试去迁就生产类型
+#: （那样测的就不是真东西了）。
+_AUTOINC_PK = BigInteger().with_variant(Integer, "sqlite")
 
 #: 会话处理状态。取值与 DDL 的 ENUM 字面量逐字相同。
 CONVERSATION_STATUSES: tuple[str, ...] = ("进行中", "已转人工", "已结束")
@@ -58,7 +68,7 @@ class Conversation(Base):
 
     __tablename__ = "conversations"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_AUTOINC_PK, primary_key=True, autoincrement=True)
     #: 对外会话标识。聊天页的 sessionStorage 与 ``/api/chat/sessions/{id}/messages``
     #: 用的都是它 —— 所以它必须是唯一键，否则同一字符串会对应两行会话。
     session_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
@@ -85,7 +95,7 @@ class Message(Base):
 
     __tablename__ = "messages"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_AUTOINC_PK, primary_key=True, autoincrement=True)
     conversation_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("conversations.id"), nullable=False
     )
@@ -115,7 +125,7 @@ class Faq(Base):
 
     __tablename__ = "faq"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(_AUTOINC_PK, primary_key=True, autoincrement=True)
     question: Mapped[str] = mapped_column(String(512), nullable=False)
     answer: Mapped[str] = mapped_column(Text, nullable=False)
     category: Mapped[str] = mapped_column(String(64), nullable=False)

@@ -664,6 +664,7 @@ name = "mewhelp"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "anyio" },
     { name = "fastapi" },
     { name = "langchain" },
     { name = "langchain-openai" },
@@ -683,6 +684,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=4.0" },
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "langchain", specifier = ">=1.0.0" },
     { name = "langchain-openai", specifier = ">=1.0.0" },

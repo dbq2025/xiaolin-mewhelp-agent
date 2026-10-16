@@ -12,6 +12,10 @@ dependencies = [
     "pydantic-settings>=2.0.0",
     "sqlalchemy>=2.0",
     "pymysql>=1.1",
+    # 仓库层用 anyio.to_thread.run_sync 把同步的 PyMySQL 调用送进工作线程。
+    # 它本是 fastapi 的传递依赖，但**我们直接 import 了它**，所以显式声明 ——
+    # 靠传递依赖会在上游改依赖树时静默断掉。
+    "anyio>=4.0",
 ]
 
 [dependency-groups]
