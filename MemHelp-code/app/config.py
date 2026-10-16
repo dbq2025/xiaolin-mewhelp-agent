@@ -10,6 +10,7 @@
 
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import quote_plus
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -48,7 +49,55 @@ class Settings(BaseSettings):
     )
     request_timeout: float = Field(default=60.0, gt=0, description="单次上游请求超时（秒）。")
 
-    @field_validator("openai_base_url", "openai_api_key", "openai_model", mode="before")
+    # -- ch02：MySQL ------------------------------------------------------
+    #
+    # 默认值指向 docker-compose.yml 里那套开发库，让「本地起得来」成为默认行为；
+    # 生产部署必须显式覆盖（默认口令只配用于本地演示）。
+    mysql_host: str = Field(default="127.0.0.1", min_length=1, description="MySQL 主机。")
+    mysql_port: int = Field(default=3306, ge=1, le=65535, description="MySQL 端口。")
+    mysql_user: str = Field(default="mewhelp", min_length=1, description="MySQL 用户名。")
+    mysql_password: str = Field(default="mewhelp", description="MySQL 密码。")
+    mysql_database: str = Field(default="mewhelp", min_length=1, description="MySQL 库名。")
+
+    # -- ch02：工具基础设施 ------------------------------------------------
+    tool_timeout_seconds: float = Field(
+        default=3.0, gt=0, description="单次工具执行超时（秒）。"
+    )
+    tool_max_retries: int = Field(
+        default=1,
+        ge=0,
+        le=5,
+        description="仅对瞬时错误的重试次数（不含首次尝试）。业务性失败与参数错误不重试。",
+    )
+
+    def database_url(self) -> str:
+        """拼出 SQLAlchemy 用的 MySQL 连接串。
+
+        这是全项目**唯一**生成连接串的地方（配置单一来源）。
+
+        ``quote_plus`` 转义用户名与密码：密码里出现 ``@`` ``:`` ``/`` 时不转义会让
+        URL 被解析到错误的 host —— 表现为「连不上数据库」，根因却在一个密码字符上，
+        极难查。``charset=utf8mb4`` 必须带上，否则驱动按 latin1 收发，中文变问号。
+
+        返回的连接串内含明文密码，**不得**写进日志或响应体。
+        """
+        user = quote_plus(self.mysql_user)
+        password = quote_plus(self.mysql_password)
+        return (
+            f"mysql+pymysql://{user}:{password}"
+            f"@{self.mysql_host}:{self.mysql_port}/{self.mysql_database}?charset=utf8mb4"
+        )
+
+    @field_validator(
+        "openai_base_url",
+        "openai_api_key",
+        "openai_model",
+        "mysql_host",
+        "mysql_user",
+        "mysql_password",
+        "mysql_database",
+        mode="before",
+    )
     @classmethod
     def _strip_strings(cls, value: object) -> object:
         """去掉误粘贴进来的首尾空白，避免密钥带空格这种难查的 401。"""

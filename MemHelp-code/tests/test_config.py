@@ -145,3 +145,65 @@ def test_settings_require_all_three_openai_fields(monkeypatch):
     monkeypatch.delenv("OPENAI_MODEL", raising=False)
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
+
+
+# ---------------------------------------------------------------------------
+# ch02：MySQL 连接与工具基础设施
+# ---------------------------------------------------------------------------
+
+
+def test_database_url_is_pymysql_with_utf8mb4():
+    """连接串形状必须逐字符确定 —— 它是全项目唯一生成 DB URL 的地方。"""
+    s = Settings(
+        openai_base_url="https://x/v1", openai_api_key="k", openai_model="m",
+        mysql_host="db.internal", mysql_port=3307, mysql_user="u",
+        mysql_password="p", mysql_database="mewhelp",
+    )
+    assert s.database_url() == (
+        "mysql+pymysql://u:p@db.internal:3307/mewhelp?charset=utf8mb4"
+    )
+
+
+def test_database_url_escapes_special_chars_in_password():
+    """密码里有 @ / : / / 时必须 percent-encode。
+
+    不转义的话 ``p@ss`` 会让 URL 解析把 ``@`` 之后当成 host，连接打到错误的机器上 ——
+    这种故障的表现是「连不上数据库」，而根因在密码字符，极难查。
+    """
+    s = Settings(
+        openai_base_url="https://x/v1", openai_api_key="k", openai_model="m",
+        mysql_password="p@ss:w/rd",
+    )
+    assert "p%40ss%3Aw%2Frd" in s.database_url()
+
+
+def test_tool_infra_defaults():
+    s = Settings(openai_base_url="https://x/v1", openai_api_key="k", openai_model="m")
+    assert s.tool_timeout_seconds == 3.0
+    assert s.tool_max_retries == 1
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"mysql_port": 0},
+        {"mysql_port": 70000},
+        {"tool_timeout_seconds": 0},
+        {"tool_timeout_seconds": -1},
+        {"tool_max_retries": -1},
+        {"tool_max_retries": 6},
+    ],
+    ids=["port-zero", "port-too-big", "timeout-zero", "timeout-negative",
+         "retries-negative", "retries-too-many"],
+)
+def test_ch02_settings_reject_invalid_values(overrides):
+    """超时 0 会让每次工具调用立刻超时；重试次数上不封顶会让一次故障拖垮请求。
+    这些都必须在配置层挡住，而不是等线上表现成「工具永远失败」。"""
+    base = {
+        "openai_base_url": "https://gw.example.com/v1",
+        "openai_api_key": "sk-test",
+        "openai_model": "m",
+    }
+    base.update(overrides)
+    with pytest.raises(ValidationError):
+        Settings(**base)
