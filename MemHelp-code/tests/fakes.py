@@ -41,6 +41,21 @@ class Recorder:
     messages: list[BaseMessage] = field(default_factory=list)
 
 
+@dataclass
+class TurnState:
+    """跨 `bind_tools` 副本共享的可变状态。
+
+    同上一个道理，而且这里更隐蔽：`bind_tools` 返回的是 `model_copy`，
+    于是任何**在副本上**改的标志位（比如「第一次调用已经给过 tool_calls 了」）
+    原对象都看不到，第二次 `model.bind_tools(...)` 又会做出一个全新的副本，
+    标志位回到初始值 —— 表现为「第 1 次调用的 tool_calls 被重复返回」。
+
+    用 dataclass 承载这些标志，副本与原对象就共享同一份状态。
+    """
+
+    tool_calls_fired: bool = False
+
+
 class FakeChatModel(BaseChatModel):
     """一个够用就好的假 chat model。"""
 
@@ -55,8 +70,34 @@ class FakeChatModel(BaseChatModel):
     structured_payload: dict[str, Any] | None = None
     fail_after: int | None = None
     recorder: Recorder | None = None
+    yield_empty_chunk_when_no_chunks: bool = False
+    """``chunks`` 为空时是否仍吐**一个空内容块**。
+
+    真实上游在流结束时经常发一个空 delta。默认不吐（``chunks=[]`` 就是「没有块」），
+    但 langchain 的 ``astream`` 在「一个块都没有」时会直接抛
+    ``ValueError: No generation chunks were returned`` —— 于是无法表达
+    「上游流完了，但一个非空文本都没有」这个**编排必须兜底**的场景。
+    打开它就得到一个空块，编排会正确走 ``fallback_answer``。
+    """
     # 由 bind_tools 写入：被绑定的 schema（with_structured_output 会绑一个）
     bound_schemas: list[Any] = Field(default_factory=list)
+
+    # -- ch02：单轮工具调用的分段行为 -------------------------------------
+    tool_calls_then_stream: list[dict[str, Any]] = Field(default_factory=list)
+    """非空时：**第一次**模型调用返回带这些 tool_calls 的 AIMessage（content 为空），
+    之后的调用走 ``chunks`` 正常流式。
+
+    这就是单轮编排要面对的真实形态：第一次调用只为拿工具选择，
+    第二次调用（回灌工具结果之后）才产文本。
+    """
+    turn_state: TurnState = Field(default_factory=TurnState)
+    """跨副本共享的调用状态（见 ``TurnState`` 的说明）。"""
+    bind_tools_calls: Recorder | None = None
+    """记录每次 ``bind_tools`` 收到的工具列表。
+
+    同样是引用类型：编排调用 ``model.bind_tools(...)`` 得到的是副本，
+    列表若挂在副本上，原对象永远看不到 —— 断言会莫名其妙地「一次都没绑」。
+    """
 
     @property
     def _llm_type(self) -> str:
@@ -66,7 +107,7 @@ class FakeChatModel(BaseChatModel):
     def _identifying_params(self) -> dict[str, Any]:
         return {"chunks": len(self.chunks), "reply": self.reply}
 
-    # -- 工具绑定（with_structured_output 的前置条件）----------------------
+    # -- 工具绑定（with_structured_output 与 ch02 编排的前置条件）----------
 
     def bind_tools(self, tools: Sequence[Any], **kwargs: Any) -> "FakeChatModel":
         """记录被绑定的 schema，返回一个带该记录的副本。
@@ -74,7 +115,12 @@ class FakeChatModel(BaseChatModel):
         langchain 的 ``with_structured_output`` 先调本方法，再用
         ``PydanticToolsParser`` 解析产出的 tool call。这里只记录 schema 名，
         真正的解析交给 langchain。
+
+        ch02 的单轮编排也用它 —— 并把工具列表记进 ``bind_tools_calls``，
+        以便断言「确实是绑了工具再问的模型」而不是裸调用。
         """
+        if self.bind_tools_calls is not None:
+            self.bind_tools_calls.messages.extend(tools)
         return self.model_copy(update={"bound_schemas": list(tools)})
 
     # -- 内部工具 ---------------------------------------------------------
@@ -104,9 +150,23 @@ class FakeChatModel(BaseChatModel):
         )
 
     def _reply_message(self) -> AIMessage:
+        # ch02：第一次调用给工具选择，之后才产文本。
+        if self.tool_calls_then_stream and not self.turn_state.tool_calls_fired:
+            self.turn_state.tool_calls_fired = True
+            return AIMessage(content="", tool_calls=list(self.tool_calls_then_stream))
+
+        # 显式给了 chunks 就以它为准。必须**排在结构化判定之前**：
+        # ch02 的编排会先 bind_tools（于是 bound_schemas 非空），但编排走的是
+        # 「chunks 就是回复文本」这条路，不是 with_structured_output 那条。
+        # 顺序反了会让非流式调用返回无意义的默认 ``reply="ok"``，
+        # 掩盖掉「文本到底有没有被取回」。
+        if self.chunks:
+            return AIMessage(content="".join(str(c) for c in self.chunks))
+
         wants_structured = bool(self.bound_schemas)
         if wants_structured and self.structured_payload is not None:
             return self._structured_message()
+
         # 没有 payload（或没绑 schema）时给一条普通消息：
         # 若调用方期望结构化输出，PydanticToolsParser 会真实地解析失败。
         return AIMessage(content=self.reply)
@@ -125,7 +185,12 @@ class FakeChatModel(BaseChatModel):
 
     def _stream_items(self) -> list[Any]:
         """要逐个作为 ``content`` 吐出去的块（``raw_chunks`` 优先）。"""
-        return list(self.raw_chunks) if self.raw_chunks else list(self.chunks)
+        if self.raw_chunks:
+            return list(self.raw_chunks)
+        if self.chunks:
+            return list(self.chunks)
+        # 没有块但要求「有流」时吐一个空块，用来模拟「流完了但没文本」。
+        return [""] if self.yield_empty_chunk_when_no_chunks else []
 
     # -- 流式路径 ---------------------------------------------------------
 
