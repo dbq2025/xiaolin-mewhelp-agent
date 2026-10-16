@@ -1,0 +1,39 @@
+# MewHelp ch02 · MySQL 8 开发库
+#
+# 为什么这个文件在 MemHelp-code/ 而不是仓库根：
+#   DDL/种子数据在仓库根的 sql/，而 agent.md 规定代码与配套文件都在 MemHelp-code/ 下。
+#   单个 compose 文件里用 ../sql 指到根、用 . 指到代码目录，是唯一不别扭的摆法。
+#
+# 首次 `up` 时 MySQL 官方镜像会**自动执行** /docker-entrypoint-initdb.d 下的
+# *.sql（按文件名字典序）。所以 ch02-ddl.sql（建表）必须排在 ch02-seed.sql（灌数）前。
+#
+# 改了 sql/ 里的脚本想让它重跑，必须 `down -v` 删掉数据卷再 up ——
+# initdb 脚本只在数据目录为空时执行。演示脚本 scripts/demo-ch02.ps1 -Reset 就是干这个的。
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: mewhelp-mysql
+    # 服务端字符集与 DDL 的 utf8mb4 对齐；否则中文 ENUM 与中文数据会被 latin1 二次编码
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpw
+      MYSQL_DATABASE: mewhelp
+      MYSQL_USER: mewhelp
+      MYSQL_PASSWORD: mewhelp
+    ports:
+      - "3306:3306"
+    volumes:
+      # 只读挂载：容器不该有回写我们源文件的能力
+      - ../sql:/docker-entrypoint-initdb.d:ro
+      - mewhelp-mysql-data:/var/lib/mysql
+    healthcheck:
+      # --wait 依赖这个探针；没它就只是"容器起来了"而非"数据库能连了"
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-prootpw"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+volumes:
+  mewhelp-mysql-data:

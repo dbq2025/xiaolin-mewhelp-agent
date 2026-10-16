@@ -10,6 +10,8 @@ dependencies = [
     "langchain-openai>=1.0.0",
     "pydantic>=2.13.0",
     "pydantic-settings>=2.0.0",
+    "sqlalchemy>=2.0",
+    "pymysql>=1.1",
 ]
 
 [dependency-groups]
