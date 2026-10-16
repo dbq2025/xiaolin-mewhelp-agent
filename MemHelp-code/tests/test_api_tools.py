@@ -332,3 +332,53 @@ def test_healthz_without_injected_ping_still_answers(test_settings, fake_reposit
     resp = client.get("/healthz")
     assert resp.status_code in (200, 503)
     assert "database" in resp.json()
+
+
+# ---------------------------------------------------------------------------
+# 未注入仓库时的 Session 生命周期
+# ---------------------------------------------------------------------------
+
+
+def test_real_dependency_path_closes_its_session(monkeypatch, test_settings):
+    """走**真实** ``get_repositories`` 时，请求结束后 Session 必须被关闭。
+
+    **为什么必须有这条**：``create_app`` 不注入仓库时，``get_repositories`` 每请求
+    新建一个 ``Session``。若从不关闭它，连接要等这个 Session 被 GC 才回到池里 ——
+    在持续流量下表现为「MySQL 连接数缓慢涨到上限」，排查起来很痛苦
+    （看起来像连接池配置问题，实际是生命周期问题）。
+
+    **为什么之前没测出来**：所有 HTTP 用例都**注入**了仓库（``conftest`` 的包装器
+    默认注入 SQLite），于是真实那一条路径从未被跑到。这里用一个假的
+    ``session_factory`` 把它跑到，并断言 ``close()`` 被调用。
+    """
+    from app import api as api_module
+
+    closed: list[bool] = []
+
+    class FakeSession:
+        def close(self):
+            closed.append(True)
+
+    class FakeFactory:
+        def __call__(self):
+            return FakeSession()
+
+    monkeypatch.setattr(api_module, "session_factory", lambda _engine: FakeFactory())
+    monkeypatch.setattr(api_module, "create_engine_from", lambda _settings: object())
+
+    from app import main as app_module
+
+    app = app_module.create_app(model=FakeChatModel(chunks=["好"]), settings=test_settings)
+    # 显式绕过 conftest 的默认注入：这里要测的正是「没注入」那条路
+    app.state.repositories = None
+
+    with TestClient(app) as client:
+        client.post(
+            "/api/chat/completions",
+            json={"session_id": "s1", "message": "在吗"},
+        )
+
+    assert closed, (
+        "请求结束后 Session 没有被 close() —— 连接要等 GC 才回池，"
+        "持续流量下会把 MySQL 连接数顶到上限"
+    )

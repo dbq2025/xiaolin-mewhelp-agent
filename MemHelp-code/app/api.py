@@ -142,25 +142,36 @@ def get_store(request: Request) -> InMemorySessionStore:
     return store if store is not None else get_session_store()
 
 
-def get_repositories(request: Request) -> Repositories:
-    """取当次请求的数据仓库。
+async def get_repositories(request: Request):
+    """取当次请求的数据仓库。**异步生成器依赖**，请求结束后关闭 Session。
 
-    两段式：``app.state.repositories`` 有就直接用（测试注入）；
+    两段式：``app.state.repositories`` 有就直接用（测试注入，不关它 —— 那是调用方的）；
     否则按 ``app.state.settings`` 建引擎（**引擎缓存**），再为本次请求新建一个
-    ``Session``。
+    ``Session``，并在 ``finally`` 里关掉。
+
+    **为什么必须是生成器而不是普通函数**：普通函数每请求新建一个 ``Session``
+    却没人关它，连接要等 GC 才回到池里 —— 持续流量下表现为「MySQL 连接数缓慢涨到
+    上限」，而症状看起来像连接池配置问题，很难归因。
+    （这一条是自查发现的：所有 HTTP 用例都注入了仓库，于是真实那条路径从未被跑到；
+    ``tests/test_api_tools.py::test_real_dependency_path_closes_its_session`` 现在钉住它。）
 
     **为什么缓存引擎而不是缓存仓库/Session**：``create_engine`` 建连接池，
-    每次新建等于把连接管理交给 GC —— 生产里表现为「MySQL 连接数缓慢涨到上限」。
-    但 ``Session`` **必须每请求一个**：它不是线程安全的，跨请求共享会让
-    并发请求互相写进对方的会话（表现为间歇性的「聊天记录串台」）。
-    仓库只是 Session 的薄包装，每请求新建不花什么钱。
+    每次新建等于把连接管理交给 GC。但 ``Session`` **必须每请求一个**：
+    它不是线程安全的，跨请求共享会让并发请求互相写进对方的会话
+    （表现为间歇性的「聊天记录串台」）。仓库只是 Session 的薄包装。
+
+    **为什么生成器依赖不会在流式响应中途被关闭**：FastAPI 在**响应发送完毕之后**
+    才执行 yield 之后的清理，所以 SSE 流期间 Session 一直可用。
+    这一点由 ``tests/test_api_tools.py`` 的流式用例实际跑到（它们会落库）。
 
     配置缺失（``.env`` 没配或非法）转成规范的 ``configuration_error``（503），
     而不是把 pydantic 的报错裸抛到 ASGI 层。
     """
     injected = getattr(request.app.state, "repositories", None)
     if injected is not None:
-        return injected
+        # 注入的仓库归调用方管（测试夹具），这里不关它
+        yield injected
+        return
 
     factory = getattr(request.app.state, "_session_factory", None)
     if factory is None:
@@ -181,7 +192,11 @@ def get_repositories(request: Request) -> Repositories:
             ) from exc
         request.app.state._session_factory = factory  # noqa: SLF001 - 进程级共享
 
-    return Repositories.from_session(factory())
+    session = factory()
+    try:
+        yield Repositories.from_session(session)
+    finally:
+        session.close()
 
 
 async def _ping_database(request: Request) -> bool:
