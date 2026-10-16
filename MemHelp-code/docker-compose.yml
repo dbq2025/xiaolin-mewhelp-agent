@@ -1,5 +1,17 @@
 # MewHelp ch02 · MySQL 8 开发库
 #
+# ⚠️ **本机实际没有用它。** 本机复用的是**已存在**的 `mewhelp-mysql` 容器
+#    （mysql:8，宿主 3306，`root`/`root`，库 `mewhelp`），所以 `.env` 指向 3306。
+#    那份库是别的章节建好的，`conversations` 里没有 `session_id`，
+#    必须先跑一次幂等迁移：`uv run --directory MemHelp-code python scripts/migrate_existing.py`。
+#
+#    本文件提供的是**另一条路**：起一个干净的、只属于本章的库。
+#    用它就把 .env 改成 MYSQL_PORT=3307 / MYSQL_USER=mewhelp / MYSQL_PASSWORD=mewhelp。
+#
+#    两条路并存是刻意的：既有库是现实约束，干净库是可复现的演示环境。
+#    3270/3307 的端口差异让「我连的到底是哪个库」没有歧义 ——
+#    两个库同名同表，混起来会表现为「表不存在」这种很难归因的症状。
+#
 # 为什么这个文件在 MemHelp-code/ 而不是仓库根：
 #   DDL/种子数据在仓库根的 sql/，而 agent.md 规定代码与配套文件都在 MemHelp-code/ 下。
 #   单个 compose 文件里用 ../sql 指到根、用 . 指到代码目录，是唯一不别扭的摆法。
@@ -8,12 +20,14 @@
 # *.sql（按文件名字典序）。所以 ch02-ddl.sql（建表）必须排在 ch02-seed.sql（灌数）前。
 #
 # 改了 sql/ 里的脚本想让它重跑，必须 `down -v` 删掉数据卷再 up ——
-# initdb 脚本只在数据目录为空时执行。演示脚本 scripts/demo-ch02.ps1 -Reset 就是干这个的。
+# initdb 脚本只在数据目录为空时执行。对**既有库**改结构请追加迁移脚本，不要改 DDL。
 
 services:
   mysql:
     image: mysql:8.4
-    container_name: mewhelp-mysql
+    # 容器名带项目前缀：机器上可能已经有一个手工起的同名容器
+    # （实测遇到过 name 冲突，导致 compose 无法建容器）。
+    container_name: mewhelp-ch02-mysql
     # 服务端字符集与 DDL 的 utf8mb4 对齐；否则中文 ENUM 与中文数据会被 latin1 二次编码
     command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
     environment:
@@ -21,8 +35,11 @@ services:
       MYSQL_DATABASE: mewhelp
       MYSQL_USER: mewhelp
       MYSQL_PASSWORD: mewhelp
+    # 宿主端口刻意用 3307：默认的 3306 可能被别处的 MySQL 占着，
+    # 那时 compose 能起来但应用连到的是**另一个库**，症状是「表不存在」。
+    # 3307 让这条链路的归属没有歧义。
     ports:
-      - "3306:3306"
+      - "3307:3306"
     volumes:
       # 只读挂载：容器不该有回写我们源文件的能力
       - ../sql:/docker-entrypoint-initdb.d:ro
