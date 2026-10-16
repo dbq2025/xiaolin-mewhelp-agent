@@ -1,0 +1,14 @@
+{"id":"acc1","message":"订单 1001 的物流到哪了","expect_tools":["query_logistics","query_order"],"expect_min_tool_calls":1,"note":"验收1：必须选中物流或订单工具。允许 query_order 兜底，但 query_logistics 是首选。"}
+{"id":"acc1b","message":"订单 1001 的快递怎么一直不动","expect_tools":["query_logistics","query_order","query_faq"],"expect_min_tool_calls":1,"note":"验收1的换说法（**给了订单号**）：期望调物流工具。首版用例没给订单号却要求必调，与行为约束 7「用户连订单号都没给就问快递到哪了，先问订单号，不要猜一个去查」直接冲突 —— 那是用例不现实，不是模型选错。"}
+{"id":"acc2","message":"退货政策是什么","expect_tools":["query_faq"],"expect_min_tool_calls":1,"note":"验收2：规则类问题必须查 FAQ。"}
+{"id":"acc2b","message":"退款多久能到账","expect_tools":["query_faq"],"expect_min_tool_calls":1,"note":"验收2的换说法：仍应走 query_faq。"}
+{"id":"acc3","message":"邮费是多少","expect_tools":["query_faq"],"expect_min_tool_calls":1,"note":"验收3：工具选择层必须选 query_faq。**不在此断言用户可见结果** —— 实测模型会把「邮费」归一化成「运费」从而命中，与 spec 原先预测不同（用户已确认留待后续章节修）。数据层基线由 tests/test_db_mysql.py 的 faq_search('邮费')==[] 硬钉。"}
+{"id":"order1","message":"订单 1001 付款了吗","expect_tools":["query_order"],"expect_min_tool_calls":1,"note":"订单状态类：应走 query_order。"}
+{"id":"product1","message":"商品 P2001 还有货吗","expect_tools":["query_product","query_order"],"expect_min_tool_calls":1,"note":"商品库存类：应走 query_product。"}
+{"id":"ticket1","message":"订单 1001 收到的杯子碎了，帮我建个工单，我要补发","expect_tools":["create_ticket"],"expect_min_tool_calls":1,"note":"三要素齐全（订单号+问题+期望方案）且明确要求建工单：应调 create_ticket。首版用例只给「帮我建个工单，杯子碎了」，模型先问订单号反而是对的（行为约束 7），是用例不现实。"}
+{"id":"ticket2","message":"订单 1001 我要投诉，客服态度太差了，帮我提交投诉工单","expect_tools":["create_ticket"],"expect_min_tool_calls":1,"note":"明确要求提交投诉工单且给了订单号：应调 create_ticket。"}
+{"id":"neg1","message":"你好呀","expect_tools":[],"expect_min_tool_calls":0,"note":"寒暄：不该调任何工具。"}
+{"id":"neg2","message":"今天天气怎么样","expect_tools":[],"expect_min_tool_calls":0,"note":"与客服业务无关：不该调工具，也不该编造订单信息。"}
+{"id":"neg3","message":"你是谁","expect_tools":[],"expect_min_tool_calls":0,"note":"自我介绍：不该调工具。"}
+{"id":"noorder","message":"我的东西还没到","expect_tools":["query_faq","query_logistics","query_order","create_ticket"],"expect_min_tool_calls":0,"note":"没给订单号：可以问订单号、可以查物流规则、也可以直接建工单。**不强制必须调用**（min=0）—— 先问订单号是行为约束 7 明确允许的。关键要求是：不许编造具体物流节点。"}
+{"id":"gather","message":"我要退款","expect_tools":["query_faq","query_order","create_ticket"],"expect_min_tool_calls":0,"note":"三要素全缺：先问清订单号与原因是对的行为，不该猜一个订单号去查。这里只要求工具选择落在允许集合内。"}

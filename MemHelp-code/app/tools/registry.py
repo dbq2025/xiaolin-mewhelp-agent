@@ -111,8 +111,16 @@ def _make_tools(repositories: Repositories) -> list[BaseTool]:
     async def create_ticket(description: str, ticket_type: str, conversation_id: str) -> str:
         """创建人工工单，转交人工客服跟进。
 
-        用于：用户明确要求人工处理；或问题需要人工介入（赔付、投诉、
-        反复沟通未解决）。天气、闲聊、能直接答的规则问题**不要**建工单。
+        **用户明确要求「建工单 / 提交投诉 / 转人工 / 申请售后」时，直接调本工具。**
+        那是要**执行的动作**，不要先去查订单状态 —— 用户没有问订单状态，
+        先查订单会导致动作没被执行，用户以为你已经受理了。
+
+        已有订单号就写进 description，让接手的人不用回头问。
+
+        也用于：问题需要人工介入（赔付、质量索赔、反复沟通未解决）。
+
+        天气、闲聊、能直接答的规则问题**不要**建工单。
+
         conversation_id 必须原样使用系统提示中给出的会话 ID。
         """
         # 同上：底层 ``_create_ticket`` 是协程函数，必须 await。

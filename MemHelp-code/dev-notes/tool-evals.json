@@ -1,0 +1,191 @@
+[
+  {
+    "id": "acc1",
+    "message": "订单 1001 的物流到哪了",
+    "expected": [
+      "query_logistics",
+      "query_order"
+    ],
+    "actual": [
+      "query_logistics"
+    ],
+    "passed": true,
+    "why": "",
+    "answer": "订单 1001 的包裹目前状态是「已揽收」，承运商中通快递，运单号 SF168606344937，最新轨迹是 10 月 10 日 11:13「商品已出库，等待快递揽收」，预计 10 月 16 日送达。\n\n这几天物流可能更新会慢一些，麻烦再耐心等等。如果到预期时间还没动静，随时找我，我帮你催一下～",
+    "error": ""
+  },
+  {
+    "id": "acc1b",
+    "message": "订单 1001 的快递怎么一直不动",
+    "expected": [
+      "query_logistics",
+      "query_order",
+      "query_faq"
+    ],
+    "actual": [
+      "query_logistics"
+    ],
+    "passed": true,
+    "why": "",
+    "answer": "理解，包裹一直不动确实让人着急。我帮您查了订单 1001：承运商是中通快递，运单号 SF168606344937，目前状态只有「已揽收」，最新轨迹是 10 月 10 日的「商品已出库，等待快递揽收」，之后就没有新节点了，系统给的预计到达是 10 月 16 日。\n\n这种情况多半是包裹卡在网点没继续中转。您希望我帮您催一下，还是直接转人工帮您向快递方核实？",
+    "error": ""
+  },
+  {
+    "id": "acc2",
+    "message": "退货政策是什么",
+    "expected": [
+      "query_faq"
+    ],
+    "actual": [
+      "query_faq"
+    ],
+    "passed": true,
+    "why": "",
+    "answer": "我们支持 7 天无理由退货，前提是商品保持完好、不影响二次销售，具体以平台售后规则为准。\n\n如果你想办理退货，方便告诉我订单号和大概的退货原因吗？我帮你看看能不能走无理由退。",
+    "error": ""
+  },
+  {
+    "id": "acc2b",
+    "message": "退款多久能到账",
+    "expected": [
+      "query_faq"
+    ],
+    "actual": [
+      "query_faq"
+    ],
+    "passed": true,
+    "why": "",
+    "answer": "平台上能查到的规则是：在「我的订单」找到对应订单点「申请退款」，提交后审核通过会**原路退回**。不过具体到账时长，常见问题库里没写，我不能瞎给您一个数字。\n\n方便的话把订单号发我，我帮您看看这笔退款目前卡在什么状态～",
+    "error": ""
+  },
+  {
+    "id": "acc3",
+    "message": "邮费是多少",
+    "expected": [
+      "query_faq"
+    ],
+    "actual": [
+      "query_faq"
+    ],
+    "passed": true,
+    "why": "",
+    "answer": "您好～咱们平台是单笔订单满 99 元包邮，未满 99 元的话收 10 元运费，偏远地区运费会另算。\n\n方便的话告诉我订单号，我帮您看看这笔具体要不要运费～",
+    "error": ""
+  },
+  {
+    "id": "order1",
+    "message": "订单 1001 付款了吗",
+    "expected": [
+      "query_order"
+    ],
+    "actual": [
+      "query_order"
+    ],
+    "passed": true,
+    "why": "",
+    "answer": "您好～订单 1001 已经付款成功啦，订单金额 158.94 元，下单时间是 8 月 24 日。\n\n请问还有什么需要帮您处理的吗？比如物流进度、退换货之类的都可以问我。",
+    "error": ""
+  },
+  {
+    "id": "product1",
+    "message": "商品 P2001 还有货吗",
+    "expected": [
+      "query_product",
+      "query_order"
+    ],
+    "actual": [
+      "query_product"
+    ],
+    "passed": true,
+    "why": "",
+    "answer": "P2001 是「蜂蜜」（型号 C69），目前还有货，库存 208 件，售价 173.46 元。\n\n需要我帮你看看别的吗？",
+    "error": ""
+  },
+  {
+    "id": "ticket1",
+    "message": "订单 1001 收到的杯子碎了，帮我建个工单，我要补发",
+    "expected": [
+      "create_ticket"
+    ],
+    "actual": [
+      "create_ticket"
+    ],
+    "passed": true,
+    "why": "",
+    "answer": "收到，杯子碎了这事儿确实糟心，我这就帮你提交补发申请 🙏\n\n工单已建好：**T20261016003**（售后 · 待处理），订单号 1001 和「破损补发」的诉求都写进去了，人工客服会尽快跟进。\n\n方便的话，把杯子碎裂的照片留在聊天里或按客服指引上传，能加快核实速度。还有其他要补充的吗？",
+    "error": ""
+  },
+  {
+    "id": "ticket2",
+    "message": "订单 1001 我要投诉，客服态度太差了，帮我提交投诉工单",
+    "expected": [
+      "create_ticket"
+    ],
+    "actual": [
+      "create_ticket"
+    ],
+    "passed": true,
+    "why": "",
+    "answer": "抱歉让你遇到这样的服务体验，确实挺让人不舒服的。\n\n已经帮你提交投诉工单啦，单号 **T20261016004**，人工客服会尽快跟进处理。如果方便的话，你可以再补充一下大概是哪个环节、哪位客服，我一起备注上去，方便他们更快核实～",
+    "error": ""
+  },
+  {
+    "id": "neg1",
+    "message": "你好呀",
+    "expected": [],
+    "actual": [],
+    "passed": true,
+    "why": "",
+    "answer": "你好呀～我是售后客服小美，负责退换货、退款、物流、发票这些事。\n\n有什么能帮到你的吗？如果是要查订单或物流，把订单号发我就行～",
+    "error": ""
+  },
+  {
+    "id": "neg2",
+    "message": "今天天气怎么样",
+    "expected": [],
+    "actual": [],
+    "passed": true,
+    "why": "",
+    "answer": "这个我可帮不上忙哈，我是售后客服小美，只能查订单、物流、退换货这些～\n\n如果你有订单或售后相关的问题，随时跟我说，比如订单号多少、遇到什么问题，我来帮你看看。",
+    "error": ""
+  },
+  {
+    "id": "neg3",
+    "message": "你是谁",
+    "expected": [],
+    "actual": [],
+    "passed": true,
+    "why": "",
+    "answer": "我是 MewHelp 商城的售后客服小美～ 退换货、退款、物流、发票、商品质量这些售后问题都可以找我。\n\n有什么需要帮忙的吗？如果是具体某笔订单的问题，把订单号发我就行。",
+    "error": ""
+  },
+  {
+    "id": "noorder",
+    "message": "我的东西还没到",
+    "expected": [
+      "query_faq",
+      "query_logistics",
+      "query_order",
+      "create_ticket"
+    ],
+    "actual": [],
+    "passed": true,
+    "why": "",
+    "answer": "别着急～我帮你看看。麻烦把**订单号**发我一下，我这就去查物流到哪了。",
+    "error": ""
+  },
+  {
+    "id": "gather",
+    "message": "我要退款",
+    "expected": [
+      "query_faq",
+      "query_order",
+      "create_ticket"
+    ],
+    "actual": [],
+    "passed": true,
+    "why": "",
+    "answer": "好的，我来帮你处理退款～ 方便先把**订单号**发我吗？我查一下具体情况，再看怎么退。",
+    "error": ""
+  }
+]

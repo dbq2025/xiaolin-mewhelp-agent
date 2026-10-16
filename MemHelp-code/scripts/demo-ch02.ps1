@@ -1,32 +1,23 @@
 ﻿# 第二章「Function Calling 工具链」验收演示脚本。
 #
-# 用法（先起库与服务，再在另一个终端跑本脚本）：
-#   $ docker compose -f MemHelp-code/docker-compose.yml up -d --wait
-#   $ uv run --directory MemHelp-code uvicorn app.main:app --port 8000
-#   $ powershell -ExecutionPolicy Bypass -File scripts/demo-ch02.ps1
-#   $ powershell -ExecutionPolicy Bypass -File scripts/demo-ch02.ps1 -Out dev-notes/ch02-acceptance-output.txt
-#
-# 开关：
-#   -Reset   先 down -v 再 up -d --wait，让 sql/ 里的 initdb 脚本重新执行。
-#            **改过 DDL 或种子数据之后必须加这个**，否则 MySQL 只在数据目录为空时
-#            才跑 initdb，改动不会生效（表现为「明明改了 DDL 却还是旧表结构」）。
+# 用法（先起服务，再在另一个终端跑本脚本）：
+#   # 服务连的库见 .env（默认接**已有的** mewhelp-mysql，宿主 3306）
+#   uv run --directory MemHelp-code uvicorn app.main:app --port 8000
+#   powershell -ExecutionPolicy Bypass -File scripts/demo-ch02.ps1
+#   powershell -ExecutionPolicy Bypass -File scripts/demo-ch02.ps1 -Out dev-notes/ch02-acceptance-output.txt
 #
 # 本脚本只打本机服务，不访问外网。服务需要真实 .env（上游模型 + MySQL 都配好）。
 #
 # 注意：本文件必须存成 UTF-8 with BOM —— PowerShell 5.1 会按 GBK 读 .ps1，
-# 中文会撑破字符串字面量（见 agent.md 第 4 节）。
+# 中文会撑破字符串字面量（见 agent.md 第 4 节）。tests/test_repo_conventions.py 会检查这一点。
 
 [CmdletBinding()]
 param(
     [string]$BaseUrl = "http://127.0.0.1:8000",
-    [string]$Out,
-    [switch]$Reset
+    [string]$Out
 )
 
 $ErrorActionPreference = "Continue"
-$repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$composeFile = Join-Path $PSScriptRoot "..\docker-compose.yml"
-
 $script:lines = New-Object System.Collections.Generic.List[string]
 $script:failures = 0
 
@@ -57,15 +48,14 @@ function Check {
 # 打一段 SSE，把帧解析成 (event, data-json) 列表返回。
 #
 # 两个刻意的做法：
-#  1. 用 curl.exe 而不是 Invoke-WebRequest：后者会把整段流缓冲起来，看不到逐帧。
-#  2. **请求体走临时文件（--data-binary "@file"）**，不要用 -d '<json>' 直接传：
-#     PowerShell 会吃掉内联 JSON 里的引号，curl 收到的是坏 JSON，
-#     表现在服务端就是一个**空的 SSE 响应**（连 error 帧都没有），极难判断。
-#     实测踩过：三条验收全部「一个帧都没有」。
+#  1. 用 curl.exe 而不是 Invoke-WebRequest：后者把整段流缓冲起来，看不到逐帧。
+#  2. 请求体走**临时文件**（--data-binary "@file"），不要用 -d '<json>' 直接传：
+#     PowerShell 会吃掉内联 JSON 里的引号，curl 收到坏 JSON，
+#     服务端的表现是「一个 SSE 帧都没有」，极难判断。实测踩过。
 function Invoke-Sse {
     param([string]$Json)
     $tmp = Join-Path $env:TEMP ("mewhelp-ch02-" + [guid]::NewGuid().ToString("N") + ".json")
-    # UTF-8 **无 BOM**：带 BOM 时 curl 会把 BOM 当成 body 的一部分，服务端 JSON 解析失败。
+    # UTF-8 无 BOM：带 BOM 时 curl 会把 BOM 当成 body 的一部分，服务端 JSON 解析失败。
     [System.IO.File]::WriteAllText($tmp, $Json, (New-Object System.Text.UTF8Encoding($false)))
     try {
         $raw = & curl.exe -sS -N --max-time 90 -X POST "$BaseUrl/api/chat/completions" `
@@ -89,7 +79,6 @@ function Invoke-Sse {
         }
     }
     if ($frames.Count -eq 0) {
-        # 一帧都没有时把原始响应打出来 —— 否则「全 FAIL 但没有任何线索」
         Write-Both "  [调试] 未解析到任何 SSE 帧，原始响应前 300 字："
         Write-Both ("    " + $text.Substring(0, [Math]::Min(300, $text.Length)))
     }
@@ -97,7 +86,7 @@ function Invoke-Sse {
 }
 
 function Get-EventNames {
-    param($Frames) 
+    param($Frames)
     return (($Frames | ForEach-Object { $_.Event }) -join " -> ")
 }
 
@@ -107,15 +96,9 @@ function Get-TokenText {
 }
 
 # ---------------------------------------------------------------------------
-# 0. 起库（可选重置）与服务健康检查
+# 0. 环境检查
 # ---------------------------------------------------------------------------
 Section "0. 环境检查"
-
-if ($Reset) {
-    Write-Both "  -Reset 指定：重建数据库卷（让 sql/ 的 initdb 脚本重新执行）"
-    & docker compose -f $composeFile down -v 2>&1 | ForEach-Object { Write-Both ("    " + $_) }
-    & docker compose -f $composeFile up -d --wait 2>&1 | ForEach-Object { Write-Both ("    " + $_) }
-}
 
 $healthRaw = & curl.exe -sS --max-time 10 "$BaseUrl/healthz" 2>&1
 $healthText = ($healthRaw | Out-String).Trim()
@@ -126,10 +109,12 @@ Check "数据库可用（database=ok）" ($null -ne $health -and $health.databas
 
 if ($script:failures -gt 0) {
     Write-Both ""
-    Write-Both "环境未就绪，后续验收无法进行。请先："
-    Write-Both "  docker compose -f MemHelp-code/docker-compose.yml up -d --wait"
+    Write-Both "环境未就绪，后续验收无法进行。请先起服务（库见 .env）："
     Write-Both "  uv run --directory MemHelp-code uvicorn app.main:app --port 8000"
-    if ($Out) { $script:lines -join [Environment]::NewLine | Set-Content -Path $Out -Encoding UTF8 }
+    if ($Out) {
+        $outPath = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) $Out
+        $script:lines -join [Environment]::NewLine | Set-Content -Path $outPath -Encoding UTF8
+    }
     exit 1
 }
 
@@ -143,8 +128,8 @@ $frames1 = Invoke-Sse (@{ session_id = $s1; message = "订单 1001 的物流到�
 Write-Both ("  事件序列：" + (Get-EventNames $frames1))
 
 $done1 = $frames1 | Where-Object { $_.Event -eq "done" } | Select-Object -Last 1
-# 用 @() 强制成数组：单元素时 Where-Object / if 返回的是**对象**而不是数组，
-# 直接取 .Count 会得到 $null，于是「其实有」被误判成「没有」（实测踩过）。
+# @() 强制成数组：单元素时 Select-Object/if 返回**对象**而不是数组，
+# 直接取 .Count 得到 $null，于是「其实有」被误判成「没有」。实测踩过。
 $tools1 = @(if ($done1 -and $done1.Data.tools) { $done1.Data.tools } else { @() })
 $names1 = ($tools1 | ForEach-Object { $_.name }) -join ", "
 $answer1 = Get-TokenText $frames1
@@ -157,11 +142,12 @@ Check "选中的是物流工具" ($names1 -match "query_logistics")
 # 写成 { $_.ok -eq "true" } 会静默恒假（字符串 vs 布尔）。
 Check "工具执行成功" (@($tools1 | Where-Object { $_.ok -eq $true }).Count -gt 0)
 Check "有最终回答文本" ($answer1.Trim().Length -gt 0)
+Check "回答里没有 coroutine 对象（包装层忘了 await 的特征）" ($answer1 -notmatch "coroutine object")
 Write-Both ("  最终回答：" + $answer1)
 Write-Both ("  工具徽章数据：" + ($tools1 | ConvertTo-Json -Compress))
 
 # ---------------------------------------------------------------------------
-# 验收 2：问退货政策 —— query_faq 查得到
+# 验收 2：问退货政策 —— query_faq 查得到并作答
 # ---------------------------------------------------------------------------
 $s2 = "acc2-" + (Get-Random -Maximum 999999)
 Section "验收 2 · 退货政策是什么（期望：query_faq 命中 faq 表并作答）"
@@ -176,46 +162,71 @@ $answer2 = Get-TokenText $frames2
 
 Check "调用了 query_faq" ($names2 -match "query_faq") $names2
 Check "有最终回答文本" ($answer2.Trim().Length -gt 0)
-# 答对的关键：回答里要出现种子语料里的特征词，说明它真的用了查到的内容
+Check "回答里没有 coroutine 对象" ($answer2 -notmatch "coroutine object")
+# 答对的关键：回答里要出现语料里的特征词，说明它真的用了查到的内容
 Check "回答基于查到的政策（含 7 天/无理由/签收 之类特征）" ($answer2 -match "7\s*天|七天|无理由|签收")
-Check "回答里没有 coroutine 对象（包装层忘了 await 的特征）" ($answer2 -notmatch "coroutine object")
 Write-Both ("  最终回答：" + $answer2)
 
 # ---------------------------------------------------------------------------
-# 验收 3：换个说法问邮费 —— 关键词查不出来（**预期漏召回**）
+# 验收 3：换个说法问邮费 —— 实测结论与 spec 原先预测不同
 # ---------------------------------------------------------------------------
 $s3 = "acc3-" + (Get-Random -Maximum 999999)
-Section "验收 3 · 邮费是多少（**预期漏召回**，这是留给 ch03 的基线）"
+Section "验收 3 · 邮费是多少（期望：关键词漏召回；实测结论见下）"
 
 $frames3 = Invoke-Sse (@{ session_id = $s3; message = "邮费是多少"; stream = $true } | ConvertTo-Json -Compress)
 Write-Both ("  事件序列：" + (Get-EventNames $frames3))
 
 $done3 = $frames3 | Where-Object { $_.Event -eq "done" } | Select-Object -Last 1
-$tools3 = if ($done3 -and $done3.Data.tools) { $done3.Data.tools } else { @() }
+$tools3 = @(if ($done3 -and $done3.Data.tools) { $done3.Data.tools } else { @() })
 $names3 = ($tools3 | ForEach-Object { $_.name }) -join ", "
+$keywords3 = (($tools3 | ForEach-Object { $_.args.keyword }) -join ",")
 $answer3 = Get-TokenText $frames3
 
 Write-Both ("  选中的工具：" + $names3)
+Write-Both ("  模型实际传的关键词：" + $keywords3)
 Write-Both ("  最终回答：" + $answer3)
-Check "模型仍然选了 query_faq（工具选择层没错）" ($names3 -match "query_faq") $names3
-Write-Both "  [预期] 工具在**数据层**返回 count=0 —— 关键词「邮费」与语料用词"
-Write-Both "         （「退货运费」「满多少包邮」）对不上。这是故意保留的缺口，"
-Write-Both "         不是 bug；ch03 换向量检索后这一条应当变成能答。"
-Check "回答没有编造具体运费数字" ($answer3 -notmatch "\d+\s*元\s*包邮|邮费\s*\d+")
+Check "模型选的是 query_faq（工具选择层没错）" ($names3 -match "query_faq") $names3
+Check "回答里没有 coroutine 对象" ($answer3 -notmatch "coroutine object")
 
 # ---------------------------------------------------------------------------
-# 落库核对：四行完整痕迹
+# 验收 3 的**实测结论**（与 spec 原先的预测不同，必须如实记）
+#
+# spec 原先预测：「邮费是多少」关键词查表查不出来，模型应承认没查到。
+#
+# 实测（deepseek-flash + 真实语料）分两层，结论不同：
+#
+#   数据层：query_faq('邮费') 稳定返回 ok=true / count=0 —— 基线成立
+#           （语料含「运费」不含「邮费」，两者不是子串关系）。
+#   用户可见层：**模型把用户的「邮费」自行归一化成「运费」再传参**，
+#           于是命中「运费怎么算」，答出满 99 包邮 / 未满 10 元运费。
+#
+# 所以「用户问邮费会查不出来」这条预期前提**不成立**：召回失败在
+# 「组织工具参数」这一步被模型补偿掉了。这不是工具或 SQL 的缺陷。
+# 已知由模型侧的同义归一化引起，用户已确认留待后续章节修复，本章不处理。
+#
+# 下面**不对用户可见层的措辞做断言**：它会随模型改写而变，断言它等于把
+# 「模型当时怎么想的」当成契约。数据层的基线由 tests/test_db_mysql.py 硬钉住。
+# ---------------------------------------------------------------------------
+Write-Both "  [实测结论] 数据层：query_faq('邮费') 稳定 count=0（基线成立）"
+Write-Both "  [实测结论] 用户可见层：模型把「邮费」归一化成「运费」再传参，"
+Write-Both "             于是命中「运费怎么算」并答对 —— spec 原先预测的"
+Write-Both "             「用户会看到查不出来」不成立。已知原因在模型侧归一化，"
+Write-Both "             用户已确认留待后续章节修复，本章不处理。"
+
+# ---------------------------------------------------------------------------
+# 落库核对：四行完整痕迹 + 徽章可回读
 # ---------------------------------------------------------------------------
 Section "落库核对 · 验收 1 的会话在 messages 表里的形状"
 
 $msgs = (& curl.exe -sS -X POST "$BaseUrl/api/chat/sessions/$s1/messages" 2>&1 | Out-String) | ConvertFrom-Json
-$rows = $msgs.messages
+$rows = @($msgs.messages)
 foreach ($r in $rows) {
-    $toolInfo = if ($r.tools) { " tools=[" + (($r.tools | ForEach-Object { $_.name + ":" + $_.ok }) -join ",") + "]" } else { "" }
-    Write-Both ("  " + $r.role.PadRight(10) + ("" + $r.content).Substring(0, [Math]::Min(48, ("" + $r.content).Length)) + $toolInfo)
+    $toolInfo = if ($r.tools) { " tools=[" + ((@($r.tools) | ForEach-Object { $_.name + ":" + $_.ok }) -join ",") + "]" } else { "" }
+    $content = "" + $r.content
+    Write-Both ("  " + $r.role.PadRight(10) + $content.Substring(0, [Math]::Min(48, $content.Length)) + $toolInfo)
 }
-Check "落库为 user -> assistant -> tool -> assistant" (($rows | ForEach-Object { $_.role }) -join "," -eq "human,ai,tool,ai")
-Check "assistant 行带回了工具轨迹（徽章刷新后仍在）" (($rows | Where-Object { $_.tools }).Count -gt 0)
+Check "落库为 human -> ai -> tool -> ai" ((($rows | ForEach-Object { $_.role }) -join ",") -eq "human,ai,tool,ai")
+Check "assistant 行带回了工具轨迹（徽章刷新后仍在）" (@($rows | Where-Object { $_.tools }).Count -gt 0)
 
 # ---------------------------------------------------------------------------
 Section "汇总"
@@ -223,13 +234,12 @@ if ($script:failures -eq 0) {
     Write-Both "  三条验收标准的**可自动判定部分**全部通过。"
     Write-Both "  仍需人工确认的一项：浏览器打开 $BaseUrl/chat/ 提问，"
     Write-Both "  确认气泡里出现 🔧 工具徽章（脚本无法验 DOM）。"
-    Write-Both "  验收 3 的「查不到」是预期结果，已在上文标注。"
 } else {
     Write-Both ("  有 " + $script:failures + " 项未通过，见上方 [FAIL]。")
 }
 
 if ($Out) {
-    $outPath = Join-Path $repoRoot $Out
+    $outPath = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) $Out
     $dir = Split-Path -Parent $outPath
     if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
     $script:lines -join [Environment]::NewLine | Set-Content -Path $outPath -Encoding UTF8

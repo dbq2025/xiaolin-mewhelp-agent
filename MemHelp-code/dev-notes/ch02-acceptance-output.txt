@@ -9,44 +9,48 @@
 ========================================================================
 验收 1 · 订单 1001 的物流到哪了（期望：选中 query_logistics，带工具徽章）
 ========================================================================
-  事件序列：meta -> status -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> done
+  事件序列：meta -> status -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> done
   [PASS] 有 status 帧（工具执行前先推状态）  -> 1 个
   [PASS] 调用了工具（done.tools 非空）  -> query_logistics
   [PASS] 选中的是物流工具
   [PASS] 工具执行成功
   [PASS] 有最终回答文本
-  最终回答：帮您查到了，订单 1001 目前是**已揽收**状态，承运商是顺丰（运单号 SF168606344937）。
+  [PASS] 回答里没有 coroutine 对象（包装层忘了 await 的特征）
+  最终回答：帮您查到啦～订单 1001 走的是中通快递，运单号 SF168606344937。
 
-最新一条轨迹是 10 月 10 日 11:05「商品已出库，等待快递揽收」，预计 10 月 16 日送达。
+目前状态是**已揽收**，最新一条轨迹是 10-10 11:10「商品已出库」。预计**10 月 16 日**送达。
 
-现在是刚出库阶段，后面更新可能会稍慢一点，您再耐心等等。如果超过预计时间还没动静，随时找我，我帮您催一下～
+物流还在正常推进中，您耐心等两天就好。如果到预计时间还没更新，随时找我，我帮您催一下。
   工具徽章数据：{"name":"query_logistics","args":{"order_id":"1001"},"ok":true,"duration_ms":1,"attempts":1}
 
 ========================================================================
 验收 2 · 退货政策是什么（期望：query_faq 命中 faq 表并作答）
 ========================================================================
-  事件序列：meta -> status -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> done
+  事件序列：meta -> status -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> done
   [PASS] 调用了 query_faq  -> query_faq
   [PASS] 有最终回答文本
+  [PASS] 回答里没有 coroutine 对象
   [PASS] 回答基于查到的政策（含 7 天/无理由/签收 之类特征）
-  [PASS] 回答里没有 coroutine 对象（包装层忘了 await 的特征）
-  最终回答：我们支持 7 天无理由退货，前提是商品保持完好、不影响二次销售，具体以平台售后规则为准。
+  最终回答：您好~ 平台的退货政策是：支持 **7 天无理由退货**，商品需要保持完好、不影响二次销售，具体以平台售后规则为准。
 
-如果你是想办某笔订单的退货，把订单号发我一下，再告诉我大概是什么原因，我这就帮你看看怎么处理～
+如果您手头有具体订单想退，把订单号发我，我帮您看看能不能走退货流程～
 
 ========================================================================
-验收 3 · 邮费是多少（**预期漏召回**，这是留给 ch03 的基线）
+验收 3 · 邮费是多少（期望：关键词漏召回；实测结论见下）
 ========================================================================
-  事件序列：meta -> status -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> done
+  事件序列：meta -> status -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> done
   选中的工具：query_faq
-  最终回答：您好～运费是这样的：单笔订单满 99 元就包邮，没满 99 元收 10 元运费；偏远地区运费另行计算。
+  模型实际传的关键词：运费
+  最终回答：单笔订单满 99 元就包邮，没满的话收 10 元运费，偏远地区运费另算。
 
-如果您有具体订单想看运费，把订单号发我就行。
-  [PASS] 模型仍然选了 query_faq（工具选择层没错）  -> query_faq
-  [预期] 工具在**数据层**返回 count=0 —— 关键词「邮费」与语料用词
-         （「退货运费」「满多少包邮」）对不上。这是故意保留的缺口，
-         不是 bug；ch03 换向量检索后这一条应当变成能答。
-  [PASS] 回答没有编造具体运费数字
+你是在看哪件商品呀？如果想确认具体多少运费，把商品编号或者订单号发我就行～
+  [PASS] 模型选的是 query_faq（工具选择层没错）  -> query_faq
+  [PASS] 回答里没有 coroutine 对象
+  [实测结论] 数据层：query_faq('邮费') 稳定 count=0（基线成立）
+  [实测结论] 用户可见层：模型把「邮费」归一化成「运费」再传参，
+             于是命中「运费怎么算」并答对 —— spec 原先预测的
+             「用户会看到查不出来」不成立。已知原因在模型侧归一化，
+             用户已确认留待后续章节修复，本章不处理。
 
 ========================================================================
 落库核对 · 验收 1 的会话在 messages 表里的形状
@@ -54,11 +58,15 @@
   human     订单 1001 的物流到哪了
   ai         tools=[query_logistics:True]
   tool      {"ok": true, "tool": "query_logistics", "data": 
-  ai        帮您查到了，订单 1001 目前是**已揽收**状态，承运商是顺丰（运单号 SF16860634
-  [PASS] 落库为 user -> assistant -> tool -> assistant
-  [FAIL] assistant 行带回了工具轨迹（徽章刷新后仍在）
+  ai        帮您查到啦～订单 1001 走的是中通快递，运单号 SF168606344937。
+
+目前状态是
+  [PASS] 落库为 human -> ai -> tool -> ai
+  [PASS] assistant 行带回了工具轨迹（徽章刷新后仍在）
 
 ========================================================================
 汇总
 ========================================================================
-  有 1 项未通过，见上方 [FAIL]。
+  三条验收标准的**可自动判定部分**全部通过。
+  仍需人工确认的一项：浏览器打开 http://127.0.0.1:8000/chat/ 提问，
+  确认气泡里出现 🔧 工具徽章（脚本无法验 DOM）。
