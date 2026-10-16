@@ -152,13 +152,18 @@
   }
 
   /* 把徽章挂到气泡下方，并把本轮轨迹写进 dataset —— 刷新后从 /messages 回读时
-   * 用同一份数据渲染，所以徽章不会「刷新就消失」。 */
-  function attachTools(ctx, tools) {
+   * 用同一份数据渲染，所以徽章不会「刷新就消失」。
+   *
+   * ``target`` 就是 ``addRow()`` 的返回值 ``{row, wrap, ...}``，两个调用点都传它：
+   * 流式那一轮传 ``ctx.bot``，历史回读传 ``row``。
+   * 别再传「外层 ctx」——它只有 ``bot``，没有 ``wrap``/``row``，
+   * 曾经因此在这里抛 TypeError，被 send() 的 catch 变成「网络或脚本错误」。 */
+  function attachTools(target, tools) {
     if (!tools || !tools.length) return;
-    const existing = ctx.wrap.querySelector('.tool-badges');
+    const existing = target.wrap.querySelector('.tool-badges');
     if (existing) existing.remove();
-    ctx.wrap.appendChild(renderToolBadges(tools));
-    ctx.row.dataset.tools = JSON.stringify(tools);
+    target.wrap.appendChild(renderToolBadges(tools));
+    target.row.dataset.tools = JSON.stringify(tools);
     scrollToBottom();
   }
 
@@ -235,7 +240,7 @@
 
     if (event === 'done') {
       ctx.finish();
-      attachTools(ctx, data.tools);
+      attachTools(ctx.bot, data.tools);
       if (els.stats.checked) {
         const s = el('div', 'stats');
         s.innerHTML = `上下文：保留 <code>${data.kept}</code> 条，`
@@ -286,7 +291,7 @@
             ? renderMarkdown(m.content)
             : '<span style="color:#9aa2af">（客服没有返回内容）</span>';
           // 徽章随历史一起还原 —— 这正是「刷新后徽章还在」的实现
-          attachTools({ row: row.row, wrap: row.wrap }, m.tools);
+          attachTools(row, m.tools);
         }
       });
       scrollToBottom(true);
