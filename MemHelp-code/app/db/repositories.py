@@ -41,7 +41,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import (
     MESSAGE_ROLES,
-    TICKET_TYPES,
+    TICKET_TYPES as _TICKET_TYPES,
     Conversation,
     Faq,
     Message,
@@ -49,6 +49,14 @@ from app.db.models import (
 )
 
 T = TypeVar("T")
+
+#: 工单类型，取自 ORM 层的**单一来源**后再导出。
+#:
+#: 为什么在这里再导出一遍：工具层只允许依赖本模块（见
+#: ``tests/test_tool_knowledge.py`` 的分层用例），不该 import ``app.db.models``。
+#: 若让工具层自己写一份常量，DDL 改了 ENUM 而常量没跟上，就会变成
+#: 「参数校验通过、写库被拒」这种最难查的半对齐状态。
+TICKET_TYPES: tuple[str, ...] = _TICKET_TYPES
 
 #: ``LIKE`` 的转义字符。SQL 标准里 ``LIKE ... ESCAPE '\'`` 指定它；
 #: MySQL 默认就是 ``\``，但显式写出来才不依赖默认值。
@@ -65,7 +73,7 @@ async def _run(fn: Callable[..., T], *args: object) -> T:
 
 
 def escape_like(keyword: str) -> str:
-    """把 ``LIKE`` 的通配符转义成字面量。
+    r"""把 ``LIKE`` 的通配符转义成字面量。
 
     不转义的话，用户问「100%纯棉」会命中**全表**：``%`` 通配任意长度。
     更糟的是工具会返回 ``ok=true`` 和一堆不相关的 FAQ，模型拿着它们一本正经地
@@ -336,9 +344,9 @@ class TicketRepository:
     def _create(
         self, conversation_id: int, description: str, ticket_type: str, day: date
     ) -> str:
-        if ticket_type not in TICKET_TYPES:
+        if ticket_type not in _TICKET_TYPES:
             raise ValueError(
-                f"非法工单类型 {ticket_type!r}，只允许 {TICKET_TYPES}（对应 DDL 的 ENUM）"
+                f"非法工单类型 {ticket_type!r}，只允许 {_TICKET_TYPES}（对应 DDL 的 ENUM）"
             )
 
         ticket_no = f"T{day:%Y%m%d}{self._count_on(day) + 1:03d}"
