@@ -276,6 +276,55 @@ async def astream_chat_with_tools(
     yield ToolEvent("tools", {"tools": tool_summaries})
 
 
+async def complete_chat_with_tools(
+    *,
+    session_id: str,
+    message: str,
+    model: BaseChatModel,
+    repositories: Repositories,
+    budget_tokens: int,
+    model_name: str,
+    timeout: float = 3.0,
+    max_retries: int = 1,
+    executor: Callable[..., Any] | None = None,
+) -> tuple[str, ChatMeta]:
+    """非流式版本：跑同一套单轮编排，把 token 事件拼成完整回复。
+
+    **为什么非流式也要走编排**：否则两条路的历史来源会不一致 ——
+    非流式读 ch01 的内存会话，流式读数据库。同一个 ``session_id``
+    在两条路上看到不同的历史，是最容易产出的「偶发答非所问」。
+
+    与流式版本共用同一个 ``astream_chat_with_tools``，所以工具调用、
+    落库、失败语义完全一致；差别只是这里不逐块产出，而是收齐。
+
+    :return: ``(完整回复, ChatMeta)``。调用方（HTTP 层）直接可用。
+    :raises UpstreamEmptyResponse: 上游返回空内容（与流式路径同样的判定）。
+    """
+    meta_out: dict = {}
+    parts: list[str] = []
+
+    async for event in astream_chat_with_tools(
+        session_id=session_id,
+        message=message,
+        model=model,
+        repositories=repositories,
+        budget_tokens=budget_tokens,
+        model_name=model_name,
+        timeout=timeout,
+        max_retries=max_retries,
+        meta_out=meta_out,
+        executor=executor,
+    ):
+        if event.kind == "token":
+            parts.append(event.payload.get("delta", ""))
+
+    meta = meta_out.get("meta")
+    if meta is None:  # pragma: no cover - 编排总会写 meta
+        raise RuntimeError("编排未产出 meta，无法构造响应")
+
+    return "".join(parts), meta
+
+
 async def _persist(
     repositories: Repositories,
     session_id: str,

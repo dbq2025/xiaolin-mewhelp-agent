@@ -76,6 +76,55 @@ def sqlite_session():
     engine.dispose()
 
 
+@pytest.fixture
+def fake_repositories(sqlite_session):
+    """接到 SQLite 内存库上的**真仓库**，供 HTTP 层测试注入。
+
+    为什么不用假仓库：HTTP 层要验的正是「聊天记录真的落到了库里、
+    ``/messages`` 真的从库里读出来」——把仓库也打桩就测不到这条链路了。
+    SQLite 让它在没有 MySQL 的机器上也能跑。
+    """
+    from app.db.repositories import Repositories
+
+    return Repositories.from_session(sqlite_session)
+
+
+@pytest.fixture(autouse=True)
+def _offline_database(monkeypatch, sqlite_session):
+    """让**整个套件**默认跑在 SQLite 上，而不是去连 MySQL。
+
+    为什么放在 conftest 而不是逐个测试文件里：ch02 起 ``create_app`` 默认会连
+    MySQL（正确行为 —— 生产就该这样）。但那样一来 ch01 的所有 HTTP 用例都会
+    因为「连不上库」而红，而它们要验的是对话与错误映射，不是数据库。
+    逐个改它们的辅助函数既啰嗦又容易漏，所以在唯一的入口 ``create_app`` 上包一层。
+
+    **显式传参优先**：测试自己传了 ``repositories`` / ``db_ping`` 就用它的，
+    本包装器只补缺省。这样 ch02 的用例仍可精确控制注入的内容
+    （包括故意让 ``db_ping`` 返回 False 来验 503）。
+
+    测试文件必须写 ``from app import main`` 再 ``main.create_app(...)``，
+    **不能**写 ``from app.main import create_app`` —— 后者在 import 时就把名字绑定了，
+    再 patch 模块属性对它无效。这一点很容易写成前者，所以在这里写明。
+    """
+    from app.api import create_app as _real_create_app
+
+    def _wrapped(*args, **kwargs):
+        kwargs.setdefault("repositories", _make_repositories(sqlite_session))
+        kwargs.setdefault("db_ping", lambda: True)
+        return _real_create_app(*args, **kwargs)
+
+    # monkeypatch 会在测试结束后自动还原（按属性名记录原值）。
+    monkeypatch.setattr("app.api.create_app", _wrapped)
+    monkeypatch.setattr("app.main.create_app", _wrapped)
+    yield
+
+
+def _make_repositories(session):
+    from app.db.repositories import Repositories
+
+    return Repositories.from_session(session)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_process_singletons():
     """每个测试前后清掉进程级单例。

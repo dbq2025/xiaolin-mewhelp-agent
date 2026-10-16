@@ -354,12 +354,12 @@ async def test_plain_answer_streams_without_any_tool_events(repos):
 
 
 async def test_plain_answer_uses_the_non_streaming_reply(repos):
-    """上面那条的补充：第 1 次调用的文本必须来自**同一次**调用。
+    """无工具路径上，第 1 次（非流式）调用拿到的文本就是最终答案。
 
-    这里给 ``chunks`` 也给了不同的 ``reply``，只断言最终落库内容是 chunks 拼出来的，
-    说明「没有再发第二次流式请求去取文本」。
+    **只设 ``reply``、不设 ``chunks``** —— 这样第 1 次调用必然返回 ``reply``，
+    证明编排没有再去发一次流式请求取文本（那会让同一次提问打两次上游）。
     """
-    model = FakeChatModel(chunks=["直接答的"], reply="不该用到这个", tool_calls_then_stream=[])
+    model = FakeChatModel(reply="直接答的")
     executor = _fake_executor([])
 
     events = await _collect(**_common(repos, model, executor))

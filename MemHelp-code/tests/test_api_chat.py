@@ -6,19 +6,25 @@
 
 `create_app(model=..., store=..., settings=...)` 支持注入假模型、独立会话存储和
 写死的配置，所以这些测试既不联网、不读 .env，也互不干扰。
+
+**ch02 起**：聊天记录改走数据库，所以 ``conftest.py`` 的 ``_offline_database``
+自动注入一个接到 SQLite 内存库上的仓库。这里的用例因此不需要知道数据库存在。
+
+**注意本文件用 ``app_main.create_app`` 而不是直接 import 函数** —— 后者在 import
+时就把名字绑定了，conftest 的包装器对它无效（见 ``_offline_database`` 的说明）。
 """
 
 from fastapi.testclient import TestClient
 
+from app import main as app_main
 from app.config import Settings
-from app.main import create_app
 from app.memory import InMemorySessionStore
 from tests.fakes import FakeChatModel
 
 
 def _client(test_settings, model=None, store=None) -> TestClient:
     return TestClient(
-        create_app(
+        app_main.create_app(
             model=model or FakeChatModel(reply="好的"),
             store=store,
             settings=test_settings,
@@ -58,7 +64,7 @@ def test_healthz_misconfigured_when_env_missing(monkeypatch):
     )
     get_settings.cache_clear()
 
-    resp = TestClient(create_app()).get("/healthz")
+    resp = TestClient(app_main.create_app()).get("/healthz")
     assert resp.status_code == 503
     body = resp.json()
     assert body["status"] == "misconfigured"
@@ -80,7 +86,7 @@ def test_healthz_misconfigured_body_does_not_leak_partial_key(monkeypatch):
     )
     get_settings.cache_clear()
 
-    body = TestClient(create_app()).get("/healthz").text
+    body = TestClient(app_main.create_app()).get("/healthz").text
     assert "sk-super-secret" not in body
     assert "sk-replace" not in body
 
@@ -100,7 +106,7 @@ def test_chat_returns_503_configuration_error_when_env_missing(monkeypatch):
     monkeypatch.setattr("app.config.Settings.model_config", {**Settings.model_config, "env_file": None})
     get_settings.cache_clear()
 
-    resp = TestClient(create_app()).post(
+    resp = TestClient(app_main.create_app()).post(
         "/api/chat/completions", json={"message": "在吗", "stream": False}
     )
     assert resp.status_code == 503
@@ -134,12 +140,18 @@ def test_non_streaming_chat_generates_session_id_when_absent(test_settings):
 
 
 def test_second_turn_history_is_visible_via_sessions_endpoint(test_settings):
-    """验收标准 2 的 HTTP 层证据。"""
+    """验收标准 2 的 HTTP 层证据。
+
+    **走流式路径**（不传 ``stream``，默认 true）：ch02 起只有流式路径会落库，
+    因为它要记录工具轨迹（见 ``app/api.py`` 的两个分支）。
+    非流式路径仍返回完整 JSON，但它不落库 —— 这是本章的范围决定，
+    记在 ``dev-notes/ch02.md`` 里。
+    """
     client = _client(test_settings, FakeChatModel(reply="答"))
     for turn in ("第一轮", "第二轮"):
         client.post(
             "/api/chat/completions",
-            json={"session_id": "s1", "message": turn, "stream": False},
+            json={"session_id": "s1", "message": turn},
         )
     msgs = client.post("/api/chat/sessions/s1/messages").json()["messages"]
     assert [m["content"] for m in msgs] == ["第一轮", "答", "第二轮", "答"]
@@ -235,16 +247,19 @@ def test_unknown_session_id_is_rejected(test_settings):
 
 
 def test_sessions_are_isolated_over_http(test_settings):
-    """Review Focus 2 在 HTTP 层：甲的历史不能出现在乙的会话里。"""
-    store = InMemorySessionStore()
-    client = _client(test_settings, FakeChatModel(reply="答"), store=store)
+    """Review Focus 2 在 HTTP 层：甲的历史不能出现在乙的会话里。
+
+    走流式路径（ch02 起只有它落库，见上一条的说明）。会话隔离现在由
+    ``messages.conversation_id`` 保证 —— 比内存字典更硬：跨进程、重启后都成立。
+    """
+    client = _client(test_settings, FakeChatModel(reply="答"))
     client.post(
         "/api/chat/completions",
-        json={"session_id": "a", "message": "甲的问题", "stream": False},
+        json={"session_id": "a", "message": "甲的问题"},
     )
     client.post(
         "/api/chat/completions",
-        json={"session_id": "b", "message": "乙的问题", "stream": False},
+        json={"session_id": "b", "message": "乙的问题"},
     )
     a = [m["content"] for m in client.post("/api/chat/sessions/a/messages").json()["messages"]]
     b = [m["content"] for m in client.post("/api/chat/sessions/b/messages").json()["messages"]]

@@ -18,7 +18,9 @@ guard 里抛 ``HTTPException`` 只会直接返回 422，**不会回落到第二�
 帧编码抽到 ``app.sse`` 并由 ``tests/test_sse.py`` 单独钉住。
 """
 
+import inspect
 import json
+import logging
 from collections.abc import AsyncIterable
 from functools import lru_cache
 from typing import Any
@@ -31,7 +33,10 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 
 from app.chat import astream_chat, complete_chat
+from app.chat_tools import astream_chat_with_tools, complete_chat_with_tools
 from app.config import PROJECT_ROOT, Settings, get_settings
+from app.db.repositories import Repositories
+from app.db.session import create_engine_from, ping, session_factory
 from app.errors import (
     UpstreamFault,
     classify_upstream_error_type,
@@ -50,6 +55,8 @@ from app.schemas import (
     SessionMessagesResponse,
 )
 from app.sse import SSE_MEDIA_TYPE, sse_frame
+
+logger = logging.getLogger(__name__)
 
 
 class UpstreamError(UpstreamFault):
@@ -135,6 +142,89 @@ def get_store(request: Request) -> InMemorySessionStore:
     return store if store is not None else get_session_store()
 
 
+def get_repositories(request: Request) -> Repositories:
+    """取当次请求的数据仓库。
+
+    两段式：``app.state.repositories`` 有就直接用（测试注入）；
+    否则按 ``app.state.settings`` 建引擎（**引擎缓存**），再为本次请求新建一个
+    ``Session``。
+
+    **为什么缓存引擎而不是缓存仓库/Session**：``create_engine`` 建连接池，
+    每次新建等于把连接管理交给 GC —— 生产里表现为「MySQL 连接数缓慢涨到上限」。
+    但 ``Session`` **必须每请求一个**：它不是线程安全的，跨请求共享会让
+    并发请求互相写进对方的会话（表现为间歇性的「聊天记录串台」）。
+    仓库只是 Session 的薄包装，每请求新建不花什么钱。
+
+    配置缺失（``.env`` 没配或非法）转成规范的 ``configuration_error``（503），
+    而不是把 pydantic 的报错裸抛到 ASGI 层。
+    """
+    injected = getattr(request.app.state, "repositories", None)
+    if injected is not None:
+        return injected
+
+    factory = getattr(request.app.state, "_session_factory", None)
+    if factory is None:
+        try:
+            current = get_app_settings(request)
+        except UpstreamFault:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise UpstreamError(
+                redact(f"配置缺失或非法，请检查 .env：{exc}"), type_="configuration_error"
+            ) from exc
+
+        try:
+            factory = session_factory(create_engine_from(current))
+        except Exception as exc:  # noqa: BLE001
+            raise UpstreamError(
+                redact(f"数据库配置非法：{exc}"), type_="configuration_error"
+            ) from exc
+        request.app.state._session_factory = factory  # noqa: SLF001 - 进程级共享
+
+    return Repositories.from_session(factory())
+
+
+async def _ping_database(request: Request) -> bool:
+    """探一次数据库。**永不抛异常**（``ping()`` 自己也吞掉一切）。
+
+    没注入 ``db_ping`` 时用真实探测。探测前若连配置都读不到，直接判定不可用 ——
+    ``/healthz`` 的职责是「能不能服务」，配置缺失同样是不能服务，
+    只是原因不同（由 ``status: misconfigured`` 表达）。
+
+    **驱动异常的原文只进服务端日志，绝不进响应体**。``/healthz`` 通常是未认证端点，
+    而 ``(2003, "Can't connect to MySQL server on '127.0.0.1' (111)")``
+    与 ``using password: YES`` 这类文本会泄露库的内部地址、端口与账号
+    —— ``redact()`` 只遮密钥形态，遮不住这些。
+    """
+    injected = getattr(request.app.state, "db_ping", None)
+    if injected is not None:
+        return bool(await _maybe_await(injected()))
+
+    try:
+        current = get_app_settings(request)
+    except Exception:  # noqa: BLE001 - 配置缺失已在 healthz 主流程里单独报告
+        return False
+
+    try:
+        engine = create_engine_from(current)
+    except Exception:  # noqa: BLE001
+        logger.exception("建数据库引擎失败")
+        return False
+
+    alive = await ping(engine)
+    if not alive:
+        # 原因留给运维看日志；响应体只给一句通用说明。
+        logger.warning("数据库探测失败：无法连接 %s:%s", current.mysql_host, current.mysql_port)
+    return alive
+
+
+async def _maybe_await(value: Any) -> Any:
+    """注入的 ``db_ping`` 可能是同步函数也可能是协程函数。"""
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
 @lru_cache
 def _default_chat_model() -> BaseChatModel:
     """默认模型只构造一次，避免每个请求都新建客户端。"""
@@ -204,28 +294,108 @@ def _session_messages_payload(
     )
 
 
+#: 落库角色 → 对外角色名。沿用 ch01 的命名（``human`` / ``ai``），
+#: 而不是把库里的 ``user`` / ``assistant`` 直接透出去 —— 前端已经按前者写了。
+_ROLE_TO_API: dict[str, str] = {"user": "human", "assistant": "ai", "tool": "tool"}
+
+
+async def _db_session_messages_payload(
+    session_id: str, repositories: Repositories
+) -> SessionMessagesResponse:
+    """从 ``messages`` 表回读历史。
+
+    ``tools`` 字段**只在那一轮真的调过工具时出现**（省略而不是填 null）：
+    前端只需 ``if (msg.tools)`` 一处判断，不必区分 ``null`` / ``[]`` / 缺字段。
+
+    工具轨迹从 ``assistant`` 行的 ``tool_calls`` JSON 还原，
+    成败与耗时从紧随其后的 ``tool`` 行的正文里解析 —— 这两行是我们自己写的，
+    格式固定（见 ``chat_tools._persist``），所以解析是可靠的。
+    """
+    conversation_id = await repositories.messages.find_conversation_id(session_id)
+    if conversation_id is None:
+        return SessionMessagesResponse(session_id=session_id, messages=[])
+
+    rows = await repositories.messages.list_for_conversation(conversation_id)
+    payload: list[dict[str, Any]] = []
+
+    for index, row in enumerate(rows):
+        item: dict[str, Any] = {
+            "role": _ROLE_TO_API.get(row.role, row.role),
+            "content": row.content or "",
+        }
+
+        if row.role == "assistant" and row.tool_calls:
+            item["tools"] = _tool_traces(row.tool_calls, rows, index)
+
+        payload.append(item)
+
+    return SessionMessagesResponse(session_id=session_id, messages=payload)
+
+
+def _tool_traces(
+    tool_calls: Any, rows: list[Any], assistant_index: int
+) -> list[dict[str, Any]]:
+    """把一行 ``tool_calls`` 与它后面那条 ``tool`` 行的结果拼成徽章数据。"""
+    calls = tool_calls if isinstance(tool_calls, list) else []
+    traces: list[dict[str, Any]] = []
+
+    for offset, call in enumerate(calls):
+        if not isinstance(call, dict):
+            continue
+        trace: dict[str, Any] = {
+            "name": call.get("name", ""),
+            "args": call.get("args", {}),
+            "ok": True,
+        }
+        follow = assistant_index + 1 + offset
+        if follow < len(rows) and rows[follow].role == "tool":
+            try:
+                parsed = json.loads(rows[follow].content or "{}")
+            except (ValueError, TypeError):
+                parsed = {}
+            trace["ok"] = bool(parsed.get("ok", True))
+        traces.append(trace)
+
+    return traces
+
+
 async def _chat_stream_body(
     req: ChatRequest,
     settings: Settings,
     model: BaseChatModel,
     store: InMemorySessionStore,
+    repositories: Repositories,
     session_id: str,
 ) -> AsyncIterable[str]:
-    """SSE 响应体：``meta`` → ``token``* → ``done``，中途失败补 ``error`` 再收尾。"""
+    """SSE 响应体：``meta`` → ``status``? → ``token``* → ``tools`` → ``done``。
+
+    中途失败补 ``error`` 再收尾（沿用 ch01）。
+
+    ``status`` 帧只在调了工具时出现；``tools`` 帧是徽章的权威来源
+    （含成败与耗时），随后 ``done`` 把它一并带出去，前端只读 ``done.tools`` 即可。
+    """
     meta_out: dict = {}
     yield sse_frame("meta", {"session_id": session_id, "model": settings.openai_model})
 
+    tool_summaries: list[dict[str, Any]] = []
     try:
-        async for delta in astream_chat(
+        async for event in astream_chat_with_tools(
             session_id=session_id,
             message=req.message,
-            store=store,
             model=model,
+            repositories=repositories,
             budget_tokens=settings.context_token_budget,
             model_name=settings.openai_model,
+            timeout=settings.tool_timeout_seconds,
+            max_retries=settings.tool_max_retries,
             meta_out=meta_out,
         ):
-            yield sse_frame("token", {"delta": delta})
+            if event.kind == "status":
+                yield sse_frame("status", event.payload)
+            elif event.kind == "token":
+                yield sse_frame("token", event.payload)
+            elif event.kind == "tools":
+                tool_summaries = list(event.payload.get("tools") or [])
     except Exception as exc:  # noqa: BLE001 - 必须转成事件，不能让连接裸断
         err = _as_upstream_error(exc)
         yield sse_frame(
@@ -241,6 +411,7 @@ async def _chat_stream_body(
             "session_id": session_id,
             "trimmed": meta.context.trimmed_messages if meta else 0,
             "kept": meta.context.kept_messages if meta else 0,
+            "tools": tool_summaries,
         },
     )
 
@@ -254,16 +425,30 @@ def create_app(
     model: BaseChatModel | None = None,
     store: InMemorySessionStore | None = None,
     settings: Settings | None = None,
+    repositories: Repositories | None = None,
+    db_ping: Any = None,
 ) -> FastAPI:
     """构造应用。
 
-    ``model`` / ``store`` / ``settings`` 都可注入：测试里传假模型、独立存储和
-    写死的配置，就能在**没有 .env、不发任何网络请求**的前提下跑完整 HTTP 测试。
+    ``model`` / ``store`` / ``settings`` / ``repositories`` / ``db_ping`` 都可注入：
+    测试里传假模型、假存储、写死的配置，以及接到 SQLite 上的真仓库，就能在
+    **没有 .env、不连 MySQL、不发任何网络请求**的前提下跑完整 HTTP 测试。
+
+    ``store`` 从 ch02 起**只在非流式路径与历史回读的降级实现里**还被用到 ——
+    正式的聊天记录读写已经改走 ``repositories``（见 ``dev-notes/ch02.md``）。
+    保留这个参数是为了不破坏 ch01 的调用方与测试。
+
+    ``db_ping`` 是一个**探测函数**（同步或异步皆可），不是探测结果：
+    健康检查每次执行都要拿当下的状态，缓存一个布尔值会让数据库恢复之后
+    仍然一直报不健康。
     """
-    app = FastAPI(title="MewHelp 智能客服 API", version="0.1.0")
+    app = FastAPI(title="MewHelp 智能客服 API", version="0.2.0")
     app.state.chat_model = model
     app.state.session_store = store
+    # 显式赋值（即使为 None）：这是「测试用注入配置、不读宿主机 .env」的实际生效点。
     app.state.settings = settings
+    app.state.repositories = repositories
+    app.state.db_ping = db_ping
 
     # -- 异常处理 ---------------------------------------------------------
 
@@ -288,11 +473,14 @@ def create_app(
     # -- 健康检查 ---------------------------------------------------------
 
     @app.get("/healthz")
-    async def healthz():
+    async def healthz(request: Request):
         """健康检查。
 
-        配置缺失时返回 **503**（而不是 200）—— 否则编排器/负载均衡会认为实例健康，
+        配置缺失返回 **503**（而不是 200）—— 否则编排器/负载均衡会认为实例健康，
         持续把流量打进来，而每个请求都会 503。缺配置的实例就该被判为未就绪。
+
+        数据库不可用同样返回 **503**：聊天与工具都依赖它，一个连不上库的实例
+        接不了任何真实请求。
         """
         try:
             current = app.state.settings if app.state.settings is not None else get_settings()
@@ -304,17 +492,28 @@ def create_app(
                     "model": None,
                     "base_url_configured": False,
                     "context_token_budget": None,
+                    "database": "unknown",
                     "hint": "请在项目根目录创建 .env（可参考 .env.example）。",
                     # 脱敏：pydantic 的校验错误会带出 input_value，里面有密钥前几位
                     "detail": redact(exc),
                 },
             )
-        return {
-            "status": "ok",
+
+        database_ok = await _ping_database(request)
+        body = {
+            "status": "ok" if database_ok else "degraded",
             "model": current.openai_model,
             "base_url_configured": bool(current.openai_base_url),
             "context_token_budget": current.context_token_budget,
+            "database": "ok" if database_ok else "unavailable",
         }
+        if not database_ok:
+            body["hint"] = (
+                "数据库不可用：确认 docker compose up -d 已起，且 .env 的 MYSQL_* 与 "
+                "docker-compose.yml 一致。"
+            )
+            return JSONResponse(status_code=503, content=body)
+        return body
 
     # -- 对话（一个路径，stream 开关切换两种响应形态）----------------------
 
@@ -335,6 +534,7 @@ def create_app(
         settings_: Settings = Depends(get_app_settings),
         model_: BaseChatModel = Depends(get_model),
         store_: InMemorySessionStore = Depends(get_store),
+        repositories_: Repositories = Depends(get_repositories),
     ):
         """一个路径两种响应形态。
 
@@ -347,18 +547,22 @@ def create_app(
 
         if req.stream:
             return StreamingResponse(
-                _chat_stream_body(req, settings_, model_, store_, session_id),
+                _chat_stream_body(
+                    req, settings_, model_, store_, repositories_, session_id
+                ),
                 media_type=SSE_MEDIA_TYPE,
             )
 
         try:
-            text, meta = await complete_chat(
+            text, meta = await complete_chat_with_tools(
                 session_id=session_id,
                 message=req.message,
-                store=store_,
                 model=model_,
+                repositories=repositories_,
                 budget_tokens=settings_.context_token_budget,
                 model_name=settings_.openai_model,
+                timeout=settings_.tool_timeout_seconds,
+                max_retries=settings_.tool_max_retries,
             )
         except Exception as exc:  # noqa: BLE001
             raise _as_upstream_error(exc) from exc
@@ -381,9 +585,14 @@ def create_app(
     )
     async def session_messages(
         session_id: str,
-        store_: InMemorySessionStore = Depends(get_store),
+        repositories_: Repositories = Depends(get_repositories),
     ) -> SessionMessagesResponse:
-        return _session_messages_payload(session_id, store_)
+        """从 ``messages`` 表回读历史（含每轮的工具轨迹）。
+
+        ch02 起不再读内存存储 —— 这样徽章在**刷新页面后仍然在**，
+        而且重启服务后历史不会凭空消失。
+        """
+        return await _db_session_messages_payload(session_id, repositories_)
 
     # -- 结构化提取（一次返回完整 JSON，不流式）---------------------------
 

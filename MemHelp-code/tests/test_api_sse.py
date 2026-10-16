@@ -1,10 +1,29 @@
 """SSE 流式接口测试。
 
 钉住三件事：
-1. 事件名与顺序：``meta`` → N 个 ``token`` → ``done``；
+1. 事件名与顺序：``meta`` → ``token``* → ``done``；
 2. 每个事件的 ``data`` 都是合法 JSON（前端直接 JSON.parse，不能有裸文本）；
 3. **上游流到一半挂掉时补 ``event: error`` 再收尾**，而不是让连接裸断
    （Review Focus 5）。
+
+## ch02 起「无工具路径的 token 不再是多块」
+
+ch02 的编排为了拿到**确定的 ``tool_calls``**，第 1 次模型调用改成非流式
+（见 ``app/chat_tools.py`` 的模块文档）。于是「模型不调工具」这条路上，
+文本在第 1 次调用里就整段拿到了，只能**一次性**作为一个 token 帧发出；
+真正逐块的流式发生在「调了工具、回灌之后」那一段。
+
+所以这里的断言从「token 帧的个数」改成「各 token 帧拼起来的内容」：
+个数是传输细节，内容才是不变量。逐块流式的证据改由
+``test_streaming_after_a_tool_call_is_still_incremental`` 与
+``tests/test_chat_tools.py`` 的工具路径用例提供。
+
+## ``fail_after`` 的两种语义（ch02 起）
+
+- ``fail_after=0``：第 1 次（非流式）调用就抛 —— 「一上来就挂」，只剩 ``error`` 帧。
+- ``fail_after=N>=1``：第 1 次成功、流式那一段吐完 N 块后抛 —— 「流到一半挂」。
+
+以前只有后者能表达，因为第 1 次调用是流式的。见 ``tests/fakes.py`` 的说明。
 """
 
 import json
@@ -12,13 +31,21 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
-from app.main import create_app
+from app import main as app_main
 from tests.fakes import FakeChatModel
+
+#: 带工具调用的假模型要用到的 tool_call（第 1 次调用返回它）。
+_TOOL_CALL = {
+    "name": "query_logistics",
+    "args": {"order_id": "1001"},
+    "id": "call_1",
+    "type": "tool_call",
+}
 
 
 def _client(test_settings, model=None) -> TestClient:
     return TestClient(
-        create_app(
+        app_main.create_app(
             model=model or FakeChatModel(chunks=["好"]),
             settings=test_settings,
         )
@@ -50,6 +77,10 @@ def _events(text: str) -> list[tuple[str, dict | None]]:
     return events
 
 
+def _deltas(events) -> list[str]:
+    return [d["delta"] for n, d in events if n == "token"]
+
+
 def test_content_type_is_event_stream(test_settings):
     _, headers = _stream(_client(test_settings), {"session_id": "s1", "message": "在吗"})
     assert headers["content-type"].startswith("text/event-stream")
@@ -65,29 +96,49 @@ def test_sse_event_sequence_and_payloads(test_settings):
 
     assert names[0] == "meta"
     assert names[-1] == "done"
-    assert names.count("token") == 2
+    assert "token" in names
 
     meta = events[0][1] or {}
     assert meta["session_id"] == "s1"
     assert meta["model"]
 
-    assert [d for n, d in events if n == "token"] == [{"delta": "您"}, {"delta": "好"}]
+    # 无工具路径：第 1 次非流式调用已拿到全文，一次性发出
+    assert "".join(_deltas(events)) == "您好"
 
     done = events[-1][1] or {}
     assert done["finish_reason"] == "stop"
     assert done["trimmed"] == 0
     assert done["kept"] == 0
+    assert done["tools"] == []
 
 
-def test_sse_streams_content_incrementally_not_one_blob(test_settings):
-    """真流式的证据：token 事件是分开的多个，而不是一个装全部内容的块。"""
+def test_sse_streams_the_whole_answer_not_a_prefix(test_settings):
+    """ch02 改为断言内容而不是块数（见模块文档）。
+
+    内容是契约（用户看到什么），块数是传输细节。
+    """
     text, _ = _stream(
         _client(test_settings, FakeChatModel(chunks=["一", "二", "三"])),
         {"message": "x"},
     )
-    token_events = [d for n, d in _events(text) if n == "token"]
-    assert len(token_events) == 3
-    assert "".join(d["delta"] for d in token_events) == "一二三"
+    assert "".join(_deltas(_events(text))) == "一二三"
+
+
+def test_streaming_after_a_tool_call_is_still_incremental(test_settings):
+    """逐块流式的**证据转移到了工具路径**：第 2 次调用仍然是真流式。
+
+    这条要保住「流式没有整体退化」这个断言 —— 只是它现在发生在回灌之后那一段。
+    """
+    text, _ = _stream(
+        _client(
+            test_settings,
+            FakeChatModel(chunks=["已", "发", "货"], tool_calls_then_stream=[_TOOL_CALL]),
+        ),
+        {"session_id": "s1", "message": "订单 1001 的物流到哪了"},
+    )
+    deltas = _deltas(_events(text))
+
+    assert deltas == ["已", "发", "货"], "工具回灌之后必须逐块流式"
 
 
 def test_sse_works_without_session_id_and_returns_generated_one(test_settings):
@@ -102,18 +153,25 @@ def test_sse_does_not_emit_empty_delta_events(test_settings):
         _client(test_settings, FakeChatModel(chunks=["好", "", "的"])),
         {"message": "x"},
     )
-    deltas = [d["delta"] for n, d in _events(text) if n == "token"]
-    assert deltas == ["好", "的"]
+    assert "" not in _deltas(_events(text))
+    assert "".join(_deltas(_events(text))) == "好的"
 
 
 def test_sse_sends_error_event_when_upstream_fails_midstream(test_settings):
     """Review Focus 5：流中途上游挂了，必须补 error 事件而不是裸断。
 
-    注意必须让失败发生在**流中途**：`fail_after=1` 表示吐完第 1 块之后抛错，
-    所以 chunks 至少要有 2 块，否则循环一次就正常结束，压根不会失败。
+    用工具路径来表达「流中途挂」：第 1 次选择成功，第 2 次流式吐第 1 块之后抛
+    （``fail_after=1`` 只作用于流式路径）。
     """
     text, _ = _stream(
-        _client(test_settings, FakeChatModel(chunks=["好", "再也发不出来"], fail_after=1)),
+        _client(
+            test_settings,
+            FakeChatModel(
+                chunks=["好", "再也发不出来"],
+                fail_after=1,
+                tool_calls_then_stream=[_TOOL_CALL],
+            ),
+        ),
         {"session_id": "s1", "message": "在吗"},
     )
     events = _events(text)
@@ -128,10 +186,28 @@ def test_sse_sends_error_event_when_upstream_fails_midstream(test_settings):
     assert err["message"]
 
 
+def test_sse_sends_error_event_when_the_first_call_fails(test_settings):
+    """上游在第 1 次调用就挂（``fail_after=0``）：只剩 error 帧。"""
+    text, _ = _stream(
+        _client(test_settings, FakeChatModel(chunks=["好"], fail_after=0)),
+        {"session_id": "s1", "message": "在吗"},
+    )
+    names = [n for n, _ in _events(text)]
+
+    assert names[0] == "meta"
+    assert "token" not in names
+    assert names[-1] == "error"
+
+
 def test_sse_error_stream_persists_only_the_question(test_settings):
     """上游挂掉：只保留用户那一轮，不落库半截回答（半截会污染下一轮上下文）。"""
     client = _client(
-        test_settings, FakeChatModel(chunks=["好", "再也发不出来"], fail_after=1)
+        test_settings,
+        FakeChatModel(
+            chunks=["好", "再也发不出来"],
+            fail_after=1,
+            tool_calls_then_stream=[_TOOL_CALL],
+        ),
     )
     _stream(client, {"session_id": "s1", "message": "在吗"})
     msgs = client.post("/api/chat/sessions/s1/messages").json()["messages"]
@@ -155,12 +231,6 @@ def test_sse_emits_error_event_when_upstream_sends_only_empty_chunks(test_settin
     assert "done" not in names, "没有内容就不该发 done"
     assert names[-1] == "error"
     assert (events[-1][1] or {})["type"] == "upstream_empty_response"
-
-    # 历史里只有用户那一轮
-    msgs = _client(test_settings, FakeChatModel(chunks=["", ""])).post(
-        "/api/chat/sessions/s1/messages"
-    )
-    assert msgs.status_code == 200
 
 
 def test_non_streaming_empty_response_is_an_error_not_empty_content(test_settings):

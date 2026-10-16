@@ -155,20 +155,29 @@ class FakeChatModel(BaseChatModel):
             self.turn_state.tool_calls_fired = True
             return AIMessage(content="", tool_calls=list(self.tool_calls_then_stream))
 
-        # 显式给了 chunks 就以它为准。必须**排在结构化判定之前**：
-        # ch02 的编排会先 bind_tools（于是 bound_schemas 非空），但编排走的是
-        # 「chunks 就是回复文本」这条路，不是 with_structured_output 那条。
-        # 顺序反了会让非流式调用返回无意义的默认 ``reply="ok"``，
-        # 掩盖掉「文本到底有没有被取回」。
+        # 结构化输出路径：只有明确给了 structured_payload 才走它。
+        # **判据用 structured_payload 而不是 bound_schemas** —— ch02 的单轮编排
+        # 也会先 bind_tools（于是 bound_schemas 非空），但编排走的是
+        # 「第 1 次非流式拿文本、第 2 次 astream 逐块」那条路，
+        # 不是 with_structured_output 那条。
+        if self.structured_payload is not None and self.bound_schemas:
+            return self._structured_message()
+
+        # 非流式回复。判据用 **``model_fields_set``**（调用方是否显式传了该参数），
+        # 而不是比较值 —— ``reply`` 的默认值就是 ``"ok"``，拿它当哨兵无法区分
+        # 「显式设成 ok」与「压根没设」。
+        #
+        # 为什么必须精确到这个粒度：``chunks`` 的用途是「``astream`` 逐块吐什么」，
+        # 很多 ch01 用例只设 chunks 不设 reply（它们只关心流式输出，且期望非流式
+        # 路径回默认的 ok）。若在这里把 chunks 拼成整块返回，编排的第 1 次非流式调用
+        # 就会拿到全文，第 2 次 ``astream`` 不再产生逐块 token ——
+        # 表现为「流式退化成一个整块」，正是 ``tests/test_api_sse.py`` 钉住的行为。
+        if "reply" in self.model_fields_set:
+            return AIMessage(content=self.reply)
+
         if self.chunks:
             return AIMessage(content="".join(str(c) for c in self.chunks))
 
-        wants_structured = bool(self.bound_schemas)
-        if wants_structured and self.structured_payload is not None:
-            return self._structured_message()
-
-        # 没有 payload（或没绑 schema）时给一条普通消息：
-        # 若调用方期望结构化输出，PydanticToolsParser 会真实地解析失败。
         return AIMessage(content=self.reply)
 
     # -- 同步路径 ---------------------------------------------------------
@@ -181,6 +190,13 @@ class FakeChatModel(BaseChatModel):
         **kwargs: Any,
     ) -> ChatResult:
         self._record(messages)
+        # ch02 起编排的第 1 次调用是**非流式**的，所以 ``fail_after=0`` 必须在这里就抛，
+        # 否则「上游从一开始就挂」这个场景在 ch02 的链路上根本触发不到
+        # （流式那一段压根不会被执行到）。
+        # ``fail_after>=1`` 仍然只作用于流式路径：那表示「第 1 次选择成功了，
+        # 回灌之后组织答案时才挂」，两者是不同的故障时点。
+        if self.fail_after == 0:
+            raise RuntimeError("fake upstream failure before first token")
         return ChatResult(generations=[ChatGeneration(message=self._reply_message())])
 
     def _stream_items(self) -> list[Any]:

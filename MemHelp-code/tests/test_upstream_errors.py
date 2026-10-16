@@ -15,7 +15,7 @@ import openai
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import create_app
+from app import main as app_main
 from tests.fakes import FakeChatModel, FailingChatModel
 
 
@@ -65,7 +65,7 @@ def test_extract_maps_infrastructure_errors_to_upstream_types(
     那样调用方会以为「这段文本抽不出来」，实际是上游不可达或 .env 里的模型名不对
     —— 排查方向完全错。评估脚本也会因此建议「去改 Prompt」，把功夫花在错地方。
     """
-    client = TestClient(create_app(model=FailingChatModel(error=error), settings=test_settings))
+    client = TestClient(app_main.create_app(model=FailingChatModel(error=error), settings=test_settings))
     resp = client.post("/api/extract", json={"text": "订单 123 要退款"})
     assert resp.status_code == expected_status
     assert resp.json()["error"]["type"] == expected_type
@@ -83,7 +83,7 @@ def test_extract_maps_infrastructure_errors_to_upstream_types(
 def test_chat_maps_infrastructure_errors_to_upstream_types(
     test_settings, error, expected_type
 ):
-    client = TestClient(create_app(model=FailingChatModel(error=error), settings=test_settings))
+    client = TestClient(app_main.create_app(model=FailingChatModel(error=error), settings=test_settings))
     resp = client.post(
         "/api/chat/completions", json={"message": "在吗", "stream": False}
     )
@@ -94,7 +94,7 @@ def test_chat_maps_infrastructure_errors_to_upstream_types(
 def test_streaming_reports_infrastructure_error_as_sse_error_event(test_settings):
     """流式路径：上游连不上时，客户端要收到 error 事件（而不是裸断的流）。"""
     client = TestClient(
-        create_app(model=FailingChatModel(error=_connection_error()), settings=test_settings)
+        app_main.create_app(model=FailingChatModel(error=_connection_error()), settings=test_settings)
     )
     with client.stream(
         "POST", "/api/chat/completions", json={"session_id": "s1", "message": "在吗"}
@@ -111,7 +111,7 @@ def test_streaming_reports_infrastructure_error_as_sse_error_event(test_settings
 def test_extraction_failed_is_reserved_for_schema_mismatch(test_settings):
     """反面对照：模型「有输出但不符合 schema」才该是 422 extraction_failed。"""
     client = TestClient(
-        create_app(model=FakeChatModel(reply="我不太明白"), settings=test_settings)
+        app_main.create_app(model=FakeChatModel(reply="我不太明白"), settings=test_settings)
     )
     resp = client.post("/api/extract", json={"text": "随便说说"})
     assert resp.status_code == 422
@@ -127,7 +127,7 @@ def test_extraction_failed_is_reserved_for_schema_mismatch(test_settings):
 
 def test_extract_error_uses_the_error_envelope(test_settings):
     client = TestClient(
-        create_app(model=FailingChatModel(error=_connection_error()), settings=test_settings)
+        app_main.create_app(model=FailingChatModel(error=_connection_error()), settings=test_settings)
     )
     body = client.post("/api/extract", json={"text": "订单 123"}).json()
     assert set(body) == {"error"}, "错误响应体只能是 error 外壳"
@@ -142,7 +142,7 @@ def test_chat_validation_error_uses_the_error_envelope(test_settings):
     validation_error（这个差异是实测出来的，不是猜的）。
     """
     client = TestClient(
-        create_app(model=FakeChatModel(reply="ok"), settings=test_settings)
+        app_main.create_app(model=FakeChatModel(reply="ok"), settings=test_settings)
     )
     body = client.post("/api/chat/completions", json={"message": ""}).json()
     assert set(body) == {"error"}
@@ -154,7 +154,7 @@ def test_sse_error_event_uses_the_same_shape_as_json_errors(test_settings):
     import json
 
     client = TestClient(
-        create_app(model=FailingChatModel(error=_connection_error()), settings=test_settings)
+        app_main.create_app(model=FailingChatModel(error=_connection_error()), settings=test_settings)
     )
     with client.stream(
         "POST", "/api/chat/completions", json={"session_id": "s1", "message": "在吗"}
@@ -170,7 +170,7 @@ def test_sse_error_event_uses_the_same_shape_as_json_errors(test_settings):
 def test_secrets_are_redacted_in_error_messages(test_settings):
     """上游异常原文里若带密钥，回给客户端时必须是脱敏的。"""
     leaky = RuntimeError("boom with key sk-abcdef1234567890 in it")
-    client = TestClient(create_app(model=FailingChatModel(error=leaky), settings=test_settings))
+    client = TestClient(app_main.create_app(model=FailingChatModel(error=leaky), settings=test_settings))
     body = client.post("/api/extract", json={"text": "x"}).text
     assert "sk-abcdef1234567890" not in body
     assert "sk-***" in body
@@ -178,7 +178,7 @@ def test_secrets_are_redacted_in_error_messages(test_settings):
 
 def test_secrets_are_redacted_in_sse_error_events(test_settings):
     leaky = RuntimeError("boom with key sk-abcdef1234567890 in it")
-    client = TestClient(create_app(model=FailingChatModel(error=leaky), settings=test_settings))
+    client = TestClient(app_main.create_app(model=FailingChatModel(error=leaky), settings=test_settings))
     with client.stream(
         "POST", "/api/chat/completions", json={"session_id": "s1", "message": "在吗"}
     ) as resp:
@@ -190,7 +190,7 @@ def test_secrets_are_redacted_in_sse_error_events(test_settings):
 def test_configuration_error_message_is_redacted(monkeypatch):
     """配置缺失时 pydantic 会带出 input_value（含密钥前几位），必须脱敏。"""
     from app.config import Settings, get_settings
-    from app.main import create_app
+    from app import main as app_main
 
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-super-secret-partial")
@@ -201,7 +201,7 @@ def test_configuration_error_message_is_redacted(monkeypatch):
     )
     get_settings.cache_clear()
 
-    resp = TestClient(create_app()).post(
+    resp = TestClient(app_main.create_app()).post(
         "/api/chat/completions", json={"message": "在吗", "stream": False}
     )
     assert resp.status_code == 503
@@ -222,10 +222,10 @@ def test_missing_config_yields_503_not_an_unhandled_exception():
     「从 GitHub 全新克隆后跑测试」暴露出来（开发机上有 .env 所以一直没触发）。
     """
     from app.config import get_settings
-    from app.main import create_app
+    from app import main as app_main
 
     get_settings.cache_clear()
-    client = TestClient(create_app(), raise_server_exceptions=False)
+    client = TestClient(app_main.create_app(), raise_server_exceptions=False)
 
     for stream in (False, True):
         resp = client.post(

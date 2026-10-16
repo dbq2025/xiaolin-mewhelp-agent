@@ -5,6 +5,7 @@ JSON Schema 交给模型，因此它们是提取准确率的一部分，不能�
 """
 
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -130,12 +131,23 @@ class ChatResponse(BaseModel):
 
 
 class SessionMessagesResponse(BaseModel):
-    """某会话已保存的历史消息。"""
+    """某会话已保存的历史消息。
+
+    ``messages`` 每项形如
+    ``{"role": "human"|"ai"|"tool", "content": "...", "tools": [...]}``。
+
+    ``tools`` **只在那一轮真的调过工具时才出现**（见 ``api.py`` 的构造逻辑）：
+    省略而不是填 ``null``，是为了让「没调工具」与「字段没实现」在前端不可区分 ——
+    前端只需 ``if (msg.tools)`` 一处判断，不必区分 ``null`` / ``[]`` / 缺字段三种形态。
+    """
 
     session_id: str = Field(description="会话 ID。")
-    messages: list[dict[str, str]] = Field(
+    messages: list[dict[str, Any]] = Field(
         default_factory=list,
-        description="历史消息，每项形如 {\"role\": \"human\"|\"ai\", \"content\": \"...\"}。",
+        description=(
+            "历史消息。``tools`` 字段（可缺省）是本轮的工具轨迹，"
+            "每项含 name / args / ok / duration_ms / attempts。"
+        ),
     )
 
 
