@@ -90,6 +90,13 @@ class FakeChatModel(BaseChatModel):
     这就是单轮编排要面对的真实形态：第一次调用只为拿工具选择，
     第二次调用（回灌工具结果之后）才产文本。
     """
+    tool_call_extra_kwargs: dict[str, Any] = Field(default_factory=dict)
+    """给「第 1 次调用返回的那条带 tool_calls 的消息」附加的额外字段。
+
+    用来模拟思考模型：``deepseek-flash`` 会在 ``additional_kwargs`` 里带
+    ``reasoning_content``，而**第二次请求必须把它一并带回**，否则上游报
+    ``The reasoning_content in the thinking mode must be passed back to the API.``
+    """
     turn_state: TurnState = Field(default_factory=TurnState)
     """跨副本共享的调用状态（见 ``TurnState`` 的说明）。"""
     bind_tools_calls: Recorder | None = None
@@ -153,7 +160,11 @@ class FakeChatModel(BaseChatModel):
         # ch02：第一次调用给工具选择，之后才产文本。
         if self.tool_calls_then_stream and not self.turn_state.tool_calls_fired:
             self.turn_state.tool_calls_fired = True
-            return AIMessage(content="", tool_calls=list(self.tool_calls_then_stream))
+            return AIMessage(
+                content="",
+                tool_calls=list(self.tool_calls_then_stream),
+                additional_kwargs=dict(self.tool_call_extra_kwargs),
+            )
 
         # 结构化输出路径：只有明确给了 structured_payload 才走它。
         # **判据用 structured_payload 而不是 bound_schemas** —— ch02 的单轮编排

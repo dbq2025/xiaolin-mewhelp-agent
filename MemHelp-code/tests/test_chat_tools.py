@@ -599,6 +599,67 @@ async def test_tools_stay_available_on_the_second_call(repos):
     assert len(model.bind_tools_calls.messages) == 10, "两次调用各绑五个"
 
 
+async def test_reasoning_content_from_the_first_call_is_carried_into_the_second(repos):
+    """**思考模型的字段必须原样带回第 2 次调用。**
+
+    踩过的坑（端到端跑验收时才暴露）：``deepseek-flash`` 是思考模型，第 1 次响应里
+    除了 ``tool_calls`` 还带 ``reasoning_content``（住在 ``additional_kwargs``）。
+    第二次请求不带回它就报：
+
+        400 The `reasoning_content` in the thinking mode must be passed back to the API.
+
+    所以编排**不能**用 ``AIMessage(content="", tool_calls=[chosen])`` 重建那条消息 ——
+    那会把除 tool_calls 之外的一切丢掉。这个 bug 是**间歇性**的
+    （只在模型真的产生思考内容时炸），所以它看起来像随机故障。
+    """
+    model = FakeChatModel(
+        chunks=["好"],
+        tool_calls_then_stream=[_tool_call()],
+        tool_call_extra_kwargs={"reasoning_content": "用户要查物流，我该调用 query_logistics"},
+        recorder=Recorder(),
+    )
+    executor = _fake_executor([ToolResult("query_logistics", {}, True, "{}", None, 1, 5)])
+
+    await _collect(**_common(repos, model, executor))
+
+    from langchain_core.messages import AIMessage
+
+    assistant_messages = [m for m in model.recorder.messages if isinstance(m, AIMessage)]
+    assert assistant_messages, "第 2 次调用必须带上第 1 次那条 assistant 消息"
+    carried = assistant_messages[0].additional_kwargs
+    assert carried.get("reasoning_content") == "用户要查物流，我该调用 query_logistics", (
+        f"思考内容没被带回第 2 次调用，实际上游会 400。additional_kwargs={carried!r}"
+    )
+
+
+async def test_only_the_first_tool_call_survives_into_the_second_call(repos):
+    """多工具调用时，消息里只能留**被执行的那一个**。
+
+    留了未执行的调用，上游会认为我们漏了它们的 ``ToolMessage``。
+    这条与「思考字段必须保留」是一对：**裁剪 tool_calls，但保留其它字段**。
+    """
+    model = FakeChatModel(
+        chunks=["好"],
+        tool_calls_then_stream=[
+            _tool_call("query_logistics", {"order_id": "1001"}, "call_a"),
+            _tool_call("query_faq", {"keyword": "运费"}, "call_b"),
+        ],
+        tool_call_extra_kwargs={"reasoning_content": "先查物流"},
+        recorder=Recorder(),
+    )
+    executor = _fake_executor([ToolResult("query_logistics", {}, True, "{}", None, 1, 5)])
+
+    await _collect(**_common(repos, model, executor))
+
+    from langchain_core.messages import AIMessage
+
+    assistant = next(m for m in model.recorder.messages if isinstance(m, AIMessage))
+    assert len(assistant.tool_calls) == 1
+    assert assistant.tool_calls[0]["id"] == "call_a"
+    # 裁的是 tool_calls，不是 other fields
+    assert assistant.additional_kwargs.get("reasoning_content") == "先查物流"
+
+
 # ---------------------------------------------------------------------------
 # 失败语义（沿用 ch01：不落半截回答）
 # ---------------------------------------------------------------------------

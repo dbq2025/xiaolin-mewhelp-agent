@@ -128,6 +128,27 @@ def _tool_label(tool: str) -> str:
     return TOOL_LABELS.get(tool, f"调用 {tool}…").rstrip("…")
 
 
+def _first_call_only(first: AIMessage, chosen: dict[str, Any]) -> AIMessage:
+    """把第 1 次调用的响应裁剪成「只含第一个工具调用」，其余字段**原样保留**。
+
+    两个方向都要照顾：
+
+    1. **保留** ``additional_kwargs`` 等字段。思考模型（``deepseek-flash``）的
+       ``reasoning_content`` 就住在那里，第二次请求必须带回，否则上游 400：
+       ``The reasoning_content in the thinking mode must be passed back to the API.``
+       所以不能用 ``AIMessage(content="", tool_calls=[chosen])`` 重建一条 ——
+       那会把除 ``tool_calls`` 之外的一切都丢掉，表现为**间歇性**失败。
+    2. **裁掉**多余的 ``tool_calls``。模型偶尔一轮给多个调用，而单轮策略只执行第一个；
+       若把其余调用一起放回消息里，上游会认为我们漏了它们的 ``ToolMessage``
+       （报错大意是「每个 tool_call 都必须有对应的 tool 响应」）。
+
+    返回一条**新**消息（浅拷贝原字段），不改动上游返回的对象。
+    """
+    if len(first.tool_calls) <= 1:
+        return first
+    return first.model_copy(update={"tool_calls": [chosen]})
+
+
 def _as_mapping(data: Any) -> dict[str, Any] | None:
     """尽量把工具数据看成字典；不是就不猜。"""
     if isinstance(data, dict):
@@ -241,9 +262,24 @@ async def astream_chat_with_tools(
                 }
             )
 
+            # **原样复用第 1 次调用返回的那条 assistant 消息**，不要重建一条。
+            #
+            # 踩过的坑：``deepseek-flash`` 是思考模型，它的响应里除了 ``tool_calls``
+            # 还带 ``reasoning_content``（LangChain 放在 ``additional_kwargs`` 里）。
+            # 第二次请求必须把思考内容一并带回，否则上游直接 400：
+            #   "The `reasoning_content` in the thinking mode must be passed back to the API."
+            #
+            # 而「重建一条 AIMessage(content="", tool_calls=[...])」会丢掉那个字段，
+            # 于是**间歇性**失败 —— 只在模型真的产生了思考内容时炸，
+            # 于是它看起来像随机故障。ch01 的结构化提取也踩过同一个坑。
+            #
+            # 只取第一个工具调用时，仍要把整条消息放回去：``tool_calls`` 里若留了
+            # 未执行的调用，上游会认为我们漏了对应的 ``ToolMessage``。
+            assistant_message = _first_call_only(first, chosen)
+
             follow_up: list[BaseMessage] = [
                 *ctx.messages,
-                AIMessage(content="", tool_calls=[chosen]),
+                assistant_message,
                 ToolMessage(content=tool_content, tool_call_id=call_id),
             ]
 

@@ -90,7 +90,7 @@ def _make_tools(repositories: Repositories) -> list[BaseTool]:
         return _query_logistics(order_id)
 
     @tool("query_faq", args_schema=QueryFaqArgs)
-    def query_faq(keyword: str) -> str:
+    async def query_faq(keyword: str) -> str:
         """检索平台的常见问题库，返回匹配的问答对。
 
         用于**平台规则类**问题：退货政策、退款流程、运费与包邮门槛、发票开具、
@@ -99,17 +99,24 @@ def _make_tools(repositories: Repositories) -> list[BaseTool]:
         若返回 count 为 0，说明库里没有这条，请如实告知用户，不要编造规则。
         """
         # 闭包捕获当次请求的仓库 —— 它不是给模型的参数，所以不出现在签名里。
-        return _query_faq(keyword, faq_repo=repositories.faq)
+        #
+        # **必须 async + await**：底层 ``_query_faq`` 是协程函数（它要 await 仓库）。
+        # 写成同步函数再 ``return _query_faq(...)`` 会返回一个 **coroutine 对象**，
+        # LangChain 把它当成工具结果原样回灌给模型 —— 表现为模型复述
+        # 「我帮你正在检索常见问题了：<coroutine object query_faq at 0x...>」。
+        # 这个 bug 单测测不出来（假执行器不经过真工具），只有端到端能发现。
+        return await _query_faq(keyword, faq_repo=repositories.faq)
 
     @tool("create_ticket", args_schema=CreateTicketArgs)
-    def create_ticket(description: str, ticket_type: str, conversation_id: str) -> str:
+    async def create_ticket(description: str, ticket_type: str, conversation_id: str) -> str:
         """创建人工工单，转交人工客服跟进。
 
         用于：用户明确要求人工处理；或问题需要人工介入（赔付、投诉、
         反复沟通未解决）。天气、闲聊、能直接答的规则问题**不要**建工单。
         conversation_id 必须原样使用系统提示中给出的会话 ID。
         """
-        return _create_ticket(
+        # 同上：底层 ``_create_ticket`` 是协程函数，必须 await。
+        return await _create_ticket(
             description,
             ticket_type,
             conversation_id,
