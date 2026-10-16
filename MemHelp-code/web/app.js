@@ -5,10 +5,15 @@
  * 自己按 SSE 规范切帧（event: / data: / 空行分隔）。
  *
  * 后端事件契约（见 app/api.py::_chat_stream_body）：
- *   event: meta   data: {session_id, model}
- *   event: token  data: {delta}                ← 逐字增量
- *   event: done   data: {finish_reason, session_id, trimmed, kept}
- *   event: error  data: {type, message, session_id}
+ *   event: meta    data: {session_id, model}
+ *   event: status  data: {tool, args, label}   ← ch02：工具执行**之前**推，显示「正在查询物流…」
+ *   event: token   data: {delta}               ← 逐字增量
+ *   event: done    data: {finish_reason, session_id, trimmed, kept, tools}
+ *   event: error   data: {type, message, session_id}
+ *
+ * ch02 的 done.tools 是本轮工具轨迹的**权威来源**（含成败与耗时），
+ * 徽章只用它渲染；status 帧只负责让用户立刻看到「在查数据」，不承担持久化职责。
+ * 历史回读（/messages）返回的每条消息也可能带 tools 字段，复用同一个渲染函数。
  */
 
 (() => {
@@ -89,6 +94,9 @@
     const avatar = el('div', 'avatar ' + (role === 'user' ? 'me' : 'bot'),
                        role === 'user' ? '我' : '美');
     const wrap = el('div', 'bubble-wrap');
+    // 工具执行状态行：在气泡**上方**，工具跑起来那一刻出现，拿到第一个 token 后隐去。
+    const status = el('div', 'tool-status');
+    status.hidden = true;
     const bubble = el('div', 'bubble');
 
     if (typing) {
@@ -97,13 +105,61 @@
       bubble.appendChild(dots);
     }
 
+    wrap.appendChild(status);
     wrap.appendChild(bubble);
     row.appendChild(avatar);
     row.appendChild(wrap);
     els.messages.appendChild(row);
     scrollToBottom(true);
 
-    return { row, wrap, bubble };
+    return { row, wrap, bubble, status };
+  }
+
+  /* ---------------------------------------------------------- 工具轨迹徽章
+   *
+   * 形如：🔧 查询物流 · 成功 · 12ms
+   *
+   * 渲染成 DOM 节点（不是 innerHTML）—— 工具名与参数来自模型输出，
+   * 走 innerHTML 就是一个现成的 XSS 面。textContent 天然免疫。
+   *
+   * label 用中文短语而不是工具名：用户看到「查询物流」比 query_logistics 有用。
+   */
+  const TOOL_LABELS = {
+    query_order: '查询订单',
+    query_product: '查询商品',
+    query_logistics: '查询物流',
+    query_faq: '检索常见问题',
+    create_ticket: '创建工单',
+  };
+
+  function renderToolBadges(tools) {
+    const box = el('div', 'tool-badges');
+    (tools || []).forEach((t) => {
+      const badge = el('span', 'tool-badge' + (t.ok === false ? ' failed' : ''));
+      badge.appendChild(el('span', 'tool-badge-icon', '🔧'));
+      badge.appendChild(el('span', 'tool-badge-name',
+                           TOOL_LABELS[t.name] || t.name || '未知工具'));
+      badge.appendChild(el('span', 'tool-badge-result', t.ok === false ? '失败' : '成功'));
+      if (typeof t.duration_ms === 'number') {
+        badge.appendChild(el('span', 'tool-badge-time', t.duration_ms + 'ms'));
+      }
+      if (t.ok === false && t.error) {
+        badge.title = t.error;      // 失败原因放 title，不占视觉空间
+      }
+      box.appendChild(badge);
+    });
+    return box;
+  }
+
+  /* 把徽章挂到气泡下方，并把本轮轨迹写进 dataset —— 刷新后从 /messages 回读时
+   * 用同一份数据渲染，所以徽章不会「刷新就消失」。 */
+  function attachTools(ctx, tools) {
+    if (!tools || !tools.length) return;
+    const existing = ctx.wrap.querySelector('.tool-badges');
+    if (existing) existing.remove();
+    ctx.wrap.appendChild(renderToolBadges(tools));
+    ctx.row.dataset.tools = JSON.stringify(tools);
+    scrollToBottom();
   }
 
   function welcome() {
@@ -163,7 +219,15 @@
       return;
     }
 
+    if (event === 'status') {
+      // 工具执行**之前**到达：先让用户看到「在查数据」，而不是干等。
+      ctx.showStatus(data.label || '正在查询…');
+      return;
+    }
+
     if (event === 'token') {
+      // 第一个字到了就说明工具那段结束了，把状态行收掉。
+      ctx.hideStatus();
       ctx.acc += data.delta || '';
       ctx.queuePaint();
       return;
@@ -171,6 +235,7 @@
 
     if (event === 'done') {
       ctx.finish();
+      attachTools(ctx, data.tools);
       if (els.stats.checked) {
         const s = el('div', 'stats');
         s.innerHTML = `上下文：保留 <code>${data.kept}</code> 条，`
@@ -183,6 +248,44 @@
 
     if (event === 'error') {
       ctx.fail(data);
+    }
+  }
+
+  // ------------------------------------------------------------------ 历史回读
+
+  /* 后端把角色叫 human / ai / tool，前端气泡只分「我」和「客服」两类。
+   * tool 行不单独渲染成气泡 —— 它的内容已经体现在徽章里了，再画一个气泡
+   * 会让用户看到一坨 JSON。 */
+  function roleToRow(role) {
+    return role === 'human' ? 'user' : 'bot';
+  }
+
+  async function restoreHistory() {
+    if (!sessionId) return;
+    try {
+      const resp = await fetch(`/api/chat/sessions/${sessionId}/messages`, { method: 'POST' });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const messages = (data.messages || []).filter((m) => roleToRow(m.role) && m.role !== 'tool');
+      if (!messages.length) return;
+
+      clearWelcome();
+      messages.forEach((m) => {
+        const role = roleToRow(m.role);
+        const row = addRow(role);
+        if (role === 'user') {
+          row.bubble.textContent = m.content || '';
+        } else {
+          row.bubble.innerHTML = m.content
+            ? renderMarkdown(m.content)
+            : '<span style="color:#9aa2af">（客服没有返回内容）</span>';
+          // 徽章随历史一起还原 —— 这正是「刷新后徽章还在」的实现
+          attachTools({ row: row.row, wrap: row.wrap }, m.tools);
+        }
+      });
+      scrollToBottom(true);
+    } catch {
+      /* 回读失败不该挡住聊天：静默退化成空白页，用户发一句就恢复正常 */
     }
   }
 
@@ -209,6 +312,15 @@
       bot,
       get acc() { return acc; },
       set acc(v) { acc = v; },
+      showStatus(text) {
+        bot.status.textContent = text;
+        bot.status.hidden = false;
+        scrollToBottom();
+      },
+      hideStatus() {
+        bot.status.hidden = true;
+        bot.status.textContent = '';
+      },
       queuePaint() {
         if (paintQueued) return;
         paintQueued = true;
@@ -228,10 +340,12 @@
       },
       fail(data) {
         settled = true;
+        ctx.hideStatus();
         if (!acc) bot.row.remove();
         else bot.bubble.innerHTML = renderMarkdown(acc);
         addNotice(`出错了：${data.type || 'error'}\n${data.message || ''}`, true);
         if (data.type === 'configuration_error') setStatus('.env 未配置', 'bad');
+        if (data.type === 'database_error') setStatus('数据库不可用', 'bad');
       },
     };
 
@@ -327,12 +441,21 @@
   els.input.focus();
   welcome();
 
+  // 恢复上次会话（同一浏览器会话内）。徽章也一并还原 —— 因为 /messages 会
+  // 把每轮的工具轨迹一起返回，见 app/api.py 的 _db_session_messages_payload。
+  restoreHistory();
+
   // 探一次健康检查，让顶栏状态反映真实配置
   fetch('/healthz')
-    .then((r) => r.json())
-    .then((h) => {
-      if (h.status === 'ok') setStatus(`已就绪 · ${h.model}`, 'ok');
-      else setStatus('配置缺失，请检查 .env', 'bad');
+    .then(async (r) => ({ ok: r.ok, body: await r.json().catch(() => ({})) }))
+    .then(({ ok, body }) => {
+      if (!ok && body.database === 'unavailable') {
+        setStatus('数据库不可用', 'bad');
+      } else if (body.status === 'ok') {
+        setStatus(`已就绪 · ${body.model}`, 'ok');
+      } else {
+        setStatus('配置缺失，请检查 .env', 'bad');
+      }
     })
     .catch(() => setStatus('无法连接后端', 'bad'));
 })();

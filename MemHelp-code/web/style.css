@@ -171,6 +171,61 @@ body {
 }
 .stats code { font-size: 11px; background: #f1f3f6; padding: 1px 4px; border-radius: 4px; }
 
+/* ---- ch02：工具执行状态行（气泡上方，工具跑起来那一刻出现）---- */
+.tool-status {
+  font-size: 11.5px;
+  color: var(--accent);
+  padding: 0 4px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.tool-status[hidden] { display: none; }
+/* 转圈：让「在查数据」有进行中的感觉，而不是一行静止的文字 */
+.tool-status::before {
+  content: '';
+  width: 9px; height: 9px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin .7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---- ch02：工具轨迹徽章（气泡下方，随历史一起还原）---- */
+.tool-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 0 4px;
+}
+.tool-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--ink-soft);
+  background: #f1f3f6;
+  border: 1px solid #e2e6ec;
+  border-radius: 999px;
+  padding: 3px 9px;
+  /* 工具名与耗时是等宽场景，用 tabular 避免徽章宽度跳动 */
+  font-variant-numeric: tabular-nums;
+}
+.tool-badge-icon { font-size: 10px; }
+.tool-badge-name { color: var(--ink); font-weight: 500; }
+.tool-badge-result { color: #1f9254; }
+.tool-badge-time { color: #9aa2af; }
+/* 失败用暖色描边而不是纯红底：徽章是信息，不是告警横幅 */
+.tool-badge.failed {
+  background: #fdf1ee;
+  border-color: #f3d3c9;
+}
+.tool-badge.failed .tool-badge-result { color: #c2410c; }
+/* 用户自己的气泡不做徽章，但历史回读时可能出现在 ai 行上，故只作用于 bot 侧 */
+.row.user .tool-status, .row.user .tool-badges { display: none; }
+
 /* 打字光标 */
 .caret {
   display: inline-block;
