@@ -31,6 +31,7 @@ CREATE TABLE messages (
   content         TEXT            NULL                     COMMENT '消息正文,assistant 纯工具调用时可为空',
   tool_calls      JSON            NULL                     COMMENT 'assistant 消息带的工具调用申请单',
   tool_call_id    VARCHAR(64)     NULL                     COMMENT 'tool 消息对应的申请单 id,回灌时对号入座',
+  tool_traces     JSON            NULL                     COMMENT '给界面看的工具轨迹(含耗时/成败),不参与模型历史',
   created_at      DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '产生时间',
   PRIMARY KEY (id),
   KEY idx_conversation_id (conversation_id),

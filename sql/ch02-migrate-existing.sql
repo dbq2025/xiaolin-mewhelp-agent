@@ -94,7 +94,33 @@ SET @sql := IF(
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 -- ---------------------------------------------------------------------------
--- 4. 自检
+-- 4. messages.tool_traces —— 存**给界面看的**工具轨迹
+--
+-- 为什么不把耗时/成败塞进已有的 ``tool_calls`` JSON：那一列会被原样塞回
+-- ``AIMessage(tool_calls=...)`` 作为**模型历史**，而 LangChain 对 tool_call
+-- 的字段是严格的 —— 实测多一个 ``duration_ms`` 会直接抛：
+--
+--     TypeError: tool_call() got an unexpected keyword argument 'duration_ms'
+--
+-- 所以模型历史必须保持干净的 ``{name, args, id}``；界面信息另开一列。
+-- 这一列的语义是「展示用」，与模型无关，因此格式由我们自己定。
+-- ---------------------------------------------------------------------------
+SET @has_traces := (
+  SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'messages'
+    AND COLUMN_NAME = 'tool_traces'
+);
+
+SET @sql := IF(
+  @has_traces = 0,
+  'ALTER TABLE messages ADD COLUMN tool_traces JSON NULL COMMENT ''给界面看的工具轨迹(含耗时/成败)''',
+  'SELECT ''skip: messages.tool_traces 已存在'' AS note'
+);
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- ---------------------------------------------------------------------------
+-- 5. 自检
 -- ---------------------------------------------------------------------------
 SELECT
   (SELECT COUNT(*) FROM information_schema.COLUMNS
@@ -103,6 +129,9 @@ SELECT
   (SELECT COUNT(*) FROM information_schema.STATISTICS
     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'conversations'
       AND INDEX_NAME = 'uk_session_id' AND NON_UNIQUE = 0)           AS unique_key_ok,
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'messages'
+      AND COLUMN_NAME = 'tool_traces')                               AS tool_traces_ok,
   (SELECT COUNT(*) FROM conversations
     WHERE session_id IS NULL OR session_id = '')                     AS blank_session_ids,
   (SELECT COUNT(*) FROM conversations)                               AS total_conversations;

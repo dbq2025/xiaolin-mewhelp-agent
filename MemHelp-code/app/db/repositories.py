@@ -116,6 +116,8 @@ class MessageRow:
     tool_calls: list[dict[str, Any]] | None
     tool_call_id: str | None
     created_at: datetime
+    #: 给界面看的工具轨迹（含耗时/成败）。**不参与模型历史**，见 models.Message。
+    tool_traces: list[dict[str, Any]] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +183,7 @@ class MessageRepository:
         content: str | None,
         tool_calls: Sequence[dict[str, Any]] | None,
         tool_call_id: str | None,
+        tool_traces: Sequence[dict[str, Any]] | None,
     ) -> None:
         # 入口校验：非法 role 在这里就炸，错误信息带角色名。
         # 靠 MySQL 的 ENUM 兜会拖到 commit，报的是驱动的
@@ -197,6 +200,7 @@ class MessageRepository:
                 content=content,
                 tool_calls=list(tool_calls) if tool_calls is not None else None,
                 tool_call_id=tool_call_id,
+                tool_traces=list(tool_traces) if tool_traces is not None else None,
             )
         )
         self._session.commit()
@@ -209,12 +213,25 @@ class MessageRepository:
         content: str | None,
         tool_calls: Sequence[dict[str, Any]] | None = None,
         tool_call_id: str | None = None,
+        tool_traces: Sequence[dict[str, Any]] | None = None,
     ) -> None:
         """追加一条消息。``role`` 必须是 ``MESSAGE_ROLES`` 之一。
 
+        :param tool_traces: 给界面看的工具轨迹（含耗时/成败）。
+            **必须与 ``tool_calls`` 分开传** —— 后者会被当模型历史回灌，
+            字段是严格的（多一个键就会让 ``AIMessage`` 构造失败）。
+
         :raises ValueError: 角色不在 DDL 的 ENUM 取值内。
         """
-        await _run(self._append, conversation_id, role, content, tool_calls, tool_call_id)
+        await _run(
+            self._append,
+            conversation_id,
+            role,
+            content,
+            tool_calls,
+            tool_call_id,
+            tool_traces,
+        )
 
     def _list(self, conversation_id: int) -> list[MessageRow]:
         rows = self._session.scalars(
@@ -230,6 +247,7 @@ class MessageRepository:
                 tool_calls=row.tool_calls,
                 tool_call_id=row.tool_call_id,
                 created_at=row.created_at,
+                tool_traces=row.tool_traces,
             )
             for row in rows
         ]

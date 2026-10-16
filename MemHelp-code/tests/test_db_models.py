@@ -59,6 +59,7 @@ def test_message_columns_match_ddl():
         "content",
         "tool_calls",
         "tool_call_id",
+        "tool_traces",
         "created_at",
     }
 

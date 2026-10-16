@@ -31,6 +31,8 @@ from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
+from sqlalchemy import Engine
+from sqlalchemy.exc import InterfaceError, OperationalError, PendingRollbackError
 
 from app.chat import astream_chat, complete_chat
 from app.chat_tools import astream_chat_with_tools, complete_chat_with_tools
@@ -110,14 +112,50 @@ def _classify_upstream_error(exc: Exception) -> UpstreamError:
     return UpstreamError(upstream_error_message(exc, type_), type_=type_)
 
 
-def _as_upstream_error(exc: Exception) -> UpstreamFault:
-    """已经是本地定义的故障就直接沿用它的 ``type``，否则去分类。
+#: 数据库故障的异常类型。用元组导入而不是靠字符串名匹配 ——
+#: SQLAlchemy 的异常层次是稳定的，而 ``classify_upstream_error_type`` 那套
+#: 关键词表是为 **OpenAI SDK** 的异常名写的，判数据库错误会给出**错误答案**
+#: （实测：``OperationalError(2003, "Can't connect...")`` 被它归成
+#: ``upstream_unavailable``，于是提示运维「请检查 OPENAI_BASE_URL 和网络」，
+#: 把排查方向指向了一个没坏的依赖）。
+_DB_FAULT_TYPES: tuple[type[BaseException], ...] = (
+    OperationalError,
+    InterfaceError,
+    PendingRollbackError,
+)
 
-    用例层（``app.chat``）会抛 ``UpstreamEmptyResponse`` 这类带类型的故障；
-    重新分类会把它的类型丢掉，退化成泛泛的 ``upstream_error``。
+
+def _is_database_fault(exc: BaseException) -> bool:
+    """这个异常是不是数据库故障（沿异常链判断，兼容被包装的情况）。"""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, _DB_FAULT_TYPES):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _as_upstream_error(exc: Exception) -> UpstreamFault:
+    """把异常映射成本项目的故障类型。
+
+    已经是本地定义的故障就直接沿用它的 ``type``，否则先判**数据库故障**，
+    最后才落到上游分类。
+
+    **数据库必须先判**：它是本服务自己的依赖，与「模型服务怎么了」是两类问题，
+    对应不同的状态码与不同的排查方向。混在一起会让一条 502 + 「检查 OPENAI_*」
+    的错误信息指向一个没坏的东西。
+
+    数据库故障一律 503（服务没准备好）：库连不上时这个实例接不了任何真实请求。
     """
     if isinstance(exc, UpstreamFault):
         return exc
+    if _is_database_fault(exc):
+        # 不把驱动原文给客户端：它含库地址、端口、账号，甚至 [SQL: ...] 语句。
+        # 这些细节留在服务端日志里（logger.exception），响应只给可判读的结论。
+        logger.exception("数据库故障", exc_info=exc)
+        return UpstreamError("数据库暂时不可用，请稍后重试。", type_="database_error")
     return _classify_upstream_error(exc)
 
 
@@ -142,12 +180,57 @@ def get_store(request: Request) -> InMemorySessionStore:
     return store if store is not None else get_session_store()
 
 
+def _database_for(request: Request) -> tuple[object, Engine]:
+    """取（或首次创建）**进程内共享**的 ``(sessionmaker, engine)``。
+
+    ``create_engine`` 会建连接池，所以引擎**必须**进程内只建一次 ——
+    每次新建等于把连接管理交给 GC，持续流量下表现为「MySQL 连接数缓慢涨到上限」，
+    而且每次都要付一次完整的连接握手。
+
+    **为什么把 engine 一起返回**：``/healthz`` 需要直接拿引擎去 ``SELECT 1``，
+    而它不该自己去拆 ``sessionmaker`` 的内部结构（那依赖 SQLAlchemy 的实现细节）。
+    显式存下引擎，两条路径都用同一份。
+
+    **为什么单独抽出来**：``get_repositories`` 与 ``_ping_database`` 都要用它。
+    最初只有前者用了缓存，后者每次 ``/healthz`` 都新建一个引擎且从不 dispose ——
+    而 ``/healthz`` 不是只在启动时跑，聊天页**每次加载**都会探它（Review I3）。
+    两条路径共用一个函数，这类「修了一处漏了另一处」就不会复发。
+
+    :raises UpstreamError: 配置缺失/非法，或数据库配置本身不合法。
+        转成规范的 ``configuration_error``（503），而不是把 pydantic 的报错
+        裸抛到 ASGI 层。
+    """
+    cached = getattr(request.app.state, "_database", None)
+    if cached is not None:
+        return cached
+
+    try:
+        current = get_app_settings(request)
+    except UpstreamFault:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise UpstreamError(
+            redact(f"配置缺失或非法，请检查 .env：{exc}"), type_="configuration_error"
+        ) from exc
+
+    try:
+        engine = create_engine_from(current)
+        factory = session_factory(engine)
+    except Exception as exc:  # noqa: BLE001
+        raise UpstreamError(
+            redact(f"数据库配置非法：{exc}"), type_="configuration_error"
+        ) from exc
+
+    database = (factory, engine)
+    request.app.state._database = database  # noqa: SLF001 - 进程级共享
+    return database
+
+
 async def get_repositories(request: Request):
     """取当次请求的数据仓库。**异步生成器依赖**，请求结束后关闭 Session。
 
     两段式：``app.state.repositories`` 有就直接用（测试注入，不关它 —— 那是调用方的）；
-    否则按 ``app.state.settings`` 建引擎（**引擎缓存**），再为本次请求新建一个
-    ``Session``，并在 ``finally`` 里关掉。
+    否则为本次请求新建一个 ``Session``，并在 ``finally`` 里关掉。
 
     **为什么必须是生成器而不是普通函数**：普通函数每请求新建一个 ``Session``
     却没人关它，连接要等 GC 才回到池里 —— 持续流量下表现为「MySQL 连接数缓慢涨到
@@ -155,17 +238,12 @@ async def get_repositories(request: Request):
     （这一条是自查发现的：所有 HTTP 用例都注入了仓库，于是真实那条路径从未被跑到；
     ``tests/test_api_tools.py::test_real_dependency_path_closes_its_session`` 现在钉住它。）
 
-    **为什么缓存引擎而不是缓存仓库/Session**：``create_engine`` 建连接池，
-    每次新建等于把连接管理交给 GC。但 ``Session`` **必须每请求一个**：
-    它不是线程安全的，跨请求共享会让并发请求互相写进对方的会话
-    （表现为间歇性的「聊天记录串台」）。仓库只是 Session 的薄包装。
+    **为什么 Session 必须每请求一个**：它不是线程安全的，跨请求共享会让并发请求
+    互相写进对方的会话（表现为间歇性的「聊天记录串台」）。仓库只是它的薄包装。
 
     **为什么生成器依赖不会在流式响应中途被关闭**：FastAPI 在**响应发送完毕之后**
     才执行 yield 之后的清理，所以 SSE 流期间 Session 一直可用。
     这一点由 ``tests/test_api_tools.py`` 的流式用例实际跑到（它们会落库）。
-
-    配置缺失（``.env`` 没配或非法）转成规范的 ``configuration_error``（503），
-    而不是把 pydantic 的报错裸抛到 ASGI 层。
     """
     injected = getattr(request.app.state, "repositories", None)
     if injected is not None:
@@ -173,26 +251,7 @@ async def get_repositories(request: Request):
         yield injected
         return
 
-    factory = getattr(request.app.state, "_session_factory", None)
-    if factory is None:
-        try:
-            current = get_app_settings(request)
-        except UpstreamFault:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            raise UpstreamError(
-                redact(f"配置缺失或非法，请检查 .env：{exc}"), type_="configuration_error"
-            ) from exc
-
-        try:
-            factory = session_factory(create_engine_from(current))
-        except Exception as exc:  # noqa: BLE001
-            raise UpstreamError(
-                redact(f"数据库配置非法：{exc}"), type_="configuration_error"
-            ) from exc
-        request.app.state._session_factory = factory  # noqa: SLF001 - 进程级共享
-
-    session = factory()
+    session = _database_for(request)[0]()
     try:
         yield Repositories.from_session(session)
     finally:
@@ -206,6 +265,10 @@ async def _ping_database(request: Request) -> bool:
     ``/healthz`` 的职责是「能不能服务」，配置缺失同样是不能服务，
     只是原因不同（由 ``status: misconfigured`` 表达）。
 
+    **引擎复用**（Review I3）：走 ``_database_for`` 拿**缓存的**引擎，不再每次新建。
+    修复前每次 ``/healthz`` 都新建一个连接池且从不 dispose，而聊天页每次加载
+    都会探它 —— 那是一条实打实的连接泄漏 + 每次一次完整的连接握手。
+
     **驱动异常的原文只进服务端日志，绝不进响应体**。``/healthz`` 通常是未认证端点，
     而 ``(2003, "Can't connect to MySQL server on '127.0.0.1' (111)")``
     与 ``using password: YES`` 这类文本会泄露库的内部地址、端口与账号
@@ -216,20 +279,19 @@ async def _ping_database(request: Request) -> bool:
         return bool(await _maybe_await(injected()))
 
     try:
-        current = get_app_settings(request)
+        _, engine = _database_for(request)
     except Exception:  # noqa: BLE001 - 配置缺失已在 healthz 主流程里单独报告
-        return False
-
-    try:
-        engine = create_engine_from(current)
-    except Exception:  # noqa: BLE001
-        logger.exception("建数据库引擎失败")
         return False
 
     alive = await ping(engine)
     if not alive:
         # 原因留给运维看日志；响应体只给一句通用说明。
-        logger.warning("数据库探测失败：无法连接 %s:%s", current.mysql_host, current.mysql_port)
+        current = getattr(request.app.state, "settings", None)
+        logger.warning(
+            "数据库探测失败：无法连接 %s:%s",
+            getattr(current, "mysql_host", "?"),
+            getattr(current, "mysql_port", "?"),
+        )
     return alive
 
 
@@ -340,7 +402,11 @@ async def _db_session_messages_payload(
         }
 
         if row.role == "assistant" and row.tool_calls:
-            item["tools"] = _tool_traces(row.tool_calls, rows, index)
+            # 优先用 ``tool_traces``（我们自己写的展示用数据，含耗时与成败）。
+            # 它是 ch02 迁移新增的列，老行可能没有 —— 那样退化成从 ``tool_calls``
+            # 与紧随其后的 ``tool`` 行推断，至少能还原 name/args/ok。
+            traces = getattr(row, "tool_traces", None)
+            item["tools"] = traces or _tool_traces(row.tool_calls, rows, index)
 
         payload.append(item)
 
@@ -476,9 +542,14 @@ def create_app(
     @app.exception_handler(UpstreamFault)
     async def on_upstream_fault(request: Request, exc: UpstreamFault):
         # 注册在父类上，让 UpstreamEmptyResponse 之类的子类也被接住。
-        # 只有本地的配置缺失/非法用 503（服务没准备好，运维该去修 .env）；
+        #
+        # 503 = 「服务没准备好，运维该去看配置或依赖」：本地的配置缺失/非法，
+        # 以及**数据库不可用**（库连不上时这个实例接不了任何真实请求）。
         # 其余上游问题一律 502（我们的服务在，是它依赖的上游出错）。
-        status = 503 if exc.type == "configuration_error" else 502
+        # **database_error 不加进来就会回落成 502**，把「我方依赖挂了」
+        # 与「模型服务挂了」混为一谈，两者排查方向不同。
+        needs_attention = exc.type in ("configuration_error", "database_error")
+        status = 503 if needs_attention else 502
         return _error(status, exc.type, redact(str(exc)))
 
     @app.exception_handler(ExtractionError)

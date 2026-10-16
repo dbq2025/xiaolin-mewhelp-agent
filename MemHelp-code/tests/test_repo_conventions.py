@@ -66,6 +66,38 @@ def test_powershell_scripts_are_valid_utf8(script: Path):
     body.decode("utf-8")  # 解码失败会抛 UnicodeDecodeError
 
 
+def test_migration_sql_quotes_are_balanced():
+    r"""迁移脚本里 ``IF(...)`` 构造的 SQL 字符串，引号数必须成对。
+
+    **为什么需要这条**：``sql/ch02-migrate-existing.sql`` 用
+    ``SET @sql := IF(cond, 'ALTER ...', 'SELECT ...')`` 这种写法，
+    字符串里的单引号要写成 ``''``。我在这里漏写过一个引号 ——
+    而**症状极具误导性**：MySQL 报的是 ``1064 near 'SELECT ''skip...'' AS note'``，
+    指向 ELSE 分支，真正坏的却是 THEN 分支少了收尾引号。
+    排查花了好几轮，所以钉住它。
+
+    判据：每行里单引号的个数必须是偶数（成对）。
+    """
+    import re
+
+    migration = REPO_ROOT / "sql" / "ch02-migrate-existing.sql"
+    assert migration.is_file(), f"找不到迁移脚本：{migration}"
+
+    offenders: list[tuple[int, str]] = []
+    for lineno, line in enumerate(migration.read_text(encoding="utf-8").splitlines(), 1):
+        stripped = line.strip()
+        if stripped.startswith("--") or not stripped:
+            continue
+        # 只检查含引号的行；``''`` 也算两个字符，正好用于判奇偶
+        if "'" in line and line.count("'") % 2 != 0:
+            offenders.append((lineno, line.strip()))
+
+    assert not offenders, (
+        "迁移脚本里有奇数个单引号的行（很可能是漏写了一个收尾引号）：\n"
+        + "\n".join(f"  第 {n} 行: {text}" for n, text in offenders)
+    )
+
+
 def test_seed_sql_never_contains_the_shipping_fee_keyword():
     """**验收标准 3 的语料基线**：``sql/ch02-seed.sql`` 的 FAQ 数据里不能出现「邮费」。
 

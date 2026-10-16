@@ -109,6 +109,14 @@ class Message(Base):
     tool_calls: Mapped[list | None] = mapped_column(JSON, nullable=True)
     #: tool 消息对应的申请单 id，回灌时对号入座。
     tool_call_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: **给界面看的**工具轨迹（含耗时、成败），由我们自己定格式。
+    #:
+    #: 为什么不并进 ``tool_calls``：那一列会被原样塞回
+    #: ``AIMessage(tool_calls=...)`` 当作**模型历史**，而 LangChain 对 tool_call
+    #: 的字段是严格的 —— 实测多一个 ``duration_ms`` 会直接抛
+    #: ``TypeError: tool_call() got an unexpected keyword argument 'duration_ms'``。
+    #: 所以模型历史保持干净的 ``{name, args, id}``，界面信息另开一列。
+    tool_traces: Mapped[list | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
     )

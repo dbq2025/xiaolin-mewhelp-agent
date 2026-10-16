@@ -48,7 +48,16 @@ class _RecordingMessageRepo:
         self._history = list(history or [])
         self.fail_on_append = False
 
-    async def append(self, conversation_id, *, role, content, tool_calls=None, tool_call_id=None):
+    async def append(
+        self,
+        conversation_id,
+        *,
+        role,
+        content,
+        tool_calls=None,
+        tool_call_id=None,
+        tool_traces=None,
+    ):
         if self.fail_on_append:
             raise RuntimeError("落库失败")
         self.appended.append(
@@ -58,6 +67,7 @@ class _RecordingMessageRepo:
                 "content": content,
                 "tool_calls": tool_calls,
                 "tool_call_id": tool_call_id,
+                "tool_traces": tool_traces,
             }
         )
 
@@ -491,6 +501,35 @@ async def test_tool_turn_persists_four_rows_in_order(repos):
     assert repos.messages.appended[3]["content"] == "已发货"
 
 
+async def test_badge_details_are_persisted_separately_from_model_history(repos):
+    """徽章信息（含耗时）要落进 ``tool_traces``，**不能**并进 ``tool_calls``。
+
+    为什么必须分开：``tool_calls`` 会被原样塞回 ``AIMessage(tool_calls=...)``
+    当模型历史，而 LangChain 对里面的字段是严格的 —— 实测多一个 ``duration_ms``
+    会直接抛：``TypeError: tool_call() got an unexpected keyword argument``。
+
+    所以：模型历史只有 ``{name, args, id}``；耗时/成败另存一列。
+    这条测试同时钉住**两个方向**，缺一个就会让另一处悄悄坏掉。
+    """
+    model = FakeChatModel(chunks=["好"], tool_calls_then_stream=[_tool_call(call_id="c1")])
+    executor = _fake_executor(
+        [ToolResult("query_logistics", {"order_id": "1001"}, True, "{}", None, 1, 37)]
+    )
+
+    await _collect(**_common(repos, model, executor))
+
+    assistant_row = repos.messages.appended[1]
+
+    # 方向一：模型历史必须干净，多一个键都会让上游构造消息失败
+    assert set(assistant_row["tool_calls"][0]) == {"name", "args", "id"}
+
+    # 方向二：展示用的耗时/成败必须存下来（否则刷新后徽章丢耗时）
+    traces = assistant_row["tool_traces"]
+    assert traces and traces[0]["duration_ms"] == 37
+    assert traces[0]["ok"] is True
+    assert traces[0]["name"] == "query_logistics"
+
+
 async def test_plain_turn_persists_two_rows(repos):
     model = FakeChatModel(chunks=["你", "好"], tool_calls_then_stream=[])
     executor = _fake_executor([])
@@ -711,6 +750,32 @@ async def test_upstream_failure_after_a_tool_run_still_persists_just_the_user_tu
         await _collect(**_common(repos, model, executor))
 
     assert repos.messages.roles() == ["user"]
+
+
+async def test_persist_failure_does_not_mask_the_original_upstream_error(repos):
+    """**Review I1**：上游挂了、落库也挂了时，对外暴露的必须是**上游**那个异常。
+
+    不改的话：``_persist`` 先抛，用户拿到的是数据库错误，而真因在上游 ——
+    排查方向被彻底带偏（去查数据库，而数据库是好的）。
+
+    这条测的正是「两个依赖同时坏」这种最需要准确诊断的场景。
+    """
+
+    class ExplodingFirstCall(FakeChatModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):  # type: ignore[override]
+            raise RuntimeError("upstream model exploded")
+
+    repos.messages.fail_on_append = True
+
+    model = ExplodingFirstCall(chunks=["好"], tool_calls_then_stream=[])
+    executor = _fake_executor([])
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await _collect(**_common(repos, model, executor))
+
+    assert "upstream model exploded" in str(excinfo.value), (
+        f"原始上游异常被落库异常盖掉了，实际抛出：{excinfo.value}"
+    )
 
 
 async def test_meta_out_receives_the_context_result(repos):

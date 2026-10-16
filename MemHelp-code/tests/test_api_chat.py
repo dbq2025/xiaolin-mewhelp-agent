@@ -142,10 +142,14 @@ def test_non_streaming_chat_generates_session_id_when_absent(test_settings):
 def test_second_turn_history_is_visible_via_sessions_endpoint(test_settings):
     """验收标准 2 的 HTTP 层证据。
 
-    **走流式路径**（不传 ``stream``，默认 true）：ch02 起只有流式路径会落库，
-    因为它要记录工具轨迹（见 ``app/api.py`` 的两个分支）。
-    非流式路径仍返回完整 JSON，但它不落库 —— 这是本章的范围决定，
-    记在 ``dev-notes/ch02.md`` 里。
+    走流式路径（不传 ``stream``，默认 true）。**注意：两条路径都会落库** ——
+    它们共用同一套单轮编排（``app/api.py`` 的 ``astream_chat_with_tools`` 与
+    ``complete_chat_with_tools``），所以历史来源唯一。
+    非流式的落库由 ``tests/test_api_tools.py::test_non_streaming_turn_is_also_persisted``
+    单独钉住。
+
+    （早期这里曾写「只有流式路径会落库」——那是错的，而且会让后来者按它去删掉
+    共享编排这个不变量。已改正。）
     """
     client = _client(test_settings, FakeChatModel(reply="答"))
     for turn in ("第一轮", "第二轮"):

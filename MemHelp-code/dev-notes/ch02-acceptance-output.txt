@@ -9,41 +9,41 @@
 ========================================================================
 验收 1 · 订单 1001 的物流到哪了（期望：选中 query_logistics，带工具徽章）
 ========================================================================
-  事件序列：meta -> status -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> done
+  事件序列：meta -> status -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> done
   [PASS] 有 status 帧（工具执行前先推状态）  -> 1 个
   [PASS] 调用了工具（done.tools 非空）  -> query_logistics
   [PASS] 选中的是物流工具
   [PASS] 工具执行成功
   [PASS] 有最终回答文本
   [PASS] 回答里没有 coroutine 对象（包装层忘了 await 的特征）
-  最终回答：帮您查到啦～订单 1001 走的是中通快递，运单号 SF168606344937。
+  最终回答：您的订单 1001 已经出库，快递单号 SF168606344937，承运中通快递，目前状态是「已揽收」，预计 10 月 16 日送达。
 
-目前状态是**已揽收**，最新一条轨迹是 10-10 11:10「商品已出库」。预计**10 月 16 日**送达。
-
-物流还在正常推进中，您耐心等两天就好。如果到预计时间还没更新，随时找我，我帮您催一下。
-  工具徽章数据：{"name":"query_logistics","args":{"order_id":"1001"},"ok":true,"duration_ms":1,"attempts":1}
+物流刚起步，这两天应该会有新的中转记录～需要我帮您留意什么吗？
+  工具徽章数据：{"name":"query_logistics","args":{"order_id":"1001"},"ok":true,"duration_ms":0,"attempts":1}
 
 ========================================================================
 验收 2 · 退货政策是什么（期望：query_faq 命中 faq 表并作答）
 ========================================================================
-  事件序列：meta -> status -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> done
+  事件序列：meta -> status -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> done
   [PASS] 调用了 query_faq  -> query_faq
   [PASS] 有最终回答文本
   [PASS] 回答里没有 coroutine 对象
   [PASS] 回答基于查到的政策（含 7 天/无理由/签收 之类特征）
-  最终回答：您好~ 平台的退货政策是：支持 **7 天无理由退货**，商品需要保持完好、不影响二次销售，具体以平台售后规则为准。
+  最终回答：咱平台是支持 **7 天无理由退货** 的，前提是商品保持完好、不影响二次销售～
 
-如果您手头有具体订单想退，把订单号发我，我帮您看看能不能走退货流程～
+如果是质量问题，运费由我们承担；无理由退货的运费一般需要您自理，具体以售后规则为准。
+
+方便的话告诉我订单号，我帮您看看这单能不能退、怎么走流程？
 
 ========================================================================
 验收 3 · 邮费是多少（期望：关键词漏召回；实测结论见下）
 ========================================================================
-  事件序列：meta -> status -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> done
+  事件序列：meta -> status -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> token -> done
   选中的工具：query_faq
   模型实际传的关键词：运费
-  最终回答：单笔订单满 99 元就包邮，没满的话收 10 元运费，偏远地区运费另算。
+  最终回答：单笔订单满 99 元就包邮啦，没满的话收 10 元运费，偏远地区会另外计算。
 
-你是在看哪件商品呀？如果想确认具体多少运费，把商品编号或者订单号发我就行～
+想问的是哪笔订单的运费呢？给我订单号我帮你看看～
   [PASS] 模型选的是 query_faq（工具选择层没错）  -> query_faq
   [PASS] 回答里没有 coroutine 对象
   [实测结论] 数据层：query_faq('邮费') 稳定 count=0（基线成立）
@@ -58,9 +58,7 @@
   human     订单 1001 的物流到哪了
   ai         tools=[query_logistics:True]
   tool      {"ok": true, "tool": "query_logistics", "data": 
-  ai        帮您查到啦～订单 1001 走的是中通快递，运单号 SF168606344937。
-
-目前状态是
+  ai        您的订单 1001 已经出库，快递单号 SF168606344937，承运中通快递，目前状态是「
   [PASS] 落库为 human -> ai -> tool -> ai
   [PASS] assistant 行带回了工具轨迹（徽章刷新后仍在）
 

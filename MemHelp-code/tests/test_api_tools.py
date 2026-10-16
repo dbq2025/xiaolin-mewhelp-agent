@@ -14,6 +14,7 @@ import json
 from typing import Any
 
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import OperationalError
 
 from app.main import create_app
 from tests.fakes import FakeChatModel
@@ -382,3 +383,179 @@ def test_real_dependency_path_closes_its_session(monkeypatch, test_settings):
         "请求结束后 Session 没有被 close() —— 连接要等 GC 才回池，"
         "持续流量下会把 MySQL 连接数顶到上限"
     )
+
+
+# ---------------------------------------------------------------------------
+# 数据库故障的分类（Review I2）
+# ---------------------------------------------------------------------------
+
+
+def test_healthz_reuses_one_engine_across_calls(monkeypatch, test_settings):
+    """**Review I3**：``/healthz`` 不能每次都新建引擎（也就新建一个连接池）。
+
+    ``/healthz`` 不是只在启动时跑 —— 聊天页**每次加载**都会探它。
+    每次新建引擎 = 每次泄漏一个连接池 + 一次完整的 MySQL 连接握手，
+    而且连不上时要等驱动的连接超时（PyMySQL 默认 10 秒）。
+    在持续流量下表现为「MySQL 连接数缓慢涨到上限 + 健康检查偶发很慢」。
+
+    这条断言「建引擎只发生一次」—— 与 ``get_repositories`` 共用同一个缓存的工厂。
+    """
+    from app import api as api_module
+    from app import main as app_module
+
+    created: list[object] = []
+
+    class FakeEngine:
+        def connect(self):
+            raise AssertionError("不应真的连接（用了假引擎）")
+
+        def dispose(self):
+            pass
+
+    class FakeFactory:
+        def __call__(self):
+            raise AssertionError("探测不该新建 Session")
+
+    def counting_create_engine(_settings):
+        created.append(object())
+        return FakeEngine()
+
+    monkeypatch.setattr(api_module, "create_engine_from", counting_create_engine)
+    monkeypatch.setattr(api_module, "session_factory", lambda _engine: FakeFactory())
+    # 让真实探测走假引擎：这里只关心「建了几次引擎」
+    async def fake_ping(_engine):
+        return True
+
+    monkeypatch.setattr(api_module, "ping", fake_ping)
+
+    app = app_module.create_app(model=FakeChatModel(chunks=["好"]), settings=test_settings)
+    app.state.repositories = None
+    app.state.db_ping = None
+
+    with TestClient(app) as client:
+        for _ in range(3):
+            assert client.get("/healthz").status_code == 200
+
+    assert len(created) == 1, (
+        f"3 次 /healthz 建了 {len(created)} 个引擎 —— 应复用同一个（每次新建会泄漏连接池）"
+    )
+
+
+def _db_down_repositories(monkeypatch):
+    """让仓库层像「MySQL 挂了」那样抛 SQLAlchemy ``OperationalError``。"""
+
+    class ExplodingMessages:
+        async def history_as_messages(self, session_id):
+            raise OperationalError(
+                "SELECT 1",
+                {},
+                Exception("(2003, \"Can't connect to MySQL server on '127.0.0.1'\")"),
+            )
+
+    class ExplodingConversations:
+        async def upsert_by_session(self, session_id, user_id):
+            raise OperationalError("INSERT", {}, Exception("server has gone away"))
+
+    class Repos:
+        messages = ExplodingMessages()
+        conversations = ExplodingConversations()
+        faq = None
+        tickets = None
+
+    return Repos()
+
+
+def test_database_fault_is_reported_as_database_error_not_upstream(
+    test_settings, fake_repositories, monkeypatch
+):
+    """**Review I2**：数据库故障必须是 ``database_error``，不能被归成上游错误。
+
+    不改的话：``OperationalError(2003, "Can't connect...")`` 会被
+    ``classify_upstream_error_type`` 归成 ``upstream_unavailable``，于是错误信息提示
+    运维「请检查 OPENAI_BASE_URL 和网络」—— 把排查方向指向一个**没坏**的依赖。
+    数据库是本服务自己的依赖，与「模型服务怎么了」是两类问题。
+    """
+    client = _client(test_settings, _db_down_repositories(monkeypatch))
+
+    resp = client.post(
+        "/api/chat/completions",
+        json={"session_id": "s1", "message": "在吗", "stream": False},
+    )
+
+    assert resp.status_code == 503, f"数据库故障应 503（服务未就绪），实际 {resp.status_code}"
+    body = resp.json()
+    assert body["error"]["type"] == "database_error"
+
+
+def test_database_fault_message_does_not_leak_driver_internals(
+    test_settings, monkeypatch
+):
+    """响应里不能出现驱动原文 —— 它含库地址、端口、账号，甚至 SQL 语句。
+
+    ``/healthz`` 早就为这个原因把细节收进日志了，聊天接口必须一致。
+    """
+    client = _client(test_settings, _db_down_repositories(monkeypatch))
+
+    resp = client.post(
+        "/api/chat/completions",
+        json={"session_id": "s1", "message": "在吗", "stream": False},
+    )
+    raw = resp.text
+
+    assert "127.0.0.1" not in raw
+    assert "SQL: SELECT 1" not in raw
+    assert "2003" not in raw
+    assert "SELECT" not in raw
+
+
+def test_streaming_database_fault_is_an_sse_error_event_not_a_crash(
+    test_settings, monkeypatch
+):
+    """流式路径：数据库故障要变成 ``error`` 帧，而不是把连接打断。"""
+    client = _client(test_settings, _db_down_repositories(monkeypatch))
+
+    events = _stream(client, {"session_id": "s1", "message": "在吗"})
+    names = [n for n, _ in events]
+
+    assert names[0] == "meta"
+    assert names[-1] == "error"
+    err = events[-1][1] or {}
+    assert err["type"] == "database_error"
+
+
+def test_failed_persist_does_not_change_the_reported_fault_type(
+    test_settings, fake_repositories, monkeypatch
+):
+    """上游挂了 + 落库也挂了：对外暴露的必须是**上游**那个故障。
+
+    这条与 ``tests/test_chat_tools.py`` 的同名用例是两层保险：
+    那里测用例层不盖掉原始异常，这里测 HTTP 层的错误类型没被落库故障改写。
+    """
+    from tests.fakes import FakeChatModel
+
+    class ExplodingFirstCall(FakeChatModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):  # type: ignore[override]
+            raise RuntimeError("upstream model exploded")
+
+    class FailingMessages:
+        async def history_as_messages(self, session_id):
+            return []
+
+        async def append(self, *args, **kwargs):
+            raise OperationalError("INSERT", {}, Exception("db gone"))
+
+    class Repos:
+        messages = FailingMessages()
+        conversations = fake_repositories.conversations
+        faq = None
+        tickets = None
+
+    client = _client(test_settings, Repos(), ExplodingFirstCall(chunks=["好"]))
+
+    resp = client.post(
+        "/api/chat/completions",
+        json={"session_id": "s1", "message": "在吗", "stream": False},
+    )
+
+    assert resp.status_code == 502, "上游故障应 502，不能被落库故障改写成 503"
+    assert resp.json()["error"]["type"] not in ("database_error", "configuration_error")

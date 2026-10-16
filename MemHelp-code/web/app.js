@@ -266,7 +266,13 @@
       const resp = await fetch(`/api/chat/sessions/${sessionId}/messages`, { method: 'POST' });
       if (!resp.ok) return;
       const data = await resp.json();
-      const messages = (data.messages || []).filter((m) => roleToRow(m.role) && m.role !== 'tool');
+      const messages = (data.messages || []).filter((m) => {
+        if (m.role === 'tool') return false;          // 工具结果已体现在徽章里，不单独画气泡
+        // 带工具调用但正文为空的那条 assistant，是「申请单」而不是回答 ——
+        // 它渲染出来会变成一个多余的「（客服没有返回内容）」空气泡。
+        if (m.role === 'assistant' && !(m.content || '').trim() && m.tools) return false;
+        return roleToRow(m.role) != null;
+      });
       if (!messages.length) return;
 
       clearWelcome();

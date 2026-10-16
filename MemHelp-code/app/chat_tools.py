@@ -259,6 +259,11 @@ async def astream_chat_with_tools(
                     "args": tool_args,
                     "tool_call_id": call_id,
                     "content": tool_content,
+                    # 给界面看的完整摘要（含耗时与成败）。**与 tool_calls 分开存** ——
+                    # 后者要当模型历史回灌，字段必须严格是 {name, args, id}；
+                    # 我实测过往它里面加 duration_ms 会让 AIMessage 构造直接抛
+                    # TypeError: tool_call() got an unexpected keyword argument。
+                    "traces": [result.summary()],
                 }
             )
 
@@ -298,7 +303,15 @@ async def astream_chat_with_tools(
     except BaseException:
         # 失败时只落用户那一轮（沿用 ch01「不落半截回答」）。
         # 落半截或落孤立的 tool 行都会污染下一轮上下文。
-        await _persist(repositories, session_id, message, [], None)
+        #
+        # **落库本身失败时不能盖住原始异常**（Review I1，已实测复现）：
+        # 上游故障 + 数据库同时不可用时，``_persist`` 会先抛，于是用户拿到的是
+        # 数据库错误，而真正的原因是上游 —— 排查方向被彻底带偏。
+        # 这里吞掉落库异常并记日志，然后照旧抛**原始**异常。
+        try:
+            await _persist(repositories, session_id, message, [], None)
+        except Exception:  # noqa: BLE001 - 落库失败不该改变对外暴露的故障类型
+            logger.exception("上游失败后落库用户轮次也失败了（已忽略，保留原始异常）")
         raise
 
     await _persist(
@@ -386,6 +399,8 @@ async def _persist(
             conversation_id,
             role="assistant",
             content="",
+            # 模型历史：字段必须**只有** name / args / id（多一个键，
+            # 回灌时 AIMessage(tool_calls=...) 就会抛 TypeError）。
             tool_calls=[
                 {
                     "name": tool_row["name"],
@@ -393,6 +408,8 @@ async def _persist(
                     "id": tool_row["tool_call_id"],
                 }
             ],
+            # 界面信息：单独一列，含耗时与成败。前端刷新后靠它还原完整徽章。
+            tool_traces=tool_row.get("traces") or [],
         )
         await repositories.messages.append(
             conversation_id,
