@@ -103,8 +103,7 @@ MemHelp-code/app/
 |---|---|---|---|
 | `db/models.py` | 四张表的 ORM 映射，与 DDL 逐列对齐 | 四个 ORM 类 | SQLAlchemy |
 | `db/session.py` | engine/sessionmaker，按请求给会话 | `get_db()`, `create_engine_from(settings)` | config |
-| `db/repositories.py` | 把 SQL 收敛成业务语义方法 | `ConversationRepository` / `MessageRepository` / `FaqRepository` / `TicketRepository` | models |
-| `tools/registry.py` | 名字 → 工具对象；启动自检「注册表 ⊆ 实现」 | `TOOL_REGISTRY`, `get_tools()`, `get_tool(name)` | 五个工具模块 |
+| `db/repositories.py` | 把 SQL 收敛成业务语义方法 | `ConversationRepository` / `MessageRepository` / `FaqRepository` / `TicketRepository` | models || `tools/registry.py` | 名字 → 工具对象；启动自检「注册表 ⊆ 实现」 | `TOOL_REGISTRY`, `get_tools()`, `get_tool(name)` | 五个工具模块 |
 | `tools/schemas.py` | 五个参数模型，字段描述直接喂给模型 | `QueryOrderArgs` 等 | pydantic |
 | `tools/executor.py` | 参数校验 → 超时 → 重试 → 结构化结果 | `execute_tool(name, args) -> ToolResult` | registry, schemas |
 | `chat_tools.py` | 一轮内完成「定工具 → 执行 → 回灌 → 流式」 | `astream_chat_with_tools(...)` | 全部 |
@@ -112,6 +111,12 @@ MemHelp-code/app/
 **隔离设计要点**：`tools/business.py` 的三个随机数据工具**不 import 数据库**，
 所以它们能脱离 MySQL 单独测；`knowledge.py` / `ticketing.py` 通过仓库协议拿库，
 测试用内存假仓库即可离线跑。这条边界保证「没有 MySQL 也能跑完单测」。
+
+**同步驱动的坑（写计划时发现，回填在此）**：`PyMySQL` 是**同步**驱动。仓库层的
+`async def` 方法若直接调用 `session.execute(...)`，会把整个事件循环阻塞在数据库
+往返上 —— 单请求看不出问题，并发下退化成串行。所以仓库层必须用
+`anyio.to_thread.run_sync(...)` 把同步调用送出事件循环。这是 Task 9 能安全并发的
+前提，也是「`async def` 不等于不阻塞」的典型反例。
 
 ### 2.4 配置新增（`app/config.py` + `.env.example`）
 
@@ -138,7 +143,7 @@ TOOL_MAX_RETRIES=1
 | `query_order` | `order_id: str` | 工具内生成 | 随机（按 `order_id` 派生，固定种子 → 同号同结果） |
 | `query_product` | `product_id: str` | 工具内生成 | 随机（同上） |
 | `query_logistics` | `order_id: str` | 工具内生成 | 随机（同上，含运单号/承运商/轨迹节点/预计到达） |
-| `query_faq` | `keyword: str` | `SELECT ... WHERE question LIKE %kw% OR answer LIKE %kw%` | `faq` 表 |
+| `query_faq` | `keyword: str` | `SELECT ... WHERE question LIKE %kw% OR answer LIKE %kw%`（**`\` `%` `_` 先转义成字面量**，否则用户问「%是什么」会全表命中） | `faq` 表 |
 | `create_ticket` | `description: str`, `ticket_type: Literal['售后','投诉','咨询']`, `conversation_id: str` | `INSERT INTO tickets` | `tickets` 表 |
 
 **随机数据为什么要「按入参派生」**：如果每次调用都 `random.random()`，
