@@ -30,3 +30,7 @@ pytest-cache/
 # ---- 根级 Python 工具产物 ----
 __pycache__/
 *.py[cod]
+
+# ---- Superpowers 执行器的私有工作区（账本、任务提要、评审包）----
+# 它是 scratch 不是交付物：进度与决策最终落到 dev-notes/ 与 git 历史里。
+.superpowers/

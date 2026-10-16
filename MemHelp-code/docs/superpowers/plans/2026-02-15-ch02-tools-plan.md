@@ -292,7 +292,8 @@ git commit -m "ch02: 四张表的 SQLAlchemy 2.0 ORM 映射（与 DDL 逐列对�
 - Consumes: Task 2 的 `Base` 与四个模型
 - Produces:
   - `ConversationRepository.upsert_by_session(session_id: str, user_id: str) -> int`（返回 `conversations.id`，**幂等**）
-  - `MessageRepository.append(conversation_id: int, *, role: str, content: str | None, tool_calls: list | None = None, tool_call_id: str | None = None) -> None`
+  - `MessageRepository.append(conversation_id: int, *, role: str, content: str | None, tool_calls: list | None = None, tool_call_id: str | None = None) -> None` —— **`role` 必须在 `MESSAGE_ROLES` 内**，否则抛 `ValueError`（见 Step 4 说明）
+  - `MessageRepository.history_as_messages(session_id: str) -> list[BaseMessage]` —— 把库里的流水重建成 LangChain 消息列表（Task 9 的输入）
   - `MessageRepository.list_for_conversation(conversation_id: int) -> list[Message]`（按 `id` 升序）
   - `MessageRepository.find_conversation_id(session_id: str) -> int | None`
   - `FaqRepository.search(keyword: str, limit: int = 5) -> list[Faq]` —— **本方法负责 `LIKE` 通配符转义**（调用方无需预处理）
@@ -300,7 +301,7 @@ git commit -m "ch02: 四张表的 SQLAlchemy 2.0 ORM 映射（与 DDL 逐列对�
   - `TicketRepository.create(conversation_id: int, description: str, ticket_type: str) -> str`（返回 `ticket_no`）
   - `TicketRepository.count_created_on(day: date) -> int`
   - 全部是 `async def`（PyMySQL 是同步驱动，实现里用 `anyio.to_thread.run_sync` 包住，避免阻塞事件循环 —— 这一条是 Task 9 能安全并发的前提）
-  - `Repositories` 容器：`Repositories(conversations=..., messages=..., faq=..., tickets=...)`，构造参数都可替换（测试注入内存实现）
+  - `Repositories` 容器：`Repositories(conversations=..., messages=..., faq=..., tickets=...)`，构造参数都可替换（测试注入内存实现）。另提供**同步**类方法 `Repositories.from_session(session: Session) -> Repositories`（只是装配容器，没有 IO，**不是** `async`）
 
 - [ ] **Step 1: 加 SQLite 内存 fixture**
 
@@ -368,6 +369,33 @@ def test_escape_like_neutralises_wildcards():
     assert escape_like("100%纯棉") == "100\\%纯棉"
     assert escape_like("a_b") == "a\\_b"
     assert escape_like("c\\d") == "c\\\\d"
+
+
+async def test_append_rejects_unknown_role_at_the_door(sqlite_session):
+    """非法 role 必须在入口就炸 —— 靠 MySQL ENUM 兜会拖到 flush，
+    错误信息变成驱动的 'Data truncated'，把拼错字符串伪装成数据库故障。"""
+    import pytest
+    from app.db.repositories import ConversationRepository, MessageRepository
+    cid = await ConversationRepository(sqlite_session).upsert_by_session("s", "anonymous")
+    with pytest.raises(ValueError, match="system"):
+        await MessageRepository(sqlite_session).append(cid, role="system", content="x")
+
+
+async def test_history_as_messages_rebuilds_langchain_objects(sqlite_session):
+    """Task 9 的输入。tool 行必须带回自己的 tool_call_id，否则回灌会错位。"""
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+    from app.db.repositories import ConversationRepository, MessageRepository
+    cid = await ConversationRepository(sqlite_session).upsert_by_session("s", "anonymous")
+    repo = MessageRepository(sqlite_session)
+    await repo.append(cid, role="user", content="问")
+    await repo.append(cid, role="assistant", content="",
+                     tool_calls=[{"name": "query_faq", "args": {"keyword": "退货"}, "id": "c1"}])
+    await repo.append(cid, role="tool", content='{"ok":true}', tool_call_id="c1")
+    await repo.append(cid, role="assistant", content="答")
+    rebuilt = await repo.history_as_messages("s")
+    assert [type(m) for m in rebuilt] == [HumanMessage, AIMessage, ToolMessage, AIMessage]
+    assert rebuilt[1].tool_calls[0]["name"] == "query_faq"
+    assert rebuilt[2].tool_call_id == "c1"
 ```
 
 - [ ] **Step 3: 跑测试确认失败**
@@ -379,10 +407,19 @@ Expected: FAIL —— `ModuleNotFoundError: No module named 'app.db.repositories
 
 要点：`upsert_by_session` 先 `SELECT ... WHERE session_id = :sid`，命中就返回其 `id`，未命中才 `INSERT`（**不要**用 MySQL 的 `ON DUPLICATE KEY UPDATE` —— SQLite 上跑不了，会让这层无法离线测）。`create()` 的 `ticket_no` 规则为 `f"T{day:%Y%m%d}{n:03d}"`，`n = await count_created_on(day) + 1`。
 
+`append()` 在写之前先断言 `role in MESSAGE_ROLES`（Task 2 定义的常量），不合法就抛 `ValueError`。**为什么不能靠数据库兜**：`role` 列是 MySQL ENUM，非法值要到 `flush`/`commit` 才炸，那时错误信息是驱动层的
+`Data truncated for column 'role'`，既难查又把一次「调用方拼错字符串」伪装成了「数据库故障」。
+在入口拦一次，错误信息里直接带角色名。
+
+`history_as_messages()` 按 `id` 升序取该会话的全部消息并映射：
+`user`→`HumanMessage(content)`；`assistant` 且 `tool_calls` 非空→`AIMessage(content="", tool_calls=行里的 tool_calls)`；
+`assistant` 无 `tool_calls`→`AIMessage(content)`；`tool`→`ToolMessage(content, tool_call_id=行里的 tool_call_id)`。
+未知 role 抛 `ValueError`（不要静默跳过 —— 静默跳过会让模型看到一个缺了一环的历史）。
+
 - [ ] **Step 5: 跑测试确认通过**
 
 Run: `uv run --directory MemHelp-code python -m pytest tests/test_db_repositories.py -v`
-Expected: 4 passed
+Expected: 6 passed
 
 - [ ] **Step 6: 提交**
 
