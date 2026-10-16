@@ -157,3 +157,157 @@ curl.exe -X POST http://127.0.0.1:8000/api/extract -H "Content-Type: application
 - 实施计划：`docs/superpowers/plans/2026-02-14-ch01-pure-chat-plan.md`
 - 开发过程追记：`dev-notes/ch01.md`
 - 客服 Prompt 行为约束检查清单：`evals/service_prompt_cases.md`
+
+---
+
+## 第二章「Function Calling 工具链」运行说明
+
+本章给客服装上五个工具（`query_order` / `query_product` / `query_logistics` /
+`query_faq` / `create_ticket`），由模型自己决定调哪个。**只做单轮**：模型调一次工具就收敛。
+
+### 1. 装依赖
+
+```powershell
+$env:UV_CACHE_DIR = "F:\DeepSeek-Harness\memhelp-code-myself\.uv-cache"
+$uv = "C:\Users\dbq\.local\bin\uv.exe"
+& $uv sync     # 本章新增 sqlalchemy / pymysql / anyio
+```
+
+### 2. 准备数据库（两种接法，选一种）
+
+**A) 复用已有的 `mewhelp` 库**（本机现状：`mewhelp-mysql` 容器，宿主 3306，`root`/`root`）
+
+这类库通常是**别的章节建好的**，`conversations` 表里**没有 `session_id`** 列，
+而本章的 ORM 靠它定位会话 —— 不迁移会直接报 `Unknown column 'session_id'`。
+所以必须跑一次**幂等**迁移（可反复执行）：
+
+```powershell
+& $uv run --directory MemHelp-code python scripts/migrate_existing.py `
+    --host 127.0.0.1 --port 3306 --user root --password root --database mewhelp
+```
+
+它只做三件事，且都不碰其它表：给 `conversations` 加 `session_id`（`NOT NULL` + 唯一键）、
+把历史行的空会话键回填成 `demo-seed-<id>`、加唯一键。想先看会执行什么，加 `--dry-run`。
+
+**B) 用本章自带的 compose 起一个干净的库**
+
+```powershell
+docker compose -f MemHelp-code/docker-compose.yml up -d --wait
+```
+
+新库会自动执行 `sql/ch02-ddl.sql`（建表）与 `sql/ch02-seed.sql`（灌 10 条 FAQ + 演示会话 + 2 条工单）。
+它映射在宿主 **3307**（刻意避开常被占用的 3306），账号 `mewhelp`/`mewhelp`，没有 root。
+
+> ⚠️ **改了 `sql/` 里的脚本想让新库重跑 initdb，必须先 `down -v`** ——
+> MySQL 只在数据目录为空时才执行 `/docker-entrypoint-initdb.d` 下的脚本。
+> 对既有库，改结构请追加一份迁移脚本，不要改 DDL（DDL 只对新库生效）。
+
+### 3. 配 `.env`
+
+在第一章的基础上追加 MySQL 与工具配置（`.env.example` 里有带注释的模板）：
+
+```dotenv
+# A) 复用既有库（默认）
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_USER=root
+MYSQL_PASSWORD=root
+MYSQL_DATABASE=mewhelp
+
+# 工具基础设施：单次执行超时（秒）与「仅对瞬时错误」的重试次数
+TOOL_TIMEOUT_SECONDS=3.0
+TOOL_MAX_RETRIES=1
+```
+
+> 参数错的工具调用与业务性「查不到」**不重试** —— 重试也是同样结果，只会让用户多等一个超时。
+
+### 4. 起服务与跑测试
+
+```powershell
+& $uv run --directory MemHelp-code uvicorn app.main:app --port 8000
+
+# 全量（不连真库；MySQL 那部分自动跳过）
+& $uv run --directory MemHelp-code python -m pytest -q
+
+# 真实 MySQL 集成（会真的连库、建/删探针行）
+$env:MEMHELP_TEST_MYSQL = "1"
+& $uv run --directory MemHelp-code python -m pytest tests/test_db_mysql.py -v
+```
+
+`/healthz` 现在还会报 `"database": "ok" | "unavailable"`；数据库不可用时整体返回 **503**
+（一个连不上库的实例接不了任何真实请求）。
+
+> 怎么判断 /healthz 连的是哪个库：它**不回显**连接串（连接串含明文密码）。
+> 看 `MYSQL_PORT` 即可 —— 3306 = 复用既有库，3307 = compose 起的新库。
+
+### 5. 接口变化（第二章）
+
+| 方法 | 路径 | 变化 |
+|---|---|---|
+| POST | `/api/chat/completions` | SSE 新增 `status` 帧（工具执行**之前**推，供页面显示「正在查询物流…」）；`done` 帧新增 `tools` 数组（本轮工具轨迹，含成败与耗时） |
+| POST | `/api/chat/sessions/{session_id}/messages` | 改从 `messages` **表**回读（不再读内存）；每轮若调过工具则多一个 `tools` 字段 —— 这是聊天页徽章**刷新后仍在**的依据 |
+| GET | `/healthz` | 新增 `database` 字段；库不可用返回 503 |
+
+`status` 与 `done.tools` 的**分工**：前者只负责让用户立刻看到「在查数据」，
+不承担持久化职责；后者是徽章的**权威来源**。
+
+> **行为变更（需知情）**：为了拿到确定的 `tool_calls`，模型第 1 次调用改成了**非流式**。
+> 于是「模型不调工具」这条路上，回答是**一次性**出现的；真正逐块的流式发生在
+> 「调了工具、回灌之后」那一段。代价是首 token 多一个 RTT（记为后续可优化项）。
+
+### 6. 浏览器验收（三条验收标准）
+
+先起服务，再打开 <http://127.0.0.1:8000/chat/>：
+
+1. 问 **「订单 1001 的物流到哪了」** —— 气泡上方先出现「正在查询物流…」，
+   气泡下方出现 `🔧 查询物流 · 成功 · 1ms` 徽章，回答基于工具返回的真实数据。**刷新页面徽章仍在。**
+2. 问 **「退货政策是什么」** —— 出现 `🔧 检索常见问题` 徽章，回答引用 FAQ 内容。
+3. 问 **「邮费是多少」** —— 见下面的「实测结论」，**与最初预期不同**。
+
+脚本化的可自动判定部分（含落库核对），会写一份输出文件：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/demo-ch02.ps1 `
+    -Out dev-notes/ch02-acceptance-output.txt
+```
+
+### 7. 工具选择评估集
+
+「模型自己决定调什么工具」是**模型的判断行为**，断言替代不了，所以用标注样例跑真实上游：
+
+```powershell
+& $uv run --directory MemHelp-code python evals/run_tool_evals.py
+& $uv run --directory MemHelp-code python evals/run_tool_evals.py --only acc1,acc2
+& $uv run --directory MemHelp-code python evals/run_tool_evals.py --json dev-notes/tool-evals.json
+```
+
+当前：**14/14 通过**（明细见 `dev-notes/tool-evals.json`）。
+**未达标时按既定规则：先改 Prompt / 工具描述，不许改评估标准** ——
+把标准改软只是把问题藏起来，而暴露它正是评估集存在的意义。
+
+### 8. ★ 验收标准 3 的实测结论（与原预期不同）
+
+原预期：「邮费是多少」关键词查表查不出来，模型应承认没查到。**实测分两层，结论不同：**
+
+| 层 | 结果 |
+|---|---|
+| 数据层 | `query_faq("邮费")` **稳定**返回 `count=0` —— 基线成立（语料含「运费」不含「邮费」，两者不是子串关系） |
+| 用户可见层 | 模型把用户的「邮费」**归一化成「运费」**再传参，命中「运费怎么算」，答出「满 99 包邮 / 未满 10 元」 |
+
+所以「用户问邮费会查不出来」这条**预期前提不成立**：召回失败在
+「组织工具参数」这一步被模型补偿掉了。**这不是工具或 SQL 的缺陷。**
+
+已确认原因在**模型侧的同义归一化**，属已知问题、留待后续章节修复，本章不处理。
+因此评估集 `acc3` **只断言工具选择**，不断言用户可见结果；
+数据层基线由 `tests/test_db_mysql.py` 的 `faq_search("邮费") == []` **硬钉**。
+
+### 9. 本章留痕
+
+- 设计文档：`docs/superpowers/specs/2026-02-15-ch02-tools-design.md`
+- 实施计划：`docs/superpowers/plans/2026-02-15-ch02-tools-plan.md`
+- 开发过程追记：`dev-notes/ch02.md`
+- 验收输出：`dev-notes/ch02-acceptance-output.txt`
+- 评估明细：`dev-notes/tool-evals.json`
+
+**明确未做（用户指定）**：多轮自动循环的 Agent Loop、向量检索 / RAG。
+
