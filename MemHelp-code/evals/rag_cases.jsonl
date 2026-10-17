@@ -1,0 +1,22 @@
+# ch03 语义检索评估集（每行一条 JSON）。
+# 字段：id / query（用户原话）/ keyword（ch02 时代模型会截出的名词）/ expect_any（答案里
+# 出现任一即可）/ must_contain（必须全部出现）/ paraphrase（是否「换说法、零词面重叠」）。
+#
+# 为什么同时给 keyword：ch02 的 query_faq 收到的是「模型截出的名词」而不是整句，
+# 所以关键词基线要跑了 query 与 keyword 两种模式才对得上历史行为，不能拿整句 LIKE
+# 去制造一个不公平的弱基线。
+{"id":"paraphrase-fee","query":"邮费是多少","keyword":"邮费","expect_any":["包邮","运费"],"must_contain":["99"],"paraphrase":true}
+{"id":"paraphrase-return-window","query":"买了七天还能退吗","keyword":"买了七天","expect_any":["7 天","无理由"],"must_contain":["7"],"paraphrase":true}
+{"id":"paraphrase-return-shipping","query":"寄回去要我出钱吗","keyword":"寄回去","expect_any":["退回运费","运费"],"must_contain":["买家"],"paraphrase":true}
+{"id":"paraphrase-invoice-time","query":"开票要等几天","keyword":"开票要等","expect_any":["3 个工作日"],"must_contain":["3 个工作日"],"paraphrase":true}
+{"id":"paraphrase-ship-time","query":"拍下多久能发","keyword":"拍下","expect_any":["48 小时"],"must_contain":["48"],"paraphrase":true}
+{"id":"paraphrase-damage","query":"东西碎了找谁赔","keyword":"碎了","expect_any":["赔付","500"],"must_contain":["500"],"paraphrase":true}
+{"id":"paraphrase-exchange","query":"尺码不合适能换吗","keyword":"尺码","expect_any":["换货"],"must_contain":["7"],"paraphrase":true}
+{"id":"paraphrase-refund-time","query":"退钱多久到账","keyword":"退钱","expect_any":["3 个工作日","退款"],"must_contain":["3 个工作日"],"paraphrase":true}
+{"id":"direct-fee","query":"运费怎么算","keyword":"运费","expect_any":["包邮","运费"],"must_contain":["99"],"paraphrase":false}
+{"id":"direct-return","query":"退货政策","keyword":"退货","expect_any":["7 天","无理由"],"must_contain":["7"],"paraphrase":false}
+{"id":"direct-invoice","query":"发票怎么开","keyword":"发票","expect_any":["发票"],"must_contain":["发票"],"paraphrase":false}
+{"id":"direct-ship","query":"多久发货","keyword":"发货","expect_any":["48 小时"],"must_contain":["48"],"paraphrase":false}
+{"id":"direct-exchange","query":"可以换货吗","keyword":"换货","expect_any":["换货"],"must_contain":["换货"],"paraphrase":false}
+{"id":"direct-compensation","query":"赔付标准","keyword":"赔付","expect_any":["赔付","500"],"must_contain":["500"],"paraphrase":false}
+{"id":"direct-remote","query":"偏远地区运费","keyword":"偏远","expect_any":["偏远"],"must_contain":["偏远"],"paraphrase":false}
