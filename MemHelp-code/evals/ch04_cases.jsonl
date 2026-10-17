@@ -1,0 +1,64 @@
+# ch04 评估集（每行一条 JSON）。
+# 字段：id / bucket / difficulty / query / behavior / gold_anchors / must_contain / category(可选)
+#
+# bucket   A_policy（政策条款）/ B_model（型号参数）/ C_colloquial（口语模糊）/ E_multi（跨节多跳）
+# difficulty easy / medium / hard —— 难度梯度用来分桶看「难点掉在哪一档」
+# behavior answer（应作答）/ refuse（知识库里没有，应显式拒答且入池）
+# gold_anchors 金标锚串：跑评估时在 knowledge_chunks 的 questions/answer 上做子串匹配，
+#   命中块取并集就是 gold。锚串至少命中 1 块，命中 >3 块会告警（说明锚串太泛）。
+# must_contain 生成段判定用的必现词（数字用原样形式）。
+#
+# 每桶 12 条 = 10 条 answer + 2 条 refuse。refuse 题一律是「知识库里确实没有」的事实，
+# 不是「模糊但能猜」的问题。
+
+{"id":"A01","bucket":"A_policy","difficulty":"easy","query":"满多少包邮","behavior":"answer","gold_anchors":["99 元包邮"],"must_contain":["99"]}
+{"id":"A02","bucket":"A_policy","difficulty":"easy","query":"退货政策是什么","behavior":"answer","gold_anchors":["7 天无理由"],"must_contain":["7"]}
+{"id":"A03","bucket":"A_policy","difficulty":"medium","query":"运费怎么算","behavior":"answer","gold_anchors":["99 元包邮"],"must_contain":["99","10"]}
+{"id":"A04","bucket":"A_policy","difficulty":"medium","query":"发票多久能收到","behavior":"answer","gold_anchors":["3 个工作日"],"must_contain":["3 个工作日"]}
+{"id":"A05","bucket":"A_policy","difficulty":"medium","query":"多久发货","behavior":"answer","gold_anchors":["48 小时内发货"],"must_contain":["48"]}
+{"id":"A06","bucket":"A_policy","difficulty":"medium","query":"退货运费谁承担","behavior":"answer","gold_anchors":["买家承担"],"must_contain":["买家"]}
+{"id":"A07","bucket":"A_policy","difficulty":"medium","query":"换货有什么条件","behavior":"answer","gold_anchors":["收到商品 7 天内可申请换货"],"must_contain":["7"]}
+{"id":"A08","bucket":"A_policy","difficulty":"hard","query":"赔付最高赔多少","behavior":"answer","gold_anchors":["单笔最高 500 元"],"must_contain":["500"]}
+{"id":"A09","bucket":"A_policy","difficulty":"hard","query":"赔付超过 500 元怎么办","behavior":"answer","gold_anchors":["超出部分需提交人工审核"],"must_contain":["人工审核","3 个工作日"]}
+{"id":"A10","bucket":"A_policy","difficulty":"hard","query":"提交售后多久有人回复","behavior":"answer","gold_anchors":["48 小时内首次响应"],"must_contain":["48"]}
+{"id":"A11","bucket":"A_policy","difficulty":"hard","query":"你们支持货到付款吗","behavior":"refuse","gold_anchors":[],"must_contain":[]}
+{"id":"A12","bucket":"A_policy","difficulty":"hard","query":"会员积分可以抵现吗","behavior":"refuse","gold_anchors":[],"must_contain":[]}
+
+{"id":"B01","bucket":"B_model","difficulty":"easy","query":"XH-3000A 续航多久","behavior":"answer","gold_anchors":["续航 18 小时"],"must_contain":["18 小时"]}
+{"id":"B02","bucket":"B_model","difficulty":"easy","query":"xh-3000a 多少钱","behavior":"answer","gold_anchors":["1280 元"],"must_contain":["1280"]}
+{"id":"B03","bucket":"B_model","difficulty":"easy","query":"XH-3000B 防护等级是多少","behavior":"answer","gold_anchors":["IP54"],"must_contain":["IP54"]}
+{"id":"B04","bucket":"B_model","difficulty":"easy","query":"MJ-2200 能存多少条记录","behavior":"answer","gold_anchors":["MJ-2200"],"must_contain":["2000"]}
+{"id":"B05","bucket":"B_model","difficulty":"medium","query":"XH 3000B 配哪个底座","behavior":"answer","gold_anchors":["MewHelp-S2"],"must_contain":["MewHelp-S2"]}
+{"id":"B06","bucket":"B_model","difficulty":"medium","query":"PG-100 能装在 XH-3000A 上吗","behavior":"answer","gold_anchors":["接口不同"],"must_contain":["不能"]}
+{"id":"B07","bucket":"B_model","difficulty":"medium","query":"HC-050 多久换一次","behavior":"answer","gold_anchors":["HC-050"],"must_contain":["3 个月"]}
+{"id":"B08","bucket":"B_model","difficulty":"hard","query":"XH-3000A 和 XH-3000B 差多少钱","behavior":"answer","gold_anchors":["差价 420 元"],"must_contain":["420"]}
+{"id":"B09","bucket":"B_model","difficulty":"hard","query":"LW-7 能接哪些设备","behavior":"answer","gold_anchors":["LW-7"],"must_contain":["XH-3000A","MJ-2200"]}
+{"id":"B10","bucket":"B_model","difficulty":"hard","query":"ZB-3 承重多少，能装门禁吗","behavior":"answer","gold_anchors":["ZB-3"],"must_contain":["5 公斤"]}
+{"id":"B11","bucket":"B_model","difficulty":"hard","query":"XH-9999 的续航多久","behavior":"refuse","gold_anchors":[],"must_contain":[]}
+{"id":"B12","bucket":"B_model","difficulty":"hard","query":"PG-100 的防水等级是多少","behavior":"refuse","gold_anchors":[],"must_contain":[]}
+
+{"id":"C01","bucket":"C_colloquial","difficulty":"medium","query":"钱啥时候能回来啊","behavior":"answer","gold_anchors":["3 个工作日"],"must_contain":["3 个工作日"]}
+{"id":"C02","bucket":"C_colloquial","difficulty":"medium","query":"啥时候能把钱退我","behavior":"answer","gold_anchors":["3 个工作日"],"must_contain":["3 个工作日"]}
+{"id":"C03","bucket":"C_colloquial","difficulty":"medium","query":"寄回去的运费我自己掏吗","behavior":"answer","gold_anchors":["买家承担"],"must_contain":["买家"]}
+{"id":"C04","bucket":"C_colloquial","difficulty":"medium","query":"拍下多久给我寄出来","behavior":"answer","gold_anchors":["48 小时内发货"],"must_contain":["48"]}
+{"id":"C05","bucket":"C_colloquial","difficulty":"hard","query":"碎了算谁的","behavior":"answer","gold_anchors":["单笔最高 500 元"],"must_contain":["500"]}
+{"id":"C06","bucket":"C_colloquial","difficulty":"medium","query":"发票那个事怎么弄","behavior":"answer","gold_anchors":["3 个工作日"],"must_contain":["3 个工作日"]}
+{"id":"C07","bucket":"C_colloquial","difficulty":"medium","query":"我想换个尺码行不行","behavior":"answer","gold_anchors":["收到商品 7 天内可申请换货"],"must_contain":["7"]}
+{"id":"C08","bucket":"C_colloquial","difficulty":"easy","query":"包不包邮啊到底","behavior":"answer","gold_anchors":["99 元包邮"],"must_contain":["99"]}
+{"id":"C09","bucket":"C_colloquial","difficulty":"hard","query":"钱退到哪去了","behavior":"answer","gold_anchors":["3 个工作日"],"must_contain":["3 个工作日"]}
+{"id":"C10","bucket":"C_colloquial","difficulty":"medium","query":"买多了能退一件不","behavior":"answer","gold_anchors":["7 天无理由"],"must_contain":["7"]}
+{"id":"C11","bucket":"C_colloquial","difficulty":"hard","query":"我这个能便宜点不","behavior":"refuse","gold_anchors":[],"must_contain":[]}
+{"id":"C12","bucket":"C_colloquial","difficulty":"hard","query":"你们有线下门店吗","behavior":"refuse","gold_anchors":[],"must_contain":[]}
+
+{"id":"E01","bucket":"E_multi","difficulty":"hard","query":"XH-3000A 续航多久，路上坏了能赔多少","behavior":"answer","gold_anchors":["续航 18 小时","单笔最高 500 元"],"must_contain":["18 小时","500"]}
+{"id":"E02","bucket":"E_multi","difficulty":"hard","query":"杭州买 80 块还差多少包邮","behavior":"answer","gold_anchors":["杭州","99 元包邮"],"must_contain":["99"]}
+{"id":"E03","bucket":"E_multi","difficulty":"hard","query":"XH-3000B 配 PG-100，售后多久响应","behavior":"answer","gold_anchors":["标称循环寿命 800 次","48 小时内首次响应"],"must_contain":["800","48"]}
+{"id":"E04","bucket":"E_multi","difficulty":"hard","query":"MJ-2200 断网能存多久，坏了赔吗","behavior":"answer","gold_anchors":["MJ-2200","单笔最高 500 元"],"must_contain":["30 天","500"]}
+{"id":"E05","bucket":"E_multi","difficulty":"hard","query":"退货要自己寄回吗，运费谁出","behavior":"answer","gold_anchors":["7 天内寄出","买家承担"],"must_contain":["7","买家"]}
+{"id":"E06","bucket":"E_multi","difficulty":"hard","query":"偏远地区买 XH-3000A 运费怎么算","behavior":"answer","gold_anchors":["偏远地区运费另计"],"must_contain":["偏远"]}
+{"id":"E07","bucket":"E_multi","difficulty":"hard","query":"HC-050 多少钱，买净化器能包邮吗","behavior":"answer","gold_anchors":["HC-050","99 元包邮"],"must_contain":["129","99"]}
+{"id":"E08","bucket":"E_multi","difficulty":"hard","query":"XH-3000A 用 S1 底座充满要多久，续航多少","behavior":"answer","gold_anchors":["MewHelp-S1","18 小时"],"must_contain":["2 小时","18 小时"]}
+{"id":"E09","bucket":"E_multi","difficulty":"hard","query":"什么情况会转人工，赔付超 500 会转吗","behavior":"answer","gold_anchors":["转人工","单笔最高 500 元"],"must_contain":["500"]}
+{"id":"E10","bucket":"E_multi","difficulty":"hard","query":"XH-3000A 和 XH-3000B 都能用 LW-7 吗","behavior":"answer","gold_anchors":["两款都能用 LW-7"],"must_contain":["LW-7"]}
+{"id":"E11","bucket":"E_multi","difficulty":"hard","query":"买 XH-3000A 能用花呗分期吗","behavior":"refuse","gold_anchors":[],"must_contain":[]}
+{"id":"E12","bucket":"E_multi","difficulty":"hard","query":"MJ-2200 能连 WiFi 吗","behavior":"refuse","gold_anchors":[],"must_contain":[]}

@@ -139,6 +139,17 @@ class HybridRetriever:
         self.candidate_k = candidate_k
         self.rerank_top_n = rerank_top_n
 
+    async def warmup(self) -> None:
+        """启动预热：发一次真实嵌入请求 + 确认集合结构。
+
+        ``RagPipeline.warmup`` 转调这里。嵌入器没有 ``warmup`` 时跳过
+        （假实现不需要预热，不该因此报错）。
+        """
+        warmup = getattr(self._embedder, "warmup", None)
+        if warmup is not None:
+            await warmup()
+        await self._vector_store.ensure_collection()
+
     async def retrieve(
         self,
         strategy: Strategy,
