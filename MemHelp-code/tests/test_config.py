@@ -207,3 +207,66 @@ def test_ch02_settings_reject_invalid_values(overrides):
     base.update(overrides)
     with pytest.raises(ValidationError):
         Settings(**base)
+
+
+# ---------------------------------------------------------------------------
+# ch03：RAG 配置
+# ---------------------------------------------------------------------------
+
+
+def test_rag_settings_have_stable_defaults():
+    """默认值必须与 `.env.example` 和 spec §8 一致 —— 三者不同步会让「本机跑得通、
+    换台机器跑不通」，而症状通常只是「检索结果莫名其妙」。"""
+    s = Settings(openai_base_url="https://x/v1", openai_api_key="k", openai_model="m")
+    assert s.milvus_uri == "http://127.0.0.1:19530"
+    assert s.milvus_collection == "knowledge"
+    assert s.embedding_dim == 1024
+    assert s.rag_top_k == 5
+    assert s.rag_warmup is True
+    assert s.chunk_max_chars == 600
+    assert s.chunk_overlap == 80
+    assert s.qa_batch_size == 8
+    assert s.qa_dedupe_threshold == 0.92
+
+
+def test_embedding_model_dir_is_absolute_and_cwd_independent():
+    """相对路径必须按 PROJECT_ROOT 解析：从仓库根还是从代码目录起进程，
+    模型都得找得到（与 `.env` 绝对路径同一条纪律）。"""
+    from app.config import PROJECT_ROOT
+
+    s = Settings(
+        openai_base_url="https://x/v1",
+        openai_api_key="k",
+        openai_model="m",
+        embedding_model_path="models/bge-m3",
+    )
+    d = s.embedding_model_dir()
+    assert d.is_absolute()
+    assert d == PROJECT_ROOT / "models" / "bge-m3"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"embedding_dim": 0},
+        {"rag_top_k": 0},
+        {"chunk_max_chars": 0},
+        {"chunk_overlap": -1},
+        {"qa_batch_size": 0},
+        {"qa_dedupe_threshold": 1.5},
+        {"qa_dedupe_threshold": -0.1},
+    ],
+    ids=["dim-zero", "topk-zero", "chunk-zero", "overlap-negative",
+         "batch-zero", "threshold-over-one", "threshold-negative"],
+)
+def test_ch03_settings_reject_invalid_values(overrides):
+    """去重阈值 >1 会让「永远不判重」，维数 0 会让 Milvus 建集合失败 —
+    这些错在配置层报出来，比在检索/建库时表现成「空结果」好查得多。"""
+    base = {
+        "openai_base_url": "https://gw.example.com/v1",
+        "openai_api_key": "sk-test",
+        "openai_model": "m",
+    }
+    base.update(overrides)
+    with pytest.raises(ValidationError):
+        Settings(**base)

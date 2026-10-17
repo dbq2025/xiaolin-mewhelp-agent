@@ -70,6 +70,60 @@ class Settings(BaseSettings):
         description="仅对瞬时错误的重试次数（不含首次尝试）。业务性失败与参数错误不重试。",
     )
 
+    # -- ch03：RAG（向量语义检索）----------------------------------------
+    #
+    # 嵌入模型跑在本机（上游 DeepSeek 没有 /embeddings 端点，实测 404），
+    # 所以这里只有「模型在哪、向量几维」，没有 API key 之类的凭据。
+    milvus_uri: str = Field(
+        default="http://127.0.0.1:19530",
+        min_length=1,
+        description="Milvus 连接地址（gRPC）。",
+    )
+    milvus_collection: str = Field(
+        default="knowledge", min_length=1, description="Milvus 集合名。"
+    )
+    embedding_model_path: str = Field(
+        default="models/bge-m3",
+        min_length=1,
+        description="BGE-M3 模型目录（本地路径或 HF id）。相对路径按项目根解析。",
+    )
+    embedding_dim: int = Field(
+        default=1024, ge=1, description="向量维度。BGE-M3 dense 输出固定 1024。"
+    )
+    rag_top_k: int = Field(
+        default=5, ge=1, le=50, description="检索返回的最大条数（也是 query_faq 的取数上限）。"
+    )
+    rag_warmup: bool = Field(
+        default=True,
+        description="启动时预热嵌入模型与 Milvus 集合。关闭后首次查询要等模型加载（约 20-40s）。",
+    )
+    chunk_max_chars: int = Field(
+        default=600, ge=1, description="单个切分块的最大字符数（表格按行切时可不遵守）。"
+    )
+    chunk_overlap: int = Field(
+        default=80, ge=0, description="同一节内相邻块的重叠字符上限；按句回退，绝不切半句。"
+    )
+    qa_batch_size: int = Field(
+        default=8, ge=1, le=64, description="对话挖知识时每批喂给 LLM 的会话数。"
+    )
+    qa_dedupe_threshold: float = Field(
+        default=0.92,
+        ge=0.0,
+        le=1.0,
+        description="问答对语义去重的余弦阈值：≥ 该值判为同义问法。",
+    )
+
+    def embedding_model_dir(self) -> Path:
+        """嵌入模型的绝对路径。
+
+        相对路径按 ``PROJECT_ROOT`` 解析，理由与 ``ENV_FILE`` 相同：本仓库的
+        代码在 ``MemHelp-code/`` 子目录、仓库根在上一层，按 CWD 解析会让
+        「从仓库根起进程」和「从代码目录起进程」看到两个不同的模型目录 ——
+        症状是「第一次能跑，换一种启动方式就 FileNotFoundError」。
+        """
+        path = Path(self.embedding_model_path)
+        return path if path.is_absolute() else PROJECT_ROOT / path
+
     def database_url(self) -> str:
         """拼出 SQLAlchemy 用的 MySQL 连接串。
 

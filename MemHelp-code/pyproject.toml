@@ -16,6 +16,14 @@ dependencies = [
     # 它本是 fastapi 的传递依赖，但**我们直接 import 了它**，所以显式声明 ——
     # 靠传递依赖会在上游改依赖树时静默断掉。
     "anyio>=4.0",
+    # -- ch03: RAG / 向量检索 --
+    # pymilvus 必须 2.6.x：服务端实测 2.6.22，官方兼容表要求 2.6.X；
+    # 3.x 面向 Milvus 3.0，装错会在建集合/搜索时踩到已改签的 API。
+    "pymilvus>=2.6,<3",
+    # 嵌入模型本机跑（上游 DeepSeek 无 /embeddings 端点）。
+    # Windows 的 torch wheel 是纯 CPU 版（约 124MB），不会拖 CUDA 组合包。
+    "sentence-transformers>=5.0",
+    "torch>=2.4",
 ]
 
 [dependency-groups]
