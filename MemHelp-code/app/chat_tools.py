@@ -58,6 +58,7 @@ from app.chat import ChatMeta, _message_text
 from app.context import build_context
 from app.db.repositories import Repositories
 from app.errors import UpstreamEmptyResponse
+from app.knowledge.retrieval import RetrieverLike
 from app.prompts import build_tool_chat_messages
 from app.tools.executor import ToolResult, execute_tool, to_tool_message_content
 from app.tools.registry import TOOL_LABELS, get_tools
@@ -168,6 +169,7 @@ async def astream_chat_with_tools(
     message: str,
     model: BaseChatModel,
     repositories: Repositories,
+    retriever: RetrieverLike | None = None,
     budget_tokens: int,
     model_name: str,
     timeout: float = 3.0,
@@ -178,6 +180,7 @@ async def astream_chat_with_tools(
     """跑一轮「模型定工具 → 执行 → 回灌 → 流式收敛」，并落库。
 
     :param repositories: 当次请求的仓库。历史回读与落库都经它。
+    :param retriever: 当次请求的向量检索器（ch03 起 ``query_faq`` 依赖它）。
     :param meta_out: 可选输出参数（约定键 ``"meta"``），在开始产流**之前**写入
         ``ChatMeta``。异步生成器在第一次 ``__anext__`` 前不执行任何代码，
         HTTP 层无法从返回值拿元信息 —— 这是 ch01 就定下的妥协。
@@ -201,7 +204,7 @@ async def astream_chat_with_tools(
     if meta_out is not None:
         meta_out["meta"] = ChatMeta(session_id=session_id, model=model_name, context=ctx)
 
-    tools = get_tools(repositories)
+    tools = get_tools(repositories, retriever)
     parts: list[str] = []
     tool_summaries: list[dict[str, Any]] = []
     #: 落库用的那一行的完整信息。与 ``tool_summaries`` 分开：那个是给前端/日志看的摘要
@@ -248,6 +251,7 @@ async def astream_chat_with_tools(
                 tool_name,
                 tool_args,
                 repositories=repositories,
+                retriever=retriever,
                 timeout=timeout,
                 max_retries=max_retries,
             )
@@ -331,6 +335,7 @@ async def complete_chat_with_tools(
     message: str,
     model: BaseChatModel,
     repositories: Repositories,
+    retriever: RetrieverLike | None = None,
     budget_tokens: int,
     model_name: str,
     timeout: float = 3.0,
@@ -357,6 +362,7 @@ async def complete_chat_with_tools(
         message=message,
         model=model,
         repositories=repositories,
+        retriever=retriever,
         budget_tokens=budget_tokens,
         model_name=model_name,
         timeout=timeout,

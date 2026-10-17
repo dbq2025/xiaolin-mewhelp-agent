@@ -1,64 +1,73 @@
-"""``query_faq`` —— 按关键词查 ``faq`` 表。
+"""``query_faq`` —— 向量语义检索（BGE-M3 + Milvus）。
 
-## 与 Task 5 那三个工具的关键区别
+## 契约没变，内核换了
 
-这个工具**真的连数据**（``faq`` 表）。为此它接受一个 ``faq_repo`` 参数，
-类型是 ``app.db.repositories.FaqRepository`` 的**结构**（duck typing）——
-测试可以塞内存假仓库进来，于是本文件的用例不需要 MySQL。
+| 项 | ch02（关键词） | ch03（向量） |
+|---|---|---|
+| 入参 | ``keyword: str`` | **不变** |
+| 出参 | ``{ok, keyword, count, items:[{question, answer, category}]}`` | **不变** |
+| 匹配方式 | ``LIKE %kw%`` | 语义相似度 Top-K |
 
-## 验收标准 3 的落点
+所以这个文件只做三件事：调检索器、把命中映射成原来的 JSON 形状、把异常原样放行。
+**任何改写出参键名的冲动都要停下来** —— 前端徽章、评估集、ch02 的用例都钉着它。
 
-「邮费是多少」查不到，是**预期结果**，必须表现为 ``ok=true, count=0``：
-模型收到的信号是「查了，库里确实没有这条」，于是它如实回答；
-若做成 ``ok=false``，模型收到的信号是「工具坏了」，它会道歉或编造 ——
-那样漏召回就观察不到了，也就失去了留给 ch03 做改造前基线的作用。
+## 为什么不降级回关键词
 
-## 转义由仓库层负责
+本章明确不做混合检索/关键词兜底。Milvus 挂了就让异常冒出去，由 ``executor.py``
+分类成 ``ok=false``：模型会如实告诉用户「暂时查不到规则」。
+偷偷回退到 ``LIKE`` 会让「向量库故障」伪装成「检索功能正常但结果一般」——
+故障被藏起来，比故障本身更贵。
 
-本工具把 ``keyword`` **原样**传给 ``faq_repo.search()``。
-``LIKE`` 的通配符转义属于「怎么拼 SQL」，在 ``FaqRepository`` 里做。
-这里再转一次会变成**双重转义**（``100%`` → ``100\\%`` → ``100\\\\%``），
-结果是本来能命中的词反而查不到 —— 而且看起来像「库里没数据」。
+## 空白关键词
+
+模型偶尔会传纯空白。空串直接返回 ``count=0`` 且**不调检索器**（省一次前向）；
+纯标点（如「？」）走正常检索路径，交给嵌入模型处理 —— 它不会因此崩溃，
+而且对「？」这种输入返回空结果本来就是对的。
 """
 
 import json
 from typing import Protocol
 
-from app.db.repositories import FaqHit
+from app.knowledge.retrieval import DEFAULT_TOP_K, KnowledgeHit
 
-#: 单次返回的最大条数。命中太多会把上下文预算一次吃光，
-#: 而且模型也不需要 20 条 FAQ 来回答一个问题。
-MAX_FAQ_ITEMS = 5
+__all__ = ["MAX_FAQ_ITEMS", "RetrieverLike", "query_faq"]
 
-
-class FaqSearchRepo(Protocol):
-    """本工具对 FAQ 仓库的最小依赖。只要求这一个方法。"""
-
-    async def search(self, keyword: str, limit: int = 5) -> list[FaqHit]: ...
+#: 单次返回的最大条数（与 ``Settings.rag_top_k`` 默认值一致）。
+#: 命中太多会把上下文预算一次吃光，而且模型也不需要 20 条规则来回答一个问题。
+MAX_FAQ_ITEMS = DEFAULT_TOP_K
 
 
-async def query_faq(keyword: str, *, faq_repo: FaqSearchRepo) -> str:
-    """按关键词检索常见问题。
+class RetrieverLike(Protocol):
+    """本工具对检索器的最小依赖。只要求这一个方法。"""
 
-    :param keyword: 检索关键词。取用户问题里最核心的名词，不要整句照抄
-        （``LIKE`` 是子串匹配，整句几乎必然零命中）。
-    :param faq_repo: FAQ 仓库。生产用 ``FaqRepository``，测试用内存假仓库。
+    async def search(self, query: str, top_k: int = DEFAULT_TOP_K) -> list[KnowledgeHit]: ...
+
+
+async def query_faq(
+    keyword: str, *, retriever: RetrieverLike, top_k: int = MAX_FAQ_ITEMS
+) -> str:
+    """按语义检索平台规则库，返回最相关的问答对。
+
+    :param keyword: **用户问题的完整原话**（如「邮费是多少」）。不要截成名词 ——
+        向量检索靠整句语义，截词反而丢信息。空白串直接返回空结果。
+    :param retriever: 检索器。生产用 ``KnowledgeRetriever``，测试用假实现。
+    :param top_k: 最多返回几条。
     :return: JSON 字符串，含 ``ok`` / ``keyword`` / ``count`` / ``items``
         （每项含 ``question`` / ``answer`` / ``category``）。
 
         ``count == 0`` 是**正常的业务结果**，不是错误。
 
-    :raises Exception: 仓库层的异常**原样冒出去**，由 ``executor.py`` 分类成
-        ``ok=false``。这里不能吞成空结果 —— 否则「数据库挂了」与「真的没查到」
+    :raises Exception: 检索层的异常**原样冒出去**，由 ``executor.py`` 分类成
+        ``ok=false``。这里不能吞成空结果 —— 否则「向量库挂了」与「真的没查到」
         会变成同一个信号。
     """
-    keyword = keyword.strip()
-    hits = await faq_repo.search(keyword, MAX_FAQ_ITEMS)
+    query = keyword.strip()
+    hits: list[KnowledgeHit] = [] if not query else await retriever.search(query, top_k)
 
     return json.dumps(
         {
             "ok": True,
-            "keyword": keyword,
+            "keyword": query,
             "count": len(hits),
             "items": [
                 {"question": hit.question, "answer": hit.answer, "category": hit.category}

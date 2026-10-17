@@ -37,10 +37,20 @@ from app.knowledge.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["KnowledgeHit", "KnowledgeRetriever", "RetrieverLike"]
+__all__ = ["KnowledgeHit", "KnowledgeRetriever", "RetrieverLike", "warmup"]
 
 #: 默认取数。与 ``Settings.rag_top_k`` 的默认值一致；工具层会显式传值。
 DEFAULT_TOP_K = 5
+
+
+async def warmup(embedder: Embedder, vector_store: VectorStore) -> None:
+    """启动预热：发一次真实嵌入请求 + 确保集合存在。
+
+    单独一个函数（而不是只挂在 retriever 上），因为 lifespan 里没有「当请求的
+    chunk 仓库」可给 —— 预热只碰嵌入器与向量库。
+    """
+    await embedder.warmup()
+    await vector_store.ensure_collection()
 
 
 @dataclass(frozen=True)
@@ -77,13 +87,12 @@ class KnowledgeRetriever:
         self._chunk_repo = chunk_repo
 
     async def warmup(self) -> None:
-        """预热：加载模型 + 确认集合存在。
+        """预热：发一次真实嵌入请求 + 确认集合存在。
 
-        lifespan 调它，把 20-40s 的冷启动成本挪到「服务启动时」，而不是
-        「用户问第一句话时」（后者会直接打穿 3s 的工具超时）。
+        lifespan 调它。云端没有「模型加载」这一步，但第一次调用要付 TLS + 鉴权，
+        而且密钥/模型名配错时能在启动阶段就报出来，而不是等用户问第一句。
         """
-        await self._embedder.warmup()
-        await self._vector_store.ensure_collection()
+        await warmup(self._embedder, self._vector_store)
 
     async def search(self, query: str, top_k: int = DEFAULT_TOP_K) -> list[KnowledgeHit]:
         """检索与 ``query`` 语义最接近的 ``top_k`` 块。"""

@@ -28,6 +28,7 @@
 from langchain_core.tools import BaseTool, tool
 
 from app.db.repositories import Repositories
+from app.knowledge.retrieval import RetrieverLike
 from app.tools.business import (
     query_logistics as _query_logistics,
     query_order as _query_order,
@@ -56,11 +57,11 @@ TOOL_LABELS: dict[str, str] = {
 }
 
 
-def _make_tools(repositories: Repositories) -> list[BaseTool]:
-    """按当次请求的仓库，构造五个绑好依赖的工具。
+def _make_tools(repositories: Repositories, retriever: RetrieverLike | None) -> list[BaseTool]:
+    """按当次请求的仓库构造五个绑好依赖的工具。
 
-    两个需要仓库的工具用**闭包**捕获 ``repositories``，
-    并把真正的业务参数显式列在签名里 —— 签名即给模型的 Schema。
+    两个需要仓库的工具用**闭包**捕获 ``repositories``，``query_faq`` 额外捕获
+    ``retriever``（向量检索器），并把真正的业务参数显式列在签名里 —— 签名即给模型的 Schema。
     """
 
     @tool("query_order", args_schema=QueryOrderArgs)
@@ -91,21 +92,29 @@ def _make_tools(repositories: Repositories) -> list[BaseTool]:
 
     @tool("query_faq", args_schema=QueryFaqArgs)
     async def query_faq(keyword: str) -> str:
-        """检索平台的常见问题库，返回匹配的问答对。
+        """按**语义**检索平台的常见问题与规则库，返回最相关的问答对。
 
         用于**平台规则类**问题：退货政策、退款流程、运费与包邮门槛、发票开具、
-        质保与赔付标准等。参数取问题里最核心的名词（如「退货」「运费」），
-        不要整句照抄用户原话。
+        质保与赔付标准等。
+        参数请传**用户问题的完整原话**（如「邮费是多少」），不要截成名词——
+        语义检索靠整句匹配，换一种说法也能召回。
         若返回 count 为 0，说明库里没有这条，请如实告知用户，不要编造规则。
         """
-        # 闭包捕获当次请求的仓库 —— 它不是给模型的参数，所以不出现在签名里。
+        # 闭包捕获当次请求的检索器 —— 它不是给模型的参数，所以不出现在签名里。
         #
-        # **必须 async + await**：底层 ``_query_faq`` 是协程函数（它要 await 仓库）。
+        # **必须 async + await**：底层 ``_query_faq`` 是协程函数（它要 await 检索）。
         # 写成同步函数再 ``return _query_faq(...)`` 会返回一个 **coroutine 对象**，
         # LangChain 把它当成工具结果原样回灌给模型 —— 表现为模型复述
         # 「我帮你正在检索常见问题了：<coroutine object query_faq at 0x...>」。
         # 这个 bug 单测测不出来（假执行器不经过真工具），只有端到端能发现。
-        return await _query_faq(keyword, faq_repo=repositories.faq)
+        if retriever is None:
+            # 宁可失败得明明白白，也不要静默返回空结果 —— 那会把「装配漏了」
+            # 伪装成「库里没有这条规则」。
+            raise RuntimeError(
+                "query_faq 未装配向量检索器（retriever）。"
+                "请检查 create_app 的装配或测试注入。"
+            )
+        return await _query_faq(keyword, retriever=retriever)
 
     @tool("create_ticket", args_schema=CreateTicketArgs)
     async def create_ticket(description: str, ticket_type: str, conversation_id: str) -> str:
@@ -145,9 +154,16 @@ TOOL_NAMES: tuple[str, ...] = (
 )
 
 
-def get_tools(repositories: Repositories) -> list[BaseTool]:
-    """构造绑定到当次请求仓库的五个工具，供 ``model.bind_tools(...)``。"""
-    tools = _make_tools(repositories)
+def get_tools(
+    repositories: Repositories, retriever: RetrieverLike | None = None
+) -> list[BaseTool]:
+    """构造绑定到当次请求仓库（与检索器）的五个工具，供 ``model.bind_tools(...)``。
+
+    :param retriever: 向量检索器。``query_faq`` 必需；为 ``None`` 时该工具会在
+        **被调用时**抛一条可读的错误（由 executor 分类成 ``ok=false``），
+        而不是静默返回空结果。
+    """
+    tools = _make_tools(repositories, retriever)
     # 自检：注册表键、工具自报名、标签三者必须一致。三者错位是**静默**故障
     # （SSE 徽章显示不出、评估集全红），所以在构造时就撞一下，而不是等线上。
     names = [t.name for t in tools]
@@ -160,13 +176,15 @@ def get_tools(repositories: Repositories) -> list[BaseTool]:
     return tools
 
 
-def get_tool(name: str, repositories: Repositories) -> BaseTool | None:
+def get_tool(
+    name: str, repositories: Repositories, retriever: RetrieverLike | None = None
+) -> BaseTool | None:
     """按名字取一个工具；未知名字返回 ``None``。
 
     返回 ``None`` 而不是抛异常：未知工具名是**模型的输入**（它可能编一个名字），
     属于要转成结构化失败并回灌的正常情况，不是程序缺陷。
     """
-    for candidate in get_tools(repositories):
+    for candidate in get_tools(repositories, retriever):
         if candidate.name == name:
             return candidate
     return None

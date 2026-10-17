@@ -179,9 +179,10 @@ async def execute_tool(
     args: dict[str, Any],
     *,
     repositories: Repositories,
+    retriever: Any = None,
     timeout: float = 3.0,
     max_retries: int = 1,
-    resolve: Callable[[str, Repositories], Any] | None = None,
+    resolve: Callable[[str, Repositories, Any], Any] | None = None,
 ) -> ToolResult:
     """执行一个工具，**任何失败都转成 ``ToolResult(ok=False)``**。
 
@@ -190,6 +191,9 @@ async def execute_tool(
     对模型毫无可操作性。
 
     :param repositories: 当次请求的仓库。工具依赖由它按名字构造出来。
+    :param retriever: 当次请求的向量检索器（ch03 起 ``query_faq`` 依赖它）。
+        不关心检索的工具会忽略它；``None`` 时 ``query_faq`` 会在被调用时抛错，
+        由本函数分类成 ``ok=false``。
     :param timeout: 单次执行的超时（秒）。
     :param max_retries: 仅瞬时错误的重试次数，不含首次。总尝试数为 ``max_retries + 1``。
     :param resolve: 按名字取工具的可调用对象。默认走注册表 ``get_tool``；
@@ -217,7 +221,7 @@ async def execute_tool(
     # resolver 本身也被包住：构造工具时可能抛异常（某个工具模块 import 期出问题），
     # 而「永不抛异常」是本函数对外的契约 —— 不能因为异常发生在校验之前就破例。
     try:
-        tool = resolver(name, repositories)
+        tool = resolver(name, repositories, retriever)
     except BaseException as exc:  # noqa: BLE001
         return ToolResult(
             tool=name,

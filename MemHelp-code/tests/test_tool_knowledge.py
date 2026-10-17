@@ -1,49 +1,42 @@
-"""``query_faq`` 与 ``create_ticket`` 的测试。
+"""``query_faq``（向量检索版）与 ``create_ticket`` 的测试。
 
-这两个工具与 Task 5 的三个不同：它们**真的连数据**（``faq`` 表查、``tickets`` 表写）。
-所以这里注入内存假仓库 —— 既不依赖 MySQL，也不依赖 SQLAlchemy 的查询形状
-（那是 ``tests/test_db_repositories.py`` 的职责）。
+``query_faq`` 的内核在 ch03 从「关键词 LIKE」换成了「向量检索」，但它的**出参契约
+一字未变** —— 本文件的前几条用例就是在钉这件事：前端徽章、评估集、工具 Schema
+全都依赖 ``{ok, keyword, count, items:[{question, answer, category}]}`` 这个形状。
 
-本文件要钉住两件容易做错的事：
+要钉住的四件容易做错的事：
 
-1. **查不到不是错误**（验收标准 3 的预期形态）。漏召回必须表现为
-   ``ok=true, count=0``，让模型如实说「没查到」；若做成 ``ok=false``，
-   模型会去道歉或编造，而这**不是**我们想观察的基线。
-2. **转义不重复**。``LIKE`` 通配符转义是仓库层的职责（见 repositories.py），
-   工具层原样传关键词。两边都转会把 ``100%`` 变成 ``100\\\\%``，反而查不到。
+1. **出参形状不许变**（多一个 ``score`` 键就是改契约）；
+2. **查不到不是错误**：必须是 ``ok=true, count=0``，让模型如实说「没查到」；
+3. **异常不许吞**：向量库挂了要冒出去由 executor 分类，否则「基础设施坏了」
+   与「业务上没查到」会变成同一个信号；
+4. **整句原话进检索**：截成名词会丢掉「换说法」的语义信息。
 """
 
 import json
 
 import pytest
 
-from app.tools.knowledge import query_faq
+from app.knowledge.retrieval import KnowledgeHit
+from app.tools.knowledge import MAX_FAQ_ITEMS, query_faq
 from app.tools.ticketing import create_ticket
 
 
 # ---------------------------------------------------------------------------
-# 假仓库
+# 假依赖
 # ---------------------------------------------------------------------------
 
 
-class FakeFaqRepo:
-    """记录收到的关键词，并按子串匹配假装成数据库。"""
+class FakeRetriever:
+    """记录收到的查询，并按给定的命中列表返回（不排序、不过滤）。"""
 
-    def __init__(self, rows=()) -> None:
-        self.rows = list(rows)
-        self.last_keyword: str | None = None
-        self.last_limit: int | None = None
+    def __init__(self, hits=()) -> None:
+        self.hits = list(hits)
+        self.calls: list[tuple[str, int]] = []
 
-    async def search(self, keyword, limit=5):
-        from app.db.repositories import FaqHit
-
-        self.last_keyword = keyword
-        self.last_limit = limit
-        return [
-            FaqHit(question=q, answer=a, category=c)
-            for (q, a, c) in self.rows
-            if keyword in q or keyword in a
-        ][:limit]
+    async def search(self, query, top_k=5):
+        self.calls.append((query, top_k))
+        return self.hits[:top_k]
 
 
 class FakeTicketRepo:
@@ -72,25 +65,34 @@ class FakeConversationRepo:
 
 
 async def test_query_faq_returns_hits_with_questions_and_answers():
-    repo = FakeFaqRepo(
-        [("退货政策是什么？", "签收后 7 天内无理由退货。", "售后")]
-    )
-    out = json.loads(await query_faq("退货", faq_repo=repo))
+    retriever = FakeRetriever([KnowledgeHit("退货政策是什么？", "签收后 7 天内无理由退货。", "售后", 0.91)])
+
+    out = json.loads(await query_faq("退货", retriever=retriever))
 
     assert out["ok"] is True
     assert out["count"] == 1
+    assert set(out["items"][0]) == {"question", "answer", "category"}
     assert out["items"][0]["question"] == "退货政策是什么？"
     assert out["items"][0]["answer"] == "签收后 7 天内无理由退货。"
     assert out["items"][0]["category"] == "售后"
 
 
+async def test_query_faq_does_not_leak_the_similarity_score():
+    """相似度只用于日志/调试。多一个键就是改契约。"""
+    retriever = FakeRetriever([KnowledgeHit("q", "a", "c", 0.99)])
+
+    out = json.loads(await query_faq("退货", retriever=retriever))
+
+    assert "score" not in out["items"][0]
+
+
 async def test_query_faq_reports_zero_hits_without_raising():
-    """验收标准 3：查不到是**预期结果**，必须是 ``ok=true`` + ``count=0``。
+    """查不到是**正常业务结果**：必须是 ``ok=true`` + ``count=0``。
 
     做成 ``ok=false`` 的话，模型收到的信号是「工具坏了」，于是它会道歉或编造，
-    而不是如实说「FAQ 里没有这条」—— 那样漏召回就观察不到了。
+    而不是如实说「库里没有这条」。
     """
-    out = json.loads(await query_faq("邮费是多少", faq_repo=FakeFaqRepo([])))
+    out = json.loads(await query_faq("邮费是多少", retriever=FakeRetriever()))
 
     assert out["ok"] is True
     assert out["count"] == 0
@@ -98,45 +100,56 @@ async def test_query_faq_reports_zero_hits_without_raising():
     assert out["keyword"] == "邮费是多少"
 
 
-async def test_query_faq_passes_keyword_through_untouched():
-    """转义是仓库层的职责 —— 工具层重复转义会让本来能命中的词查不到。"""
-    repo = FakeFaqRepo([])
-    await query_faq("100%纯棉", faq_repo=repo)
+async def test_query_faq_passes_the_whole_question_through():
+    """整句原话进向量检索 —— 截成名词会丢掉「换说法」的语义。"""
+    retriever = FakeRetriever()
+    await query_faq("买了七天还能退吗", retriever=retriever)
 
-    assert repo.last_keyword == "100%纯棉"
+    assert retriever.calls == [("买了七天还能退吗", MAX_FAQ_ITEMS)]
 
 
 async def test_query_faq_strips_surrounding_whitespace():
-    """模型偶尔会把关键词带空白一起传过来（尤其从整句里截取时）。"""
-    repo = FakeFaqRepo([])
-    await query_faq("  退货  ", faq_repo=repo)
+    """模型偶尔会把整句带空白一起传过来。"""
+    retriever = FakeRetriever()
+    await query_faq("  退货  ", retriever=retriever)
 
-    assert repo.last_keyword == "退货"
+    assert retriever.calls[0][0] == "退货"
+
+
+async def test_query_faq_skips_the_retriever_for_blank_keywords():
+    """纯空白不调检索器（省一次模型前向），但仍返回合法 JSON。"""
+    retriever = FakeRetriever([KnowledgeHit("q", "a", "c", 1.0)])
+
+    out = json.loads(await query_faq("   ", retriever=retriever))
+
+    assert out["count"] == 0
+    assert retriever.calls == []
 
 
 async def test_query_faq_uses_a_bounded_limit():
-    """结果条数必须有上限：命中 200 条 FAQ 会把上下文预算一次吃光。"""
-    repo = FakeFaqRepo([(f"退货 {i}", "答案", "售后") for i in range(50)])
-    out = json.loads(await query_faq("退货", faq_repo=repo))
+    """结果条数必须有上限：命中 50 条会把上下文预算一次吃光。"""
+    retriever = FakeRetriever([KnowledgeHit(f"q{i}", "答案", "售后", 1.0) for i in range(50)])
 
-    assert out["count"] <= 5
-    assert repo.last_limit == 5
+    out = json.loads(await query_faq("退货", retriever=retriever))
+
+    assert out["count"] == MAX_FAQ_ITEMS
+    assert retriever.calls[0][1] == MAX_FAQ_ITEMS
 
 
-async def test_query_faq_lets_repository_failure_propagate():
-    """仓库炸了必须让异常冒出去，由 ``executor.py`` 分类。
+async def test_query_faq_lets_retriever_failure_propagate():
+    """检索炸了必须让异常冒出去，由 ``executor.py`` 分类。
 
-    不能在工具里吞成「空结果」：那样「基础设施真的坏了」与「业务上没查到」
-    会变成同一个信号（``ok=true, count=0``），于是数据库挂了的时候，
-    模型会一本正经地告诉用户「我们 FAQ 里没有这条」。
+    不能在工具里吞成「空结果」：那样「Milvus 真的坏了」与「业务上没查到」
+    会变成同一个信号，于是向量库挂了的时候，模型会一本正经地告诉用户
+    「我们库里没有这条」。
     """
 
     class Exploding:
-        async def search(self, keyword, limit=5):
+        async def search(self, query, top_k=5):
             raise RuntimeError("connection reset by peer")
 
     with pytest.raises(RuntimeError):
-        await query_faq("退货", faq_repo=Exploding())
+        await query_faq("退货", retriever=Exploding())
 
 
 # ---------------------------------------------------------------------------

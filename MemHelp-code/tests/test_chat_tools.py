@@ -165,12 +165,23 @@ async def _collect(**kwargs):
     return [event async for event in astream_chat_with_tools(**kwargs)]
 
 
+class _NoHitsRetriever:
+    """编排用例不关心检索内容：给一个永远返回空的检索器。"""
+
+    async def search(self, query, top_k=5):
+        return []
+
+    async def warmup(self) -> None:
+        return None
+
+
 def _common(repos, model, executor, **overrides):
     kwargs = {
         "session_id": "sess-a",
         "message": "订单 1001 的物流到哪了",
         "model": model,
         "repositories": repos,
+        "retriever": _NoHitsRetriever(),
         "budget_tokens": 2000,
         "model_name": "fake-model",
         "timeout": 1.0,

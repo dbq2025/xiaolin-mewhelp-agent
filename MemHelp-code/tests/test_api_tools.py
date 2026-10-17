@@ -16,7 +16,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import OperationalError
 
-from app.main import create_app
+from app import main
 from tests.fakes import FakeChatModel
 
 
@@ -30,8 +30,11 @@ def _tool_call(name="query_logistics", args=None, call_id="call_1"):
 
 
 def _client(test_settings, fake_repositories, model=None, db_ping=None) -> TestClient:
+    # 必须写 ``main.create_app``（不能 ``from app.main import create_app``）：
+    # 后者在 import 时就把名字绑死了，conftest 的包装器（注入 SQLite 仓库、
+    # 空检索器、rag_warmup=False）对它无效 —— 这正是 agent.md 里写过的坑。
     return TestClient(
-        create_app(
+        main.create_app(
             model=model or FakeChatModel(chunks=["好"]),
             settings=test_settings,
             repositories=fake_repositories,

@@ -23,6 +23,7 @@ import json
 import logging
 from collections.abc import AsyncIterable
 from functools import lru_cache
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Depends, FastAPI, Request
@@ -46,6 +47,9 @@ from app.errors import (
     upstream_error_message,
 )
 from app.extract import ExtractionError, extract_request
+from app.knowledge.embedder import get_embedder
+from app.knowledge.retrieval import KnowledgeRetriever, RetrieverLike, warmup as warmup_rag
+from app.knowledge.vector_store import MilvusVectorStore
 from app.llm import get_chat_model
 from app.memory import InMemorySessionStore, get_session_store, new_session_id
 from app.schemas import (
@@ -258,6 +262,36 @@ async def get_repositories(request: Request):
         session.close()
 
 
+@lru_cache(maxsize=4)
+def _vector_store_for(uri: str, collection: str, dim: int) -> MilvusVectorStore:
+    """进程内复用 Milvus 客户端。
+
+    ``MilvusClient`` 自带 gRPC 连接池，每请求重建等于把连接管理交给 GC ——
+    持续流量下表现为「Milvus 连接数缓慢上涨」，和 ch02 里 MySQL 引擎那条经验同源。
+    """
+    return MilvusVectorStore(uri, collection, dim)
+
+
+def get_retriever(
+    request: Request, repositories: Repositories = Depends(get_repositories)
+) -> RetrieverLike:
+    """当次请求的向量检索器。
+
+    两段式（与 ``get_repositories`` 同一个套路）：``app.state.retriever`` 有就用
+    （测试/演示注入）；否则用进程级单例的嵌入器 + Milvus 客户端，配上**当请求的**
+    chunk 仓库 —— 仓库绑着本次的 DB Session，不能跨请求共享。
+    """
+    injected = getattr(request.app.state, "retriever", None)
+    if injected is not None:
+        return injected
+
+    settings = get_app_settings(request)
+    store = _vector_store_for(
+        settings.milvus_uri, settings.milvus_collection, settings.embedding_dim
+    )
+    return KnowledgeRetriever(get_embedder(settings), store, repositories.knowledge)
+
+
 async def _ping_database(request: Request) -> bool:
     """探一次数据库。**永不抛异常**（``ping()`` 自己也吞掉一切）。
 
@@ -447,6 +481,7 @@ async def _chat_stream_body(
     store: InMemorySessionStore,
     repositories: Repositories,
     session_id: str,
+    retriever: RetrieverLike | None = None,
 ) -> AsyncIterable[str]:
     """SSE 响应体：``meta`` → ``status``? → ``token``* → ``tools`` → ``done``。
 
@@ -465,6 +500,7 @@ async def _chat_stream_body(
             message=req.message,
             model=model,
             repositories=repositories,
+            retriever=retriever,
             budget_tokens=settings.context_token_budget,
             model_name=settings.openai_model,
             timeout=settings.tool_timeout_seconds,
@@ -502,12 +538,42 @@ async def _chat_stream_body(
 # ---------------------------------------------------------------------------
 
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """启动预热（ch03）：加载嵌入模型 + 确保 Milvus 集合存在。
+
+    **失败只告警不崩**：Milvus 没起时应用仍要能启动（聊天与另外四个工具不依赖它），
+    查询时再由 executor 把异常分类成 ``ok=false``。启动即崩会把「向量库没起」
+    升级成「客服系统整体不可用」，那是错误的严重度。
+
+    被注入的检索器（测试/演示）若自带 ``warmup``，优先预热它 —— 否则会去按配置
+    构造一个谁都不用的默认检索器。
+    """
+    if getattr(app.state, "rag_warmup", False):
+        try:
+            injected = getattr(app.state, "retriever", None)
+            if injected is not None and hasattr(injected, "warmup"):
+                await injected.warmup()
+            else:
+                settings = app.state.settings or get_settings()
+                store = _vector_store_for(
+                    settings.milvus_uri, settings.milvus_collection, settings.embedding_dim
+                )
+                await warmup_rag(get_embedder(settings), store)
+            logger.info("RAG 预热完成")
+        except Exception:  # noqa: BLE001 - 预热失败不阻断启动
+            logger.warning("RAG 预热失败：检索将在首个查询时按需加载", exc_info=True)
+    yield
+
+
 def create_app(
     model: BaseChatModel | None = None,
     store: InMemorySessionStore | None = None,
     settings: Settings | None = None,
     repositories: Repositories | None = None,
     db_ping: Any = None,
+    retriever: RetrieverLike | None = None,
+    rag_warmup: bool = True,
 ) -> FastAPI:
     """构造应用。
 
@@ -522,14 +588,23 @@ def create_app(
     ``db_ping`` 是一个**探测函数**（同步或异步皆可），不是探测结果：
     健康检查每次执行都要拿当下的状态，缓存一个布尔值会让数据库恢复之后
     仍然一直报不健康。
+
+    ``retriever``：向量检索器，``query_faq`` 依赖它。``None`` 时按配置构造
+    （进程级单例的嵌入器与 Milvus 客户端）。
+
+    ``rag_warmup``：启动时预热嵌入模型与 Milvus 集合。**生产默认开启**——
+    BGE-M3 首载 20-40s，不预热的话第一个问句必然打穿 3s 的工具超时。
+    测试必须传 ``False``（``conftest`` 已统一处理），否则整套测试每次都要加载 2.3GB 模型。
     """
-    app = FastAPI(title="MewHelp 智能客服 API", version="0.2.0")
+    app = FastAPI(title="MewHelp 智能客服 API", version="0.3.0", lifespan=_lifespan)
     app.state.chat_model = model
     app.state.session_store = store
     # 显式赋值（即使为 None）：这是「测试用注入配置、不读宿主机 .env」的实际生效点。
     app.state.settings = settings
     app.state.repositories = repositories
     app.state.db_ping = db_ping
+    app.state.retriever = retriever
+    app.state.rag_warmup = rag_warmup
 
     # -- 异常处理 ---------------------------------------------------------
 
@@ -621,6 +696,7 @@ def create_app(
         model_: BaseChatModel = Depends(get_model),
         store_: InMemorySessionStore = Depends(get_store),
         repositories_: Repositories = Depends(get_repositories),
+        retriever_: RetrieverLike = Depends(get_retriever),
     ):
         """一个路径两种响应形态。
 
@@ -634,7 +710,7 @@ def create_app(
         if req.stream:
             return StreamingResponse(
                 _chat_stream_body(
-                    req, settings_, model_, store_, repositories_, session_id
+                    req, settings_, model_, store_, repositories_, session_id, retriever_
                 ),
                 media_type=SSE_MEDIA_TYPE,
             )
@@ -645,6 +721,7 @@ def create_app(
                 message=req.message,
                 model=model_,
                 repositories=repositories_,
+                retriever=retriever_,
                 budget_tokens=settings_.context_token_budget,
                 model_name=settings_.openai_model,
                 timeout=settings_.tool_timeout_seconds,

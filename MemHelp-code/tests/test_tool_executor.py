@@ -68,7 +68,7 @@ def _fake_tool(name="query_order", *, result='{"ok":true}', delay=0.0, error=Non
 
             self.args_schema = QueryOrderArgs
 
-        def __call__(self, _name, _repos):
+        def __call__(self, _name, _repos, _retriever=None):
             """当作 ``resolve`` 用：无论要哪个名字都返回自己。"""
             return self
 
@@ -301,7 +301,7 @@ async def test_transient_failure_succeeds_on_retry(repos):
             self.args_schema = QueryOrderArgs
             self.calls = 0
 
-        def __call__(self, _name, _repos):
+        def __call__(self, _name, _repos, _retriever=None):
             return self
 
         async def ainvoke(self, args):
@@ -351,7 +351,7 @@ async def test_execute_tool_never_raises_when_the_resolver_itself_explodes(repos
     这时还没有 tool 可校验，但不能让异常冒到 SSE 连接上。
     """
 
-    def exploding_resolver(_name, _repos):
+    def exploding_resolver(_name, _repos, _retriever=None):
         raise SystemExit(1)
 
     result = await execute_tool(

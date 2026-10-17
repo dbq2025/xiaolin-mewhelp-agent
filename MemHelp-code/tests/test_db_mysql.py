@@ -331,24 +331,62 @@ async def test_faq_search_works_on_the_real_corpus(engine):
         assert await repo.search("邮费") == [], "「邮费」必须命中 0 条（验收标准 3）"
 
 
-async def test_query_faq_tool_returns_zero_hits_against_the_real_corpus(engine):
-    """端到端：工具查真库语料时，「邮费」必须返回 ok=true / count=0。
+async def test_query_faq_hydrates_chunk_text_from_the_real_database(engine):
+    """端到端（真 MySQL）：向量只存 id，原文回 ``knowledge_chunks`` 取。
 
-    这是验收标准 3 在**真实数据**上的证据 —— 不是模拟的空仓库。
+    ch02 那条「工具查真库语料时『邮费』返回 0 条」的用例在本章被**取代** ——
+    工具已不再查 ``faq`` 表，漏召回正是本章要修的东西。这里验证的是新链路里
+    唯一的 SQL 那一跳（``WHERE id IN (...)``）在真库上成立：列类型、utf8mb4、
+    以及 ``questions`` 里换行分隔的多问法都能原样取回。
     """
     import json
 
     from sqlalchemy.orm import Session
 
-    from app.db.repositories import FaqRepository
+    from app.db.models import KnowledgeChunk
+    from app.db.repositories import KnowledgeChunkRepository
+    from app.knowledge.retrieval import KnowledgeRetriever
+    from app.knowledge.vector_store import VectorHit
     from app.tools.knowledge import query_faq
 
+    marker = "ch03-it-邮费-mark"
     with Session(engine) as session:
-        payload = json.loads(await query_faq("邮费", faq_repo=FaqRepository(session)))
+        row = KnowledgeChunk(
+            category="物流",
+            questions=marker,
+            answer="满 99 元包邮，未满收 10 元运费。",
+            section_path="物流 / 运费",
+            content_type="faq",
+            is_key_clause=False,
+        )
+        session.add(row)
+        session.commit()
+        chunk_id = int(row.id)
+
+        class _Embedder:
+            async def embed(self, texts):
+                return [[0.1] * 4 for _ in texts]
+
+            async def warmup(self) -> None:
+                return None
+
+        class _Store:
+            async def search(self, vector, top_k):
+                return [VectorHit(str(chunk_id), 0.93)]
+
+        try:
+            retriever = KnowledgeRetriever(
+                _Embedder(), _Store(), KnowledgeChunkRepository(session)
+            )
+            payload = json.loads(await query_faq("邮费是多少", retriever=retriever))
+        finally:
+            session.query(KnowledgeChunk).filter(KnowledgeChunk.id == chunk_id).delete()
+            session.commit()
 
     assert payload["ok"] is True
-    assert payload["count"] == 0
-    assert payload["items"] == []
+    assert payload["count"] == 1
+    assert payload["items"][0]["question"] == marker
+    assert "99" in payload["items"][0]["answer"]
 
 
 def test_existing_conversations_all_have_a_session_key(engine):

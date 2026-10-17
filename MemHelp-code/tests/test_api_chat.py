@@ -41,6 +41,45 @@ def test_healthz_does_not_leak_api_key(test_settings):
     assert "sk-" not in str(body)
 
 
+def test_lifespan_warms_up_the_retriever_only_when_enabled(test_settings):
+    """``rag_warmup`` 是生产与测试的分界线。
+
+    生产默认开启：BGE-M3 首载 20-40s，不预热的话第一个问句必然打穿 3s 工具超时。
+    测试必须关掉：否则每次跑套件都要加载 2.3GB 模型。
+    这里用 ``TestClient`` 的上下文管理器触发 lifespan，两个方向都钉住。
+    """
+    calls: list[str] = []
+
+    class _Retriever:
+        async def search(self, query, top_k=5):
+            return []
+
+        async def warmup(self) -> None:
+            calls.append("warmup")
+
+    with TestClient(
+        app_main.create_app(
+            model=FakeChatModel(reply="好"),
+            settings=test_settings,
+            retriever=_Retriever(),
+            rag_warmup=False,
+        )
+    ) as client:
+        client.get("/healthz")
+    assert calls == []
+
+    with TestClient(
+        app_main.create_app(
+            model=FakeChatModel(reply="好"),
+            settings=test_settings,
+            retriever=_Retriever(),
+            rag_warmup=True,
+        )
+    ) as client:
+        client.get("/healthz")
+    assert calls == ["warmup"]
+
+
 def test_healthz_reports_model_and_budget(test_settings):
     body = _client(test_settings).get("/healthz").json()
     assert body["model"]

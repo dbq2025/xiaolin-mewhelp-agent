@@ -7,7 +7,7 @@
 
 这中间的空档藏着一个真实缺陷（端到端跑验收时才发现）：
 
-``query_faq`` 与 ``create_ticket`` 底层是**协程函数**（它们要 await 仓库），
+``query_faq`` 与 ``create_ticket`` 底层是**协程函数**（它们要 await 仓库/检索器），
 而注册表里最初写成同步函数直接 ``return _query_faq(...)`` —— 于是工具返回的是
 一个 **coroutine 对象**。LangChain 把它当结果原样回灌，模型复述出来是：
 
@@ -31,13 +31,13 @@ def repos(sqlite_session):
     return Repositories.from_session(sqlite_session)
 
 
-async def test_query_faq_returns_a_string_not_a_coroutine(repos):
+async def test_query_faq_returns_a_string_not_a_coroutine(repos, empty_retriever):
     """工具 ``ainvoke`` 的结果必须是一条可解析的 JSON 字符串。
 
     返回 coroutine 时本用例会红在 ``json.loads`` 上 —— 而 LangChain 的真实行为
     是把它当工具结果回灌，模型于是复述出 ``<coroutine object ...>``。
     """
-    tool = get_tool("query_faq", repos)
+    tool = get_tool("query_faq", repos, empty_retriever)
     assert tool is not None
 
     raw = await tool.ainvoke({"keyword": "退货"})
@@ -48,20 +48,37 @@ async def test_query_faq_returns_a_string_not_a_coroutine(repos):
     assert "coroutine" not in raw
 
 
-async def test_query_faq_actually_reads_the_database(repos, sqlite_session):
-    """端到端读库：先塞一条语料，再用工具查出来。"""
-    from app.db.models import Faq
+async def test_query_faq_passes_the_question_to_the_retriever(repos):
+    """ch03 起检索走向量库：工具必须把**整句**交给检索器，并把命中映射进出参。"""
+    from app.knowledge.retrieval import KnowledgeHit
 
-    sqlite_session.add(
-        Faq(question="退货政策是什么？", answer="签收后 7 天内无理由退货。", category="售后")
-    )
-    sqlite_session.commit()
+    class _Retriever:
+        def __init__(self):
+            self.queries: list[str] = []
 
-    tool = get_tool("query_faq", repos)
-    payload = json.loads(await tool.ainvoke({"keyword": "退货"}))
+        async def search(self, query, top_k=5):
+            self.queries.append(query)
+            return [KnowledgeHit("运费怎么算", "满 99 包邮", "物流", 0.9)]
 
+    retriever = _Retriever()
+    tool = get_tool("query_faq", repos, retriever)
+    payload = json.loads(await tool.ainvoke({"keyword": "邮费是多少"}))
+
+    assert retriever.queries == ["邮费是多少"]
     assert payload["count"] == 1
-    assert "7 天" in payload["items"][0]["answer"]
+    assert payload["items"][0]["answer"] == "满 99 包邮"
+
+
+async def test_query_faq_without_a_retriever_fails_loudly(repos):
+    """装配漏了检索器时必须**明确报错**，不能静默返回空结果。
+
+    静默失败会把「装配漏了」伪装成「库里没有这条规则」，排查方向完全不同。
+    """
+    tool = get_tool("query_faq", repos)
+    assert tool is not None
+
+    with pytest.raises(Exception, match="retriever"):
+        await tool.ainvoke({"keyword": "退货"})
 
 
 async def test_create_ticket_returns_a_string_and_writes_a_row(repos, sqlite_session):
@@ -141,16 +158,11 @@ async def test_tool_arguments_are_validated_by_the_real_tool(repos, name, args):
         await tool.ainvoke(args)
 
 
-async def test_every_registered_tool_returns_a_string(repos, sqlite_session):
+async def test_every_registered_tool_returns_a_string(repos, empty_retriever):
     """把五个工具都真调一遍，逐个断言返回类型。
 
     这条是**兜底**：以后有人再加工具、又在包装层忘了 await，这里会红。
     """
-    from app.db.models import Faq
-
-    sqlite_session.add(Faq(question="测试问题", answer="测试答案", category="售后"))
-    sqlite_session.commit()
-
     cases = [
         ("query_order", {"order_id": "1001"}),
         ("query_product", {"product_id": "P1"}),
@@ -160,7 +172,7 @@ async def test_every_registered_tool_returns_a_string(repos, sqlite_session):
     ]
 
     for name, args in cases:
-        tool = get_tool(name, repos)
+        tool = get_tool(name, repos, empty_retriever)
         assert tool is not None, name
         raw = await tool.ainvoke(args)
         assert isinstance(raw, str), f"{name} 返回了 {type(raw).__name__}，应为 str"
