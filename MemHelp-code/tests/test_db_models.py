@@ -10,12 +10,22 @@
 """
 
 
-def test_metadata_has_exactly_four_ch02_tables():
-    """多一张少一张都要红 —— 表名漂移会让 compose 灌好的数据白费。"""
+def test_metadata_has_exactly_six_tables():
+    """多一张少一张都要红 —— 表名漂移会让 compose 灌好的数据白费。
+
+    ch03 新增 `knowledge_chunks` / `qa_extraction_staging`，所以是六张。
+    """
     import app.db.models  # noqa: F401 - 必须先 import 才会注册进 metadata
     from app.db.base import Base
 
-    assert set(Base.metadata.tables) == {"conversations", "messages", "faq", "tickets"}
+    assert set(Base.metadata.tables) == {
+        "conversations",
+        "messages",
+        "faq",
+        "tickets",
+        "knowledge_chunks",
+        "qa_extraction_staging",
+    }
 
 
 def test_conversation_session_id_is_unique_and_not_nullable():
@@ -178,3 +188,96 @@ def test_foreign_keys_point_at_conversations():
         fks = list(model.__table__.c.conversation_id.foreign_keys)
         assert len(fks) == 1
         assert fks[0].target_fullname == "conversations.id"
+
+
+# ---------------------------------------------------------------------------
+# ch03：知识库两张表
+# ---------------------------------------------------------------------------
+
+
+def test_knowledge_chunks_columns_match_ddl():
+    """列名必须与用户给的 DDL 逐字相同（真库已按该 DDL 建好）。
+
+    ``category`` / ``questions`` / ``answer`` 是进向量化文本的三格；
+    其余（章节路径 / 内容类型 / 关键条款 / 前后块指针 / vector 状态）
+    都是元数据，**只存不进向量** —— 边界在模型上就要看得出来。
+    """
+    from app.db.models import KnowledgeChunk
+
+    assert set(KnowledgeChunk.__table__.c.keys()) == {
+        "id",
+        "category",
+        "questions",
+        "answer",
+        "section_path",
+        "content_type",
+        "is_key_clause",
+        "prev_chunk_id",
+        "next_chunk_id",
+        "vector_id",
+        "vectorize_status",
+        "created_at",
+        "updated_at",
+    }
+    assert KnowledgeChunk.__table__.c.category.type.length == 255
+    assert KnowledgeChunk.__table__.c.section_path.type.length == 512
+    assert KnowledgeChunk.__table__.c.content_type.type.length == 32
+    assert KnowledgeChunk.__table__.c.vector_id.type.length == 64
+    assert KnowledgeChunk.__table__.c.answer.nullable is False
+    assert KnowledgeChunk.__table__.c.section_path.nullable is True
+    assert KnowledgeChunk.__table__.c.prev_chunk_id.nullable is True
+    assert KnowledgeChunk.__table__.c.is_key_clause.nullable is False
+
+
+def test_knowledge_chunk_self_referencing_foreign_keys():
+    """前后块指针指向**同一张表**，且删除时要 SET NULL，而不是级联删掉邻居。"""
+    from app.db.models import KnowledgeChunk
+
+    prev_fk = next(iter(KnowledgeChunk.__table__.c.prev_chunk_id.foreign_keys))
+    next_fk = next(iter(KnowledgeChunk.__table__.c.next_chunk_id.foreign_keys))
+    assert prev_fk.target_fullname == "knowledge_chunks.id"
+    assert next_fk.target_fullname == "knowledge_chunks.id"
+    assert prev_fk.ondelete == "SET NULL"
+    assert next_fk.ondelete == "SET NULL"
+
+
+def test_staging_status_enum_covers_live_superset():
+    """真库的 ENUM 是 5 值超集（后续章节加了 approved/rejected）。
+
+    ORM 若只写 3 值，读到他人写入的 approved 行会在 flush/load 时抛
+    ``LookupError`` —— 症状是「暂存表偶尔读不出来」，极难查。
+    """
+    from sqlalchemy import Enum as SAEnum
+
+    from app.db.models import QaStaging, STAGING_STATUSES
+
+    assert STAGING_STATUSES == ("extracted", "kept", "discarded", "approved", "rejected")
+    col = QaStaging.__table__.c.status
+    assert isinstance(col.type, SAEnum)
+    assert set(col.type.enums) == set(STAGING_STATUSES)
+
+
+def test_staging_columns_match_ddl():
+    from app.db.models import QaStaging
+
+    assert set(QaStaging.__table__.c.keys()) == {
+        "id",
+        "batch_no",
+        "source_ref",
+        "question",
+        "answer",
+        "status",
+        "created_at",
+    }
+    assert QaStaging.__table__.c.batch_no.type.length == 64
+    assert QaStaging.__table__.c.source_ref.type.length == 255
+    assert QaStaging.__table__.c.source_ref.nullable is True
+
+
+def test_vectorize_status_constants_and_content_types():
+    """状态与内容类型的取值是跨层契约（ORM / 仓库层 / 脚本 / 评估都用）。"""
+    from app.db.models import CONTENT_TYPES, VECTORIZE_STATUSES
+
+    assert VECTORIZE_STATUSES == ("pending", "done")
+    # mined：本章挖矿产物的第 4 个取值；DDL 注释里的「等」字留了口子。
+    assert CONTENT_TYPES == ("faq", "policy", "manual", "mined")
