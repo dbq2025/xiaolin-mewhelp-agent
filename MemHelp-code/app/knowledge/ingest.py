@@ -1,0 +1,287 @@
+"""离线建库编排 —— 双写：MySQL 原文优先，Milvus 向量随后。
+
+## 顺序是有讲究的
+
+```
+写 MySQL(pending) → 回填 prev/next → 写 Milvus → 回填 vector_id / done
+```
+
+**先 MySQL 后 Milvus**：原文是权威源，块没进库之前不该有向量（否则向量指向一个
+不存在的 id）。**先写 Milvus 再回填**：反过来的话，中断会留下「状态说 done、
+Milvus 里却没有」的块 —— 那种块永远拣不出来，续跑也补不上。
+
+## 三种中断点都收敛
+
+1. 块写完、向量未写 → ``pending``，下次拣起；
+2. 向量写完、回填未做 → 仍是 ``pending``，下次用同一主键覆盖写（不产生重复）；
+3. 两库都写成功 → ``done``，下次跳过。
+
+这就是「按主键幂等，挂了能重跑」的全部含义，也是验收标准 2。
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, Sequence
+
+from app.db.repositories import FaqRepository, KnowledgeChunkRepository
+from app.knowledge.chunker import render_embed_text, split_markdown
+from app.knowledge.embedder import Embedder
+from app.knowledge.vector_store import VectorStore
+
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    "IngestReport",
+    "content_type_for",
+    "ingest_faq_table",
+    "ingest_markdown",
+    "rebuild",
+    "vectorize_pending",
+]
+
+#: 文件名 → content_type 的约定。写在这里而不是散在 CLI 里，是为了让
+#: 「文档叫什么名字」与「落库的元数据」只有一处映射。
+_FILENAME_TYPES: tuple[tuple[str, str], ...] = (
+    ("退货政策", "policy"),
+    ("商品FAQ", "faq"),
+    ("售后手册", "manual"),
+)
+
+#: 存量 FAQ 表灌进知识库时的章节路径前缀。
+FAQ_SECTION_PREFIX = "平台FAQ"
+
+
+@dataclass
+class IngestReport:
+    """一次建库的可打印结果。"""
+
+    docs: int = 0
+    chunks_total: int = 0
+    chunks_created: int = 0
+    chunks_updated: int = 0
+    chunks_skipped: int = 0
+    vectors_written: int = 0
+
+
+def content_type_for(path: Path) -> str:
+    """按文件名猜 ``content_type``；认不出来就当手册（最宽松的一类）。"""
+    for marker, content_type in _FILENAME_TYPES:
+        if marker in path.stem:
+            return content_type
+    return "manual"
+
+
+class _Row:
+    """给 ``upsert_chunk`` 用的最小行形状。
+
+    切分器产出的 ``Chunk`` 也能直接喂进去；这里再包一层是为了让 **FAQ 表**
+    这种「本来就是结构化行」的来源复用同一条写库路径。
+    """
+
+    __slots__ = (
+        "category",
+        "questions",
+        "answer",
+        "section_path",
+        "content_type",
+        "is_key_clause",
+        "ordinal",
+    )
+
+    def __init__(
+        self,
+        *,
+        category: str,
+        questions: str,
+        answer: str,
+        section_path: str,
+        content_type: str,
+        is_key_clause: bool,
+        ordinal: int,
+    ) -> None:
+        self.category = category
+        self.questions = questions
+        self.answer = answer
+        self.section_path = section_path
+        self.content_type = content_type
+        self.is_key_clause = is_key_clause
+        self.ordinal = ordinal
+
+
+# ---------------------------------------------------------------------------
+# 向量化（续跑的唯一入口）
+# ---------------------------------------------------------------------------
+
+
+async def vectorize_pending(
+    *,
+    chunk_repo: KnowledgeChunkRepository,
+    vector_store: VectorStore,
+    embedder: Embedder,
+    limit: int | None = None,
+    batch_size: int = 32,
+) -> int:
+    """把 ``pending``（或 ``vector_id`` 为空）的块补上向量，返回本次写入条数。
+
+    :param limit: 本次最多处理多少块。``0`` 表示一块都不处理（演示「只建块」用），
+        ``None`` 表示一直补到没有 pending 为止。
+    """
+    if limit is not None and limit <= 0:
+        return 0
+
+    written = 0
+    while True:
+        remaining = None if limit is None else limit - written
+        if remaining is not None and remaining <= 0:
+            break
+
+        take = batch_size if remaining is None else min(batch_size, remaining)
+        rows = await chunk_repo.list_pending(limit=take)
+        if not rows:
+            break
+
+        vectors = await embedder.embed([render_embed_text(row) for row in rows])
+        ids = [str(row.id) for row in rows]
+
+        # 先写向量，再回填状态。反了就永远补不上（见模块 docstring）。
+        await vector_store.upsert(ids, vectors)
+        await chunk_repo.mark_done([(row.id, str(row.id)) for row in rows])
+        written += len(rows)
+        logger.info("已向量化 %d 块（本次累计 %d）", len(rows), written)
+
+    return written
+
+
+# ---------------------------------------------------------------------------
+# 文档建库
+# ---------------------------------------------------------------------------
+
+
+async def _ingest_chunks(
+    *,
+    chunks: Sequence[_Row],
+    chunk_repo: KnowledgeChunkRepository,
+    report: IngestReport,
+) -> list[int]:
+    """写块并回填同篇内的前后指针（外键要求 id 先存在，所以分两步）。"""
+    ids: list[int] = []
+    for chunk in chunks:
+        chunk_id, outcome = await chunk_repo.upsert_chunk(chunk)
+        ids.append(chunk_id)
+        if outcome == "created":
+            report.chunks_created += 1
+        elif outcome == "updated":
+            report.chunks_updated += 1
+        else:
+            report.chunks_skipped += 1
+    if len(ids) > 1:
+        await chunk_repo.link_neighbours(ids)
+    return ids
+
+
+async def ingest_markdown(
+    paths: Iterable[Path],
+    *,
+    chunk_repo: KnowledgeChunkRepository,
+    vector_store: VectorStore,
+    embedder: Embedder,
+    max_chars: int = 600,
+    overlap: int = 80,
+    vector_limit: int | None = None,
+) -> IngestReport:
+    """切分 Markdown 文档、写库并向量化。
+
+    :param vector_limit: 本次最多补多少块的向量（演示中断用）；``None`` 表示全补。
+    """
+    report = IngestReport()
+    for path in paths:
+        path = Path(path)
+        text = path.read_text(encoding="utf-8")
+        content_type = content_type_for(path)
+        chunks = split_markdown(
+            text,
+            content_type=content_type,
+            source=path.name,
+            max_chars=max_chars,
+            overlap=overlap,
+        )
+        rows = [
+            _Row(
+                category=chunk.category,
+                questions=chunk.questions,
+                answer=chunk.answer,
+                section_path=chunk.section_path,
+                content_type=chunk.content_type,
+                is_key_clause=chunk.is_key_clause,
+                ordinal=chunk.ordinal,
+            )
+            for chunk in chunks
+        ]
+        ids = await _ingest_chunks(chunks=rows, chunk_repo=chunk_repo, report=report)
+
+        # 原文改了但答案没变的块不会被计数；真正的「更新」在 upsert 内部发生，
+        # 这里用「原有块数 - 新建块数」间接统计，够用且不必再查一遍库。
+        report.chunks_total += len(ids)
+        report.docs += 1
+        logger.info("%s：%d 块（%s）", path.name, len(ids), content_type)
+
+    report.vectors_written = await vectorize_pending(
+        chunk_repo=chunk_repo,
+        vector_store=vector_store,
+        embedder=embedder,
+        limit=vector_limit,
+    )
+    return report
+
+
+async def ingest_faq_table(
+    *,
+    faq_repo: FaqRepository,
+    chunk_repo: KnowledgeChunkRepository,
+    vector_store: VectorStore,
+    embedder: Embedder,
+    vector_limit: int | None = None,
+) -> IngestReport:
+    """把存量 ``faq`` 表灌进知识库（``content_type='faq'``，问法就是原问题的问法）。"""
+    report = IngestReport(docs=1)
+    rows = [
+        _Row(
+            category=hit.category,
+            questions=hit.question,
+            answer=hit.answer,
+            section_path=f"{FAQ_SECTION_PREFIX} / {hit.category}",
+            content_type="faq",
+            is_key_clause=False,
+            ordinal=index,
+        )
+        for index, hit in enumerate(await faq_repo.list_all())
+    ]
+    ids = await _ingest_chunks(chunks=rows, chunk_repo=chunk_repo, report=report)
+    report.chunks_total = len(ids)
+    report.vectors_written = await vectorize_pending(
+        chunk_repo=chunk_repo,
+        vector_store=vector_store,
+        embedder=embedder,
+        limit=vector_limit,
+    )
+    return report
+
+
+# ---------------------------------------------------------------------------
+# 重建
+# ---------------------------------------------------------------------------
+
+
+async def rebuild(
+    *, chunk_repo: KnowledgeChunkRepository, vector_store: VectorStore
+) -> None:
+    """清空两库（**先清向量，再清表**）。
+
+    顺序反了的话，如果进程在两步之间被杀，会留下指向已删原文的孤儿向量 ——
+    检索命中一个不存在的 id，只能靠「跳过未知 id」兜底，而那会静默少结果。
+    """
+    await vector_store.reset()
+    await chunk_repo.truncate()

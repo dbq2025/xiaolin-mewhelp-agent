@@ -318,10 +318,10 @@ async def test_upsert_chunk_is_idempotent_by_natural_key(sqlite_session):
     from app.db.repositories import KnowledgeChunkRepository
 
     repo = KnowledgeChunkRepository(sqlite_session)
-    id1, created1 = await repo.upsert_chunk(_Chunk())
-    id2, created2 = await repo.upsert_chunk(_Chunk())
+    id1, outcome1 = await repo.upsert_chunk(_Chunk())
+    id2, outcome2 = await repo.upsert_chunk(_Chunk())
 
-    assert created1 is True and created2 is False
+    assert (outcome1, outcome2) == ("created", "unchanged")
     assert id2 == id1
     assert await repo.count_by_status() == {"pending": 1, "done": 0}
 
@@ -342,9 +342,9 @@ async def test_upsert_chunk_resets_status_when_answer_changes(sqlite_session):
     class _Changed(_Chunk):
         answer = "7 天无理由，需保持完好"
 
-    cid2, created = await repo.upsert_chunk(_Changed())
+    cid2, outcome = await repo.upsert_chunk(_Changed())
 
-    assert cid2 == cid and created is False
+    assert cid2 == cid and outcome == "updated"
     assert await repo.count_by_status() == {"pending": 1, "done": 0}
     rows = await repo.list_pending()
     assert rows[0].answer == "7 天无理由，需保持完好"

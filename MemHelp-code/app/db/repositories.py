@@ -420,7 +420,7 @@ class KnowledgeChunkRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
-    def _upsert_chunk(self, chunk: object) -> tuple[int, bool]:
+    def _upsert_chunk(self, chunk: object) -> tuple[int, str]:
         content_type = _field(chunk, "content_type")
         section_path = _field(chunk, "section_path") or ""
         questions = _field(chunk, "questions")
@@ -445,7 +445,7 @@ class KnowledgeChunkRepository:
             )
             self._session.add(row)
             self._session.commit()
-            return int(row.id), True
+            return int(row.id), "created"
 
         if existing.answer != answer:
             existing.answer = answer
@@ -455,13 +455,17 @@ class KnowledgeChunkRepository:
             existing.category = _field(chunk, "category")
             existing.is_key_clause = bool(_field(chunk, "is_key_clause"))
             self._session.commit()
-        return int(existing.id), False
+            return int(existing.id), "updated"
+        return int(existing.id), "unchanged"
 
-    async def upsert_chunk(self, chunk: object) -> tuple[int, bool]:
-        """按自然键写入一块，返回 ``(id, 是否新建)``。
+    async def upsert_chunk(self, chunk: object) -> tuple[int, str]:
+        """按自然键写入一块，返回 ``(id, outcome)``。
 
         :param chunk: duck-typed 行，需有 ``category`` / ``questions`` / ``answer`` /
             ``section_path`` / ``content_type`` / ``is_key_clause``。
+        :return: ``outcome`` 是 ``"created"`` / ``"updated"`` / ``"unchanged"`` 之一。
+            三值而不是 bool：建库报告要分别统计「新建 / 更新 / 跳过」，
+            合成两值就分不出「重跑没事干」与「原文改过了」。
         """
         return await _run(self._upsert_chunk, chunk)
 
