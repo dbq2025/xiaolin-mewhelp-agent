@@ -583,6 +583,7 @@ uv run python scripts/show_low_confidence.py    # 池子里应有这一行
 | 计划 | `docs/superpowers/plans/2026-10-17-ch04-hybrid-retrieval-plan.md` |
 | 留痕 | `dev-notes/ch04.md`（逐阶段追记）+ `dev-notes/ch04-eval-report.md` |
 | 检索 | `app/knowledge/query.py`、`hybrid.py`、`rerank.py`、`citations.py`、`sufficiency.py` |
+| 编排 | `app/knowledge/pipeline.py`（`RagPipeline`：理解→检索→重排→两道闸→证据） |
 | 工具契约 | `app/tools/knowledge.py`、`registry.py`、`schemas.py`（`query_faq` 新增可选 `category`） |
 | 数据 | `app/db/models.py`、`repositories.py`、`sql/ch04-ddl.sql`（含 `messages.citations`） |
 | 语料 | `knowledge/商品型号手册.md`（新增） |
