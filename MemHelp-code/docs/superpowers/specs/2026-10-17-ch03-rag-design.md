@@ -378,7 +378,7 @@ $uv = "C:\Users\dbq\.local\bin\uv.exe"
 
 | 交付物 | 路径 |
 |---|---|
-| 建表 DDL（既有） | 真库已有；本章补 `sql/ch03-ddl.sql` 作为可重建来源（含 5 值 ENUM 说明） |
+| 建表 DDL | 真库已有；本章补 `sql/ch03-ddl.sql` 作为可重建来源（含 5 值 ENUM 说明）。**`sql/` 全部首次提交**（ch02 三份 + ch03 两份），用户已裁定 |
 | 演示语料 | `MemHelp-code/knowledge/{退货政策,商品FAQ,售后手册}.md` |
 | 演示历史会话 | `sql/ch03-seed-history.sql`（`demo-ch03-*` 前缀） |
 | 后端 | `MemHelp-code/app/knowledge/**`、`app/db/{models,repositories}.py`、`app/tools/{knowledge,registry}.py`、`app/{api,config}.py` |
@@ -396,7 +396,7 @@ $uv = "C:\Users\dbq\.local\bin\uv.exe"
 | CPU 编码慢（约 100–300ms/句） | 建库批 32；检索只编码 1 句，可接受 |
 | `get_collection_stats` 不可靠 | 校验一律用 `query(count(*))` |
 | 真库 ENUM 超集 | ORM 含 5 值 + `KNOWN_SCHEMA_DIVERGENCES` 记录 |
-| `sql/` 目前未跟踪 | 本章 DDL/seed 随代码一起首次提交（需用户确认） |
+| `sql/` 目前未跟踪 | **已裁定**：`sql/` 全部首次提交（ch02 三份 + 本章两份），随本章代码一起进 git |
 | 切分参数（600/80）没有理论最优 | 用评估集回归；参数可配，改参不改进评估标准 |
 | 去重阈值 0.92 可能误杀 | 丢弃行留档可人工复核；阈值可配、有回归用例 |
 | 模型目录 2.3GB | 加 `.gitignore`；`download_model.py` 支持断点续传 |
