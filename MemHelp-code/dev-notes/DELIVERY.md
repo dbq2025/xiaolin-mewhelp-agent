@@ -121,3 +121,104 @@ sse.py       SSE 帧编码
 - 评估运行记录：`.superpowers/sdd/2026-02-14-ch01-pure-chat-plan/eval-run-*.txt`
 - 验收演示原始输出：`dev-notes/acceptance-output.txt`
 - 逐阶段开发留痕（含所有 Ruling 与翻车记录）：`dev-notes/ch01.md`
+
+---
+
+# 第四章「混合检索 + 重排 + 评估体系」交付总结
+
+> 数字全部来自本机实测（Milvus 2.6.22 / pymilvus 2.6.17 / 硅基流动嵌入与重排 / 真实 chat 模型）。
+
+## 1. 交付物
+
+| 项 | 位置 |
+|---|---|
+| 设计 | `docs/superpowers/specs/2026-10-17-ch04-hybrid-retrieval-design.md` |
+| 计划 | `docs/superpowers/plans/2026-10-17-ch04-hybrid-retrieval-plan.md` |
+| 留痕 | `dev-notes/ch04.md`（逐阶段，含 Ruling 与翻车） |
+| 评估报告 | `dev-notes/ch04-eval-report.md` + `evals/reports/ch04.json` |
+| 检索 | `app/knowledge/{query,hybrid,rerank,citations,sufficiency,pipeline}.py` |
+| 数据 | `sql/ch04-ddl.sql`、`app/db/{models,repositories}.py` |
+| 评估 | `evals/ch04_cases.jsonl`（48 条）、`evals/run_ch04_evals.py` |
+| 语料 | `knowledge/商品型号手册.md`（新增） |
+| 前端 | `web/{app.js,style.css}`（引用抽屉 + 👍/👎） |
+
+## 2. 演示命令
+
+```powershell
+$env:UV_CACHE_DIR = "F:\DeepSeek-Harness\memhelp-code-myself\.uv-cache"; $uv = "C:\Users\dbq\.local\bin\uv.exe"
+
+# 0) schema 升级：drop 集合后**保留原文**重建向量（58 条，含 30 条 mined）
+& $uv run --directory MemHelp-code python scripts/build_knowledge.py --reindex
+#    新语料单独入库（--reindex 不 ingest 新文件）
+& $uv run --directory MemHelp-code python scripts/build_knowledge.py --docs knowledge/商品型号手册.md
+
+# 1) 金标锚串自检（0 命中即报错）
+& $uv run --directory MemHelp-code python evals/run_ch04_evals.py --validate-only
+
+# 2) 验收 2：型号题 BM25 命中（逐条打印）
+& $uv run --directory MemHelp-code python evals/run_ch04_evals.py --only B_model --strategies bm25 -v
+
+# 3) 验收 1：四策略对比 + 生成段
+& $uv run --directory MemHelp-code python evals/run_ch04_evals.py `
+    --strategies vector,bm25,hybrid,hybrid_rerank `
+    --generation hybrid,hybrid_rerank --limit 4 `
+    --json evals/reports/ch04.json --markdown dev-notes/ch04-eval-report.md
+
+# 4) 端到端
+& $uv run --directory MemHelp-code uvicorn app.main:app --port 8000
+#   问「XH-3000A 的续航多久」→ 点角标看原文；问「你们支持货到付款吗」→ 拒答
+& $uv run --directory MemHelp-code python scripts/show_low_confidence.py
+```
+
+## 3. 测试结果
+
+```
+uv run --directory MemHelp-code python -m pytest -q
+674 passed, 39 skipped
+```
+
+真机集成（默认 skip，需显式开启）：
+
+```
+$env:MEMHELP_TEST_MILVUS=1  → tests/test_knowledge_milvus.py 5 passed
+$env:MEMHELP_TEST_MYSQL=1   → tests/test_db_mysql.py 33 passed
+```
+
+## 4. 评估数字（48 条 / 四桶 × 12）
+
+检索段（Recall@5 / MRR@10，overall）：
+
+| 策略 | Recall@5 | MRR@10 |
+|---|---|---|
+| vector | 1.000 | 0.942 |
+| bm25 | 0.975 | 0.881 |
+| hybrid | 0.975 | 0.891 |
+| **hybrid_rerank** | **1.000** | **0.950** |
+
+生成段（每桶 3 条可答 + 1 条拒答）：
+
+| 策略 | Faithfulness | 拒答准确率 | 引用有效率 |
+|---|---|---|---|
+| hybrid | 0.955 | 1.000 | 1.000 |
+| hybrid_rerank | 0.961 | 1.000 | 1.000 |
+
+> 读报告要注意两件事：① 生成段用**评估时提示词**（与线上共享引用规则，但不是同一条链路）；
+> ② gold 锚串在真库里常命中多块（同一事实被 mined 问答对重复陈述），Recall@5 因此饱和，
+> 区分度主要看 MRR@10 与 Recall@1。
+
+## 5. 四条验收标准（实测）
+
+| # | 标准 | 实测 |
+|---|---|---|
+| 1 | 四策略对比报告能跑出数字 | `dev-notes/ch04-eval-report.md` 三张表 + `evals/reports/ch04.json`；脚本退出码 **0** |
+| 2 | 带具体型号的问题，BM25 能命中 | `--only B_model --strategies bm25` → **Recall@5 1.000 / MRR 0.900**；小写 `xh-3000a` 与带空格 `XH 3000B` 变体均命中 |
+| 3 | 引用编号能定位回原文，页面可点 | 回答含 `[1]…[4]`；`messages.citations` 存快照（例：`chunk_id=317`，`section_path=商品型号手册 / 巡检仪 / XH-3000A 与 XH-3000B 的区别`）；前端点角标开抽屉 |
+| 4 | 问库里没有的内容 → 明确拒答 + 入池 | 「你们支持货到付款吗」→ 拒答话术；`low_confidence_questions` 新增一行 `source=retrieval_low_conf`、`reason=最高重排分 0.036 低于阈值 0.3` |
+
+## 6. 已知限制
+
+- 「模型根本没调 `query_faq`」这种情况后端拦不住（spec §9.6 已写明），只能靠 Prompt 约束
+  与评估集的「未检索就答率」观察。
+- 重排服务不可用时降级为 RRF 序（`rerank_degraded=true` 进报告），此时检索层阈值闸不生效。
+- `faith_cases` 只提供最小查询/处置端点，没有管理页面。
+- 👎 只做纯前端采集（localStorage），不上报后端。

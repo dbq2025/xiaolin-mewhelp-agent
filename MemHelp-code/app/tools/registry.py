@@ -1,4 +1,4 @@
-﻿"""五个工具的注册表 —— 名字（字符串）与工具对象的唯一对应表。
+"""五个工具的注册表 —— 名字（字符串）与工具对象的唯一对应表。
 
 ## 为什么是工厂而不是模块级常量
 
@@ -91,15 +91,13 @@ def _make_tools(repositories: Repositories, retriever: AnswerContextLike | None)
         return _query_logistics(order_id)
 
     @tool("query_faq", args_schema=QueryFaqArgs)
-    async def query_faq(keyword: str, category: str | None = None) -> str:
+    async def query_faq(keyword: str) -> str:
         """检索平台的常见问题、规则库与商品型号参数，返回**带编号的依据**。
 
         用于**平台规则类**问题（退货政策、退款流程、运费与包邮门槛、发票开具、
         质保与赔付标准）与**具体商品型号**问题（某个型号的参数、配件、价格）。
         参数请传**用户问题的完整原话**（如「邮费是多少」），不要截成名词 ——
         检索靠整句语义匹配，换一种说法也能召回。
-        用户明确点名了品类（如「售后政策」「商品参数」）就一并传 ``category``，
-        会先过滤再检索；没点名就不要猜。
 
         返回里每个 item 带 ``n`` 与 ``section_path``：**正文引用时用 [n] 标注**。
         若 ``refused`` 为 true，说明知识库里没有能回答这个问题的依据，请如实拒答，
@@ -119,7 +117,7 @@ def _make_tools(repositories: Repositories, retriever: AnswerContextLike | None)
                 "query_faq 未装配检索器（retriever）。"
                 "请检查 create_app 的装配或测试注入。"
             )
-        return await _query_faq(keyword, retriever=retriever, category=category)
+        return await _query_faq(keyword, retriever=retriever)
 
     @tool("create_ticket", args_schema=CreateTicketArgs)
     async def create_ticket(description: str, ticket_type: str, conversation_id: str) -> str:

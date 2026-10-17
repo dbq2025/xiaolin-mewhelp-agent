@@ -421,4 +421,111 @@ schtasks /create /tn "MewHelpMineKnowledge" /sc daily /st 03:00 `
 
 **本章不做（用户指定）**：关键词召回、混合检索、重排；只跑 dense 向量单路。
 
+---
+
+# 第四章「混合检索 + 重排 + 评估体系」
+
+## 1. 本章新增了什么
+
+| 能力 | 落点 |
+|---|---|
+| 双路召回：dense + **Milvus 原生 BM25**（`text` 字段 + 内置 chinese analyzer） | `app/knowledge/hybrid.py`、`vector_store.py` |
+| RRF 融合（由 Milvus `hybrid_search` 做）+ `bge-reranker-v2-m3` 精排 Top-10 | 同上 + `app/knowledge/rerank.py` |
+| 品类元数据**先过滤再检索** | `build_expr()` → 每个 `AnnSearchRequest.expr` |
+| Query 理解：口语归一 + 检索侧同义词 + 型号归一 | `app/knowledge/query.py` |
+| 带编号引用、可回跳章节路径、刷新后仍可点 | `app/knowledge/citations.py`、`messages.citations` |
+| 低置信度显式拒答 + 入池 | `app/knowledge/{pipeline,sufficiency}.py`、`low_confidence_questions` |
+| 四策略评估（Recall@K / MRR / Faithfulness，按桶） | `evals/run_ch04_evals.py` |
+| 前端可点引用 + 👍/👎 一次性反馈 | `web/app.js` |
+
+> **口径变更**：ch03 说「Milvus 不存第二份真相」，ch04 起 Milvus 是**检索索引副本**
+> （`text` / `category` / `content_type` 是派生数据）。MySQL 仍是原文权威；
+> 改了原文必须重建索引，否则 BM25 与过滤会按旧副本工作。
+
+## 2. 配置（`.env` 新增）
+
+```dotenv
+RERANK_BASE_URL=https://api.siliconflow.cn/v1
+RERANK_API_KEY=            # 留空则复用 EMBEDDING_API_KEY；两者都空 → 重排降级为 RRF 序
+RERANK_MODEL=BAAI/bge-reranker-v2-m3
+RAG_HYBRID_TOP_K=50        # 每一路各召回多少条
+RAG_CANDIDATE_K=20         # 融合后进重排的候选数
+RAG_RERANK_TOP_N=10        # 最终证据条数
+RAG_MIN_RERANK_SCORE=0.3   # 检索层低置信阈值（用评估集标定）
+```
+
+## 3. 重建索引（schema 升级）
+
+ch03 的集合只有 `id + vector`，**BM25 的 `text`/`sparse` 字段只能在建集合时声明**，
+所以升级必须重建集合。两条路，别选错：
+
+```powershell
+# ✅ 保留原文（含 ch03 挖矿产物 mined），只重建向量 —— 升级 schema 用这条
+& $uv run --directory MemHelp-code python scripts/build_knowledge.py --reindex
+
+# ⚠️ 清空 knowledge_chunks 再重灌（会丢掉 mined）—— 只在确定不要旧数据时用
+& $uv run --directory MemHelp-code python scripts/build_knowledge.py --docs knowledge --faq-table --rebuild
+```
+
+新增语料单独入库（`--reindex` 不会 ingest 新文件）：
+
+```powershell
+& $uv run --directory MemHelp-code python scripts/build_knowledge.py --docs knowledge/商品型号手册.md
+```
+
+## 4. 评估
+
+```powershell
+# 金标锚串能否解析（0 命中会直接报错，>3 块会告警）
+& $uv run --directory MemHelp-code python evals/run_ch04_evals.py --validate-only
+
+# 验收 2：型号题必须被 BM25 命中（逐条打印）
+& $uv run --directory MemHelp-code python evals/run_ch04_evals.py --only B_model --strategies bm25 -v
+
+# 验收 1：四策略对比 + 生成段（Faithfulness / 拒答准确率）
+& $uv run --directory MemHelp-code python evals/run_ch04_evals.py `
+    --strategies vector,bm25,hybrid,hybrid_rerank `
+    --generation hybrid,hybrid_rerank --limit 24 `
+    --json evals/reports/ch04.json --markdown dev-notes/ch04-eval-report.md
+```
+
+退出码 0 = `hybrid_rerank` 整体 Recall@5 ≥ `vector`，且 `B_model` 桶 ≥ `bm25`。
+
+**读报告前先知道两件事**：
+
+1. 生成段用的是**评估时提示词**（与线上共享引用规则，但不是同一条链路）；
+2. gold 锚串在真库里可能命中多块（同一事实被 mined 问答对重复陈述），
+   Recall 因此偏宽松 —— 这是数据分布，不是标注错。
+
+## 5. 端到端与验收 3 / 4
+
+```powershell
+& $uv run --directory MemHelp-code uvicorn app.main:app --port 8000
+```
+
+浏览器打开 <http://127.0.0.1:8000/chat/>：
+
+- 问 **「XH-3000A 续航多久」** → 回答带 `[n]` 角标 → **点角标**，右侧抽屉显示
+  章节路径与 chunk 原文；刷新页面后角标仍可点（引用存在 `messages.citations`）。
+- 每条回答左下角 **👍 / 👎**：点一下点亮、显示「已反馈」、一次性锁定；刷新后保持。
+- 问 **「你们支持货到付款吗」** → **明确拒答**（不编造），并落进低置信度池：
+
+```powershell
+& $uv run --directory MemHelp-code python scripts/show_low_confidence.py
+# 或直接查库：
+# SELECT id, source, LEFT(raw_question,30), LEFT(reason,40), created_at
+#   FROM low_confidence_questions ORDER BY id DESC LIMIT 5;
+```
+
+## 6. 本章留痕
+
+- 设计文档：`docs/superpowers/specs/2026-10-17-ch04-hybrid-retrieval-design.md`
+- 实施计划：`docs/superpowers/plans/2026-10-17-ch04-hybrid-retrieval-plan.md`
+- 开发过程追记：`dev-notes/ch04.md`
+- 评估报告：`dev-notes/ch04-eval-report.md`、`evals/reports/ch04.json`
+- 建表 DDL：`sql/ch04-ddl.sql`（两张新表 + `messages.citations`）
+
+**本章不做（用户指定）**：指代消解、多轮改写；LangGraph / Langfuse；
+`faith_cases` 管理页面；👎 的后端落库。
+
 

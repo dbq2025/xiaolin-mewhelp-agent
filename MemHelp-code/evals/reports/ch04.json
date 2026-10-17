@@ -1,0 +1,385 @@
+{
+  "meta": {
+    "generated_at": "2026-10-17T17:27:33",
+    "cases": 48,
+    "strategies": [
+      "vector",
+      "bm25",
+      "hybrid",
+      "hybrid_rerank"
+    ],
+    "generation_strategies": [
+      "hybrid",
+      "hybrid_rerank"
+    ],
+    "rerank_model": "BAAI/bge-reranker-v2-m3",
+    "min_rerank_score": 0.3,
+    "milvus_rows": 68
+  },
+  "retrieval": {
+    "vector": {
+      "A_policy": {
+        "n": 10,
+        "recall@1": 0.8,
+        "recall@3": 1.0,
+        "recall@5": 1.0,
+        "recall@10": 1.0,
+        "mrr@10": 0.8833333333333334
+      },
+      "B_model": {
+        "n": 10,
+        "recall@1": 0.9,
+        "recall@3": 1.0,
+        "recall@5": 1.0,
+        "recall@10": 1.0,
+        "mrr@10": 0.9333333333333333
+      },
+      "C_colloquial": {
+        "n": 10,
+        "recall@1": 1.0,
+        "recall@3": 1.0,
+        "recall@5": 1.0,
+        "recall@10": 1.0,
+        "mrr@10": 1.0
+      },
+      "E_multi": {
+        "n": 10,
+        "recall@1": 0.9,
+        "recall@3": 1.0,
+        "recall@5": 1.0,
+        "recall@10": 1.0,
+        "mrr@10": 0.95
+      },
+      "overall": {
+        "n": 40,
+        "recall@1": 0.9,
+        "recall@3": 1.0,
+        "recall@5": 1.0,
+        "recall@10": 1.0,
+        "mrr@10": 0.9416666666666667
+      }
+    },
+    "bm25": {
+      "A_policy": {
+        "n": 10,
+        "recall@1": 0.8,
+        "recall@3": 0.9,
+        "recall@5": 0.9,
+        "recall@10": 1.0,
+        "mrr@10": 0.85
+      },
+      "B_model": {
+        "n": 10,
+        "recall@1": 0.8,
+        "recall@3": 0.9,
+        "recall@5": 0.9,
+        "recall@10": 1.0,
+        "mrr@10": 0.8666666666666666
+      },
+      "C_colloquial": {
+        "n": 10,
+        "recall@1": 0.8,
+        "recall@3": 0.8,
+        "recall@5": 0.8,
+        "recall@10": 0.9,
+        "mrr@10": 0.8214285714285714
+      },
+      "E_multi": {
+        "n": 10,
+        "recall@1": 0.8,
+        "recall@3": 1.0,
+        "recall@5": 1.0,
+        "recall@10": 1.0,
+        "mrr@10": 0.9
+      },
+      "overall": {
+        "n": 40,
+        "recall@1": 0.8,
+        "recall@3": 0.9,
+        "recall@5": 0.9,
+        "recall@10": 0.975,
+        "mrr@10": 0.8595238095238095
+      }
+    },
+    "hybrid": {
+      "A_policy": {
+        "n": 10,
+        "recall@1": 0.7,
+        "recall@3": 0.9,
+        "recall@5": 1.0,
+        "recall@10": 1.0,
+        "mrr@10": 0.82
+      },
+      "B_model": {
+        "n": 10,
+        "recall@1": 0.9,
+        "recall@3": 1.0,
+        "recall@5": 1.0,
+        "recall@10": 1.0,
+        "mrr@10": 0.95
+      },
+      "C_colloquial": {
+        "n": 10,
+        "recall@1": 0.9,
+        "recall@3": 1.0,
+        "recall@5": 1.0,
+        "recall@10": 1.0,
+        "mrr@10": 0.9333333333333333
+      },
+      "E_multi": {
+        "n": 10,
+        "recall@1": 1.0,
+        "recall@3": 1.0,
+        "recall@5": 1.0,
+        "recall@10": 1.0,
+        "mrr@10": 1.0
+      },
+      "overall": {
+        "n": 40,
+        "recall@1": 0.875,
+        "recall@3": 0.975,
+        "recall@5": 1.0,
+        "recall@10": 1.0,
+        "mrr@10": 0.9258333333333333
+      }
+    },
+    "hybrid_rerank": {
+      "A_policy": {
+        "n": 10,
+        "recall@1": 0.9,
+        "recall@3": 1.0,
+        "recall@5": 1.0,
+        "recall@10": 1.0,
+        "mrr@10": 0.95
+      },
+      "B_model": {
+        "n": 10,
+        "recall@1": 0.9,
+        "recall@3": 1.0,
+        "recall@5": 1.0,
+        "recall@10": 1.0,
+        "mrr@10": 0.95
+      },
+      "C_colloquial": {
+        "n": 10,
+        "recall@1": 0.8,
+        "recall@3": 1.0,
+        "recall@5": 1.0,
+        "recall@10": 1.0,
+        "mrr@10": 0.9
+      },
+      "E_multi": {
+        "n": 10,
+        "recall@1": 1.0,
+        "recall@3": 1.0,
+        "recall@5": 1.0,
+        "recall@10": 1.0,
+        "mrr@10": 1.0
+      },
+      "overall": {
+        "n": 40,
+        "recall@1": 0.9,
+        "recall@3": 1.0,
+        "recall@5": 1.0,
+        "recall@10": 1.0,
+        "mrr@10": 0.95
+      }
+    }
+  },
+  "generation": {
+    "hybrid": {
+      "A_policy": {
+        "n": 4,
+        "faithfulness": 1.0,
+        "refusal_accuracy": 1.0,
+        "citation_validity": 1.0
+      },
+      "B_model": {
+        "n": 4,
+        "faithfulness": 1.0,
+        "refusal_accuracy": 1.0,
+        "citation_validity": 1.0
+      },
+      "C_colloquial": {
+        "n": 4,
+        "faithfulness": 1.0,
+        "refusal_accuracy": 1.0,
+        "citation_validity": 1.0
+      },
+      "E_multi": {
+        "n": 4,
+        "faithfulness": 0.75,
+        "refusal_accuracy": 1.0,
+        "citation_validity": 1.0
+      },
+      "overall": {
+        "n": 16,
+        "faithfulness": 0.9545454545454546,
+        "refusal_accuracy": 1.0,
+        "citation_validity": 1.0
+      }
+    },
+    "hybrid_rerank": {
+      "A_policy": {
+        "n": 4,
+        "faithfulness": 0.9814814814814815,
+        "refusal_accuracy": 1.0,
+        "citation_validity": 1.0
+      },
+      "B_model": {
+        "n": 4,
+        "faithfulness": 1.0,
+        "refusal_accuracy": 1.0,
+        "citation_validity": 1.0
+      },
+      "C_colloquial": {
+        "n": 4,
+        "faithfulness": 0.8888888888888888,
+        "refusal_accuracy": 1.0,
+        "citation_validity": 1.0
+      },
+      "E_multi": {
+        "n": 4,
+        "faithfulness": 1.0,
+        "refusal_accuracy": 1.0,
+        "citation_validity": 1.0
+      },
+      "overall": {
+        "n": 16,
+        "faithfulness": 0.961111111111111,
+        "refusal_accuracy": 1.0,
+        "citation_validity": 1.0
+      }
+    }
+  },
+  "warnings": {
+    "A01": {
+      "99 元包邮": 8
+    },
+    "A02": {
+      "7 天无理由": 4
+    },
+    "A03": {
+      "99 元包邮": 8
+    },
+    "A04": {
+      "3 个工作日": 8
+    },
+    "A05": {
+      "48 小时内发货": 3
+    },
+    "A06": {
+      "买家承担": 6
+    },
+    "A07": {
+      "收到商品 7 天内可申请换货": 3
+    },
+    "A08": {
+      "单笔最高 500 元": 3
+    },
+    "A09": {
+      "超出部分需提交人工审核": 1
+    },
+    "A10": {
+      "48 小时内首次响应": 2
+    },
+    "B01": {
+      "续航 18 小时": 1
+    },
+    "B02": {
+      "1280 元": 1
+    },
+    "B03": {
+      "IP54": 2
+    },
+    "B04": {
+      "MJ-2200": 3
+    },
+    "B05": {
+      "MewHelp-S2": 1
+    },
+    "B06": {
+      "接口不同": 1
+    },
+    "B07": {
+      "HC-050": 1
+    },
+    "B08": {
+      "差价 420 元": 1
+    },
+    "B09": {
+      "LW-7": 2
+    },
+    "B10": {
+      "ZB-3": 2
+    },
+    "C01": {
+      "3 个工作日": 8
+    },
+    "C02": {
+      "3 个工作日": 8
+    },
+    "C03": {
+      "买家承担": 6
+    },
+    "C04": {
+      "48 小时内发货": 3
+    },
+    "C05": {
+      "单笔最高 500 元": 3
+    },
+    "C06": {
+      "3 个工作日": 8
+    },
+    "C07": {
+      "收到商品 7 天内可申请换货": 3
+    },
+    "C08": {
+      "99 元包邮": 8
+    },
+    "C09": {
+      "3 个工作日": 8
+    },
+    "C10": {
+      "7 天无理由": 4
+    },
+    "E01": {
+      "续航 18 小时": 1,
+      "单笔最高 500 元": 3
+    },
+    "E02": {
+      "杭州": 1,
+      "99 元包邮": 8
+    },
+    "E03": {
+      "标称循环寿命 800 次": 1,
+      "48 小时内首次响应": 2
+    },
+    "E04": {
+      "MJ-2200": 3,
+      "单笔最高 500 元": 3
+    },
+    "E05": {
+      "7 天内寄出": 1,
+      "买家承担": 6
+    },
+    "E06": {
+      "偏远地区运费另计": 4
+    },
+    "E07": {
+      "HC-050": 1,
+      "99 元包邮": 8
+    },
+    "E08": {
+      "MewHelp-S1": 2,
+      "18 小时": 1
+    },
+    "E09": {
+      "转人工": 1,
+      "单笔最高 500 元": 3
+    },
+    "E10": {
+      "两款都能用 LW-7": 1
+    }
+  }
+}

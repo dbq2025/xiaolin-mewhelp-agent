@@ -134,7 +134,7 @@ class RagPipeline:
                 rerank_degraded=result.rerank_degraded,
             )
 
-        if not result.rerank_degraded:
+        if self._strategy == ONLINE_STRATEGY and not result.rerank_degraded:
             top_score = float(chunks[0].score)
             if top_score < self._min_score:
                 logger.info(

@@ -76,7 +76,7 @@ def chunk(chunk_id: int, score: float = 0.9) -> RetrievedChunk:
     )
 
 
-def pipeline(sufficiency=None, *, min_score=0.3, top_n=10):
+def pipeline(sufficiency=None, *, min_score=0.3, top_n=10, strategy="hybrid_rerank"):
     retriever = _FakeRetriever()
     understander = _FakeUnderstander()
     judge = sufficiency or _FakeSufficiency()
@@ -87,6 +87,7 @@ def pipeline(sufficiency=None, *, min_score=0.3, top_n=10):
             sufficiency=judge,
             min_score=min_score,
             top_n=top_n,
+            strategy=strategy,
         ),
         retriever,
         understander,
@@ -177,6 +178,21 @@ async def test_score_gate_is_skipped_when_rerank_degraded():
 # ---------------------------------------------------------------------------
 # 闸 2：自评
 # ---------------------------------------------------------------------------
+
+
+async def test_score_gate_does_not_apply_to_rrf_only_strategies():
+    """RRF 分量级 0.0x，拿它比 0.3 会把 `hybrid` 的每一轮都判成低置信度。
+
+    这是评估四策略时实测发现的：`hybrid` 的生成段整桶「—」，因为全被拒了。
+    阈值只对**有重排分**的策略有意义（线上永远走 hybrid_rerank）。
+    """
+    pipe, retriever, _, judge = pipeline(min_score=0.3, strategy="hybrid")
+    retriever.chunks = (chunk(1, 0.032),)
+
+    outcome = await pipe.answer_context("q")
+
+    assert outcome.refused is False
+    assert judge.calls  # 交给自评判
 
 
 async def test_self_check_insufficient_refuses_with_self_check_source():

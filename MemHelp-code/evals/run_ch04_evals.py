@@ -376,9 +376,31 @@ async def _generation_rows(
     judge_model_name: str,
     limit: int | None,
 ) -> list[dict]:
+    """生成段。``limit`` 是**每桶**取多少条（不是全局前 N）——
+
+    全局截断只会覆盖到前两个桶（用例就是按桶排的），分桶报告里另外两个桶永远是「—」。
+    按桶取样才能让四个桶都有数字，成本也可控。
+    """
+    selected: list[dict] = []
+    if limit is None:
+        selected = list(cases)
+    else:
+        per_bucket: dict[str, list[dict]] = defaultdict(list)
+        for case in cases:
+            per_bucket[case["bucket"]].append(case)
+        for bucket in BUCKETS:
+            group = per_bucket[bucket]
+            answer_cases = [case for case in group if case["behavior"] == "answer"]
+            refuse_cases = [case for case in group if case["behavior"] == "refuse"]
+            # 每桶取 ``limit-1`` 条可答题 + **1 条拒答题**：
+            # 拒答题排在每桶末尾，纯按顺序截会一条都取不到，那样「拒答准确率」整列是 —
+            take_answer = max(limit - 1, 0)
+            selected.extend(answer_cases[:take_answer])
+            selected.extend(refuse_cases[:1])
+
     rows: list[dict] = []
     for strategy in strategies:
-        for case in cases[: limit or None]:
+        for case in selected:
             async with pipeline_factory(strategy) as pipeline:
                 outcome = await pipeline.answer_context(case["query"])
             if outcome.refused:

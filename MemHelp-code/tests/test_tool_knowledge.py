@@ -169,6 +169,18 @@ async def test_query_faq_passes_the_whole_question_and_category():
     assert retriever.calls == [("买了七天还能退吗", "售后政策")]
 
 
+def test_query_faq_schema_does_not_expose_category_to_the_model():
+    """品类过滤是**程序可达能力**，不该让模型自由填字符串。
+
+    实测：模型会把型号题猜成 ``category="商品参数"``，而语料里的品类是
+    「商品型号手册 / 巡检仪」这种真实路径 —— 猜错就把结果过滤成空，
+    用户得到的是一句「知识库里没有」。所以这个参数不进 Schema。
+    """
+    from app.tools.schemas import QueryFaqArgs
+
+    assert "category" not in QueryFaqArgs.model_fields
+
+
 async def test_query_faq_strips_whitespace_and_skips_blank():
     retriever = FakePipeline(_outcome(_chunk(1, "a")))
 
