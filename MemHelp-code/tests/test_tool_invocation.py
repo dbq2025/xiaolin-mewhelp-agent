@@ -52,7 +52,9 @@ async def test_query_faq_passes_the_question_to_the_retriever(repos):
     """ch03 起检索走向量库：工具必须把**整句**交给检索器，并把命中映射进出参。"""
     from app.knowledge.retrieval import KnowledgeHit
 
-    class _Retriever:
+    from tests.fakes import SearchAsAnswerContext
+
+    class _Retriever(SearchAsAnswerContext):
         def __init__(self):
             self.queries: list[str] = []
 

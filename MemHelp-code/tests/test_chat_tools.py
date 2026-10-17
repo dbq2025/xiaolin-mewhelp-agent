@@ -57,6 +57,7 @@ class _RecordingMessageRepo:
         tool_calls=None,
         tool_call_id=None,
         tool_traces=None,
+        citations=None,
     ):
         if self.fail_on_append:
             raise RuntimeError("落库失败")
@@ -68,6 +69,7 @@ class _RecordingMessageRepo:
                 "tool_calls": tool_calls,
                 "tool_call_id": tool_call_id,
                 "tool_traces": tool_traces,
+                "citations": citations,
             }
         )
 

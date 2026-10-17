@@ -1,23 +1,28 @@
-"""``query_faq``（向量检索版）与 ``create_ticket`` 的测试。
+"""``query_faq``（混合检索版）与 ``create_ticket`` 的测试。
 
-``query_faq`` 的内核在 ch03 从「关键词 LIKE」换成了「向量检索」，但它的**出参契约
-一字未变** —— 本文件的前几条用例就是在钉这件事：前端徽章、评估集、工具 Schema
-全都依赖 ``{ok, keyword, count, items:[{question, answer, category}]}`` 这个形状。
+``query_faq`` 的内核在 ch03 从「关键词 LIKE」换成向量检索，ch04 又换成
+「改写 + 双路召回 + RRF + 重排」；但它的**出参契约只增不改** ——
+``{ok, keyword, count, items:[...]}`` 必须还在，前端徽章、历史评估集、工具 Schema
+全都依赖这个形状。
 
-要钉住的四件容易做错的事：
+要钉住的五件容易做错的事：
 
-1. **出参形状不许变**（多一个 ``score`` 键就是改契约）；
-2. **查不到不是错误**：必须是 ``ok=true, count=0``，让模型如实说「没查到」；
-3. **异常不许吞**：向量库挂了要冒出去由 executor 分类，否则「基础设施坏了」
-   与「业务上没查到」会变成同一个信号；
-4. **整句原话进检索**：截成名词会丢掉「换说法」的语义信息。
+1. **ch02 的键不许丢、不许改语义**；新字段只能加；
+2. **``items`` 的顺序是首尾编排**（否则模型对中段注意力最弱这件事就白做了），
+   而每项的 ``n`` 仍是相关度序号；
+3. **查不到不是错误**：``count=0`` 是正常业务结果；
+4. **异常不许吞**：检索挂了要冒出去由 executor 分类；
+5. **拒答时 items 为空**：给了证据模型就可能硬答。
 """
 
 import json
 
 import pytest
 
-from app.knowledge.retrieval import KnowledgeHit
+from app.knowledge.citations import build_evidence
+from app.knowledge.hybrid import RetrievedChunk
+from app.knowledge.pipeline import RetrievalOutcome
+from app.knowledge.query import UnderstoodQuery
 from app.tools.knowledge import query_faq
 from app.tools.ticketing import create_ticket
 
@@ -27,16 +32,19 @@ from app.tools.ticketing import create_ticket
 # ---------------------------------------------------------------------------
 
 
-class FakeRetriever:
-    """记录收到的查询，并按给定的命中列表返回（不排序、不过滤）。"""
+class FakePipeline:
+    """记录收到的查询，返回预设的 ``RetrievalOutcome``。"""
 
-    def __init__(self, hits=()) -> None:
-        self.hits = list(hits)
-        self.calls: list[tuple[str, int]] = []
+    def __init__(self, outcome: RetrievalOutcome | None = None, *, error: Exception | None = None):
+        self.outcome = outcome or _outcome()
+        self.error = error
+        self.calls: list[tuple[str, str | None]] = []
 
-    async def search(self, query, top_k=None):
-        self.calls.append((query, top_k))
-        return self.hits if top_k is None else self.hits[:top_k]
+    async def answer_context(self, query, *, category=None):
+        self.calls.append((query, category))
+        if self.error is not None:
+            raise self.error
+        return self.outcome
 
 
 class FakeTicketRepo:
@@ -59,101 +67,142 @@ class FakeConversationRepo:
         return self._id
 
 
+def _chunk(chunk_id: int, answer: str, score: float = 0.9) -> RetrievedChunk:
+    return RetrievedChunk(
+        chunk_id=chunk_id,
+        question=f"问法{chunk_id}",
+        answer=answer,
+        category="售后政策",
+        section_path=f"售后手册 / 第{chunk_id}节",
+        content_type="manual",
+        score=score,
+        source="rerank",
+    )
+
+
+def _outcome(*chunks: RetrievedChunk) -> RetrievalOutcome:
+    return RetrievalOutcome(
+        query=UnderstoodQuery(original="q", standard="q", bm25_text="q"),
+        evidence=build_evidence(chunks),
+    )
+
+
+def _refused(source: str = "self_check", reason: str = "证据不足") -> RetrievalOutcome:
+    return RetrievalOutcome(
+        query=UnderstoodQuery(original="q", standard="q", bm25_text="q"),
+        evidence=(),
+        refused=True,
+        refusal_source=source,
+        refusal_reason=reason,
+    )
+
+
 # ---------------------------------------------------------------------------
-# query_faq
+# query_faq：契约与顺序
 # ---------------------------------------------------------------------------
 
 
-async def test_query_faq_returns_hits_with_questions_and_answers():
-    retriever = FakeRetriever([KnowledgeHit("退货政策是什么？", "签收后 7 天内无理由退货。", "售后", 0.91)])
+async def test_query_faq_keeps_the_ch02_keys():
+    retriever = FakePipeline(_outcome(_chunk(1, "签收后 7 天内无理由退货。")))
 
     out = json.loads(await query_faq("退货", retriever=retriever))
 
+    assert {"ok", "keyword", "count", "items"} <= set(out)
     assert out["ok"] is True
     assert out["count"] == 1
-    assert set(out["items"][0]) == {"question", "answer", "category"}
-    assert out["items"][0]["question"] == "退货政策是什么？"
+    assert out["items"][0]["question"] == "问法1"
     assert out["items"][0]["answer"] == "签收后 7 天内无理由退货。"
-    assert out["items"][0]["category"] == "售后"
+    assert out["items"][0]["category"] == "售后政策"
 
 
-async def test_query_faq_does_not_leak_the_similarity_score():
-    """相似度只用于日志/调试。多一个键就是改契约。"""
-    retriever = FakeRetriever([KnowledgeHit("q", "a", "c", 0.99)])
+async def test_query_faq_adds_citation_fields():
+    retriever = FakePipeline(_outcome(_chunk(5, "满 99 包邮")))
 
-    out = json.loads(await query_faq("退货", retriever=retriever))
+    item = json.loads(await query_faq("运费", retriever=retriever))["items"][0]
 
-    assert "score" not in out["items"][0]
+    assert item["n"] == 1
+    assert item["chunk_id"] == 5
+    assert item["section_path"] == "售后手册 / 第5节"
+    assert item["quote"] == "满 99 包邮"
 
 
-async def test_query_faq_reports_zero_hits_without_raising():
-    """查不到是**正常业务结果**：必须是 ``ok=true`` + ``count=0``。
+async def test_query_faq_does_not_leak_scores():
+    """分数只用于日志/报告。多一个键就是改契约。"""
+    retriever = FakePipeline(_outcome(_chunk(1, "a", score=0.99)))
 
-    做成 ``ok=false`` 的话，模型收到的信号是「工具坏了」，于是它会道歉或编造，
-    而不是如实说「库里没有这条」。
-    """
-    out = json.loads(await query_faq("邮费是多少", retriever=FakeRetriever()))
+    item = json.loads(await query_faq("q", retriever=retriever))["items"][0]
+
+    assert "score" not in item
+
+
+async def test_items_are_in_head_tail_order_but_numbers_stay_by_relevance():
+    """实现「最相关的放首尾」的位置，同时保证 n 仍是相关度序号。"""
+    chunks = [_chunk(index, f"答案{index}") for index in range(1, 11)]
+    retriever = FakePipeline(_outcome(*chunks))
+
+    items = json.loads(await query_faq("q", retriever=retriever))["items"]
+
+    assert [item["n"] for item in items] == [1, 3, 5, 7, 9, 10, 8, 6, 4, 2]
+
+
+async def test_query_faq_reports_zero_hits_as_success():
+    retriever = FakePipeline(_outcome())
+
+    out = json.loads(await query_faq("邮费是多少", retriever=retriever))
 
     assert out["ok"] is True
     assert out["count"] == 0
     assert out["items"] == []
-    assert out["keyword"] == "邮费是多少"
+    assert out["refused"] is False
 
 
-async def test_query_faq_passes_the_whole_question_through():
-    """整句原话进向量检索 —— 截成名词会丢掉「换说法」的语义。"""
-    retriever = FakeRetriever()
-    await query_faq("买了七天还能退吗", retriever=retriever)
-
-    # top_k 传 None：取数上限由检索器配置（RAG_TOP_K）决定。
-    assert retriever.calls == [("买了七天还能退吗", None)]
+# ---------------------------------------------------------------------------
+# query_faq：入参与拒答
+# ---------------------------------------------------------------------------
 
 
-async def test_query_faq_strips_surrounding_whitespace():
-    """模型偶尔会把整句带空白一起传过来。"""
-    retriever = FakeRetriever()
+async def test_query_faq_passes_the_whole_question_and_category():
+    retriever = FakePipeline(_outcome(_chunk(1, "a")))
+
+    await query_faq("买了七天还能退吗", retriever=retriever, category="售后政策")
+
+    assert retriever.calls == [("买了七天还能退吗", "售后政策")]
+
+
+async def test_query_faq_strips_whitespace_and_skips_blank():
+    retriever = FakePipeline(_outcome(_chunk(1, "a")))
+
     await query_faq("  退货  ", retriever=retriever)
-
     assert retriever.calls[0][0] == "退货"
 
-
-async def test_query_faq_skips_the_retriever_for_blank_keywords():
-    """纯空白不调检索器（省一次模型前向），但仍返回合法 JSON。"""
-    retriever = FakeRetriever([KnowledgeHit("q", "a", "c", 1.0)])
-
     out = json.loads(await query_faq("   ", retriever=retriever))
-
     assert out["count"] == 0
-    assert retriever.calls == []
+    assert len(retriever.calls) == 1  # 空白没有多调一次
 
 
-async def test_query_faq_uses_a_bounded_limit():
-    """结果条数必须有上限：命中 50 条会把上下文预算一次吃光。
+async def test_refusal_returns_no_items_but_keeps_the_reason():
+    retriever = FakePipeline(_refused("self_check", "证据只讲流程"))
 
-    上限由检索器（配置项 ``RAG_TOP_K``）决定，工具只负责原样返回。
-    """
-    retriever = FakeRetriever([KnowledgeHit(f"q{i}", "答案", "售后", 1.0) for i in range(50)])
+    out = json.loads(await query_faq("赔付上限多少", retriever=retriever))
 
-    out = json.loads(await query_faq("退货", retriever=retriever, top_k=3))
-
-    assert out["count"] == 3
-    assert retriever.calls[0][1] == 3
+    assert out["refused"] is True
+    assert out["count"] == 0
+    assert out["items"] == []
+    assert out["refusal_source"] == "self_check"
+    assert out["refusal_reason"] == "证据只讲流程"
 
 
 async def test_query_faq_lets_retriever_failure_propagate():
     """检索炸了必须让异常冒出去，由 ``executor.py`` 分类。
 
-    不能在工具里吞成「空结果」：那样「Milvus 真的坏了」与「业务上没查到」
+    不能在工具里吞成「空结果」：那样「Milvus/重排真的坏了」与「业务上没查到」
     会变成同一个信号，于是向量库挂了的时候，模型会一本正经地告诉用户
     「我们库里没有这条」。
     """
-
-    class Exploding:
-        async def search(self, query, top_k=5):
-            raise RuntimeError("connection reset by peer")
+    retriever = FakePipeline(error=RuntimeError("connection reset by peer"))
 
     with pytest.raises(RuntimeError):
-        await query_faq("退货", retriever=Exploding())
+        await query_faq("退货", retriever=retriever)
 
 
 # ---------------------------------------------------------------------------

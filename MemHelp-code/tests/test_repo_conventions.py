@@ -80,7 +80,7 @@ def test_migration_sql_quotes_are_balanced():
     """
     import re
 
-    migration = REPO_ROOT / "sql" / "ch02-migrate-existing.sql"
+    migration = REPO_ROOT / "MemHelp-code" / "sql" / "ch02-migrate-existing.sql"
     assert migration.is_file(), f"找不到迁移脚本：{migration}"
 
     offenders: list[tuple[int, str]] = []
@@ -108,7 +108,7 @@ def test_seed_sql_never_contains_the_shipping_fee_keyword():
     注意只看 ``INSERT INTO faq`` 那一段：注释与自检语句里出现「邮费」是**故意**的
     （它们就是在说明这条基线），不能把它们也算进来。
     """
-    seed = REPO_ROOT / "sql" / "ch02-seed.sql"
+    seed = REPO_ROOT / "MemHelp-code" / "sql" / "ch02-seed.sql"
     if not seed.is_file():  # pragma: no cover - 文件被移走时给出明确信息
         pytest.fail(f"找不到种子脚本：{seed}")
 
@@ -131,7 +131,7 @@ def test_sql_files_are_utf8_and_set_names():
     「表建好了、COMMENT 是乱码」—— 不影响功能，所以最容易一直没人管。
     这里把它变成不会复发的不变量。
     """
-    sql_dir = REPO_ROOT / "sql"
+    sql_dir = REPO_ROOT / "MemHelp-code" / "sql"
     files = sorted(sql_dir.glob("*.sql"))
     assert files, f"sql/ 目录不该是空的：{sql_dir}"
 

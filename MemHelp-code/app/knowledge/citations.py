@@ -50,11 +50,13 @@ class Evidence:
     """一条证据。
 
     :param n: 相关度序号（1 起），**用户看到的角标就是它**。
+    :param question: 该块的问法/标题（ch02 出参里的 ``items[].question`` 就是它），
+        只在工具出参里用，不进落库快照。
     :param quote: 证据原文快照（chunk 的 answer）。落库后即使 chunk 被重切，
         审计时仍能看到当时依据。
     :param score: 重排分或融合分，只进日志/报告。
     :param source: ``vector`` / ``bm25`` / ``hybrid`` / ``rerank``。
-        两个内部字段有默认值，是为了让「从工具出参还原证据」不必硬塞它们。
+        几个内部字段有默认值，是为了让「从工具出参还原证据」不必硬塞它们。
     """
 
     n: int
@@ -62,6 +64,7 @@ class Evidence:
     section_path: str
     category: str
     quote: str
+    question: str = ""
     score: float = 0.0
     source: str = ""
 
@@ -93,6 +96,7 @@ def build_evidence(chunks: Sequence[object]) -> tuple[Evidence, ...]:
             section_path=getattr(chunk, "section_path", None) or "",
             category=getattr(chunk, "category", "") or "",
             quote=getattr(chunk, "answer", "") or "",
+            question=getattr(chunk, "question", "") or "",
             score=float(getattr(chunk, "score", 0.0) or 0.0),
             source=getattr(chunk, "source", "") or "",
         )
@@ -159,6 +163,7 @@ def evidence_from_payload(items: Sequence[dict]) -> tuple[Evidence, ...]:
             section_path=item.get("section_path") or "",
             category=item.get("category") or "",
             quote=item.get("quote") or "",
+            question=item.get("question") or "",
             score=float(item.get("score") or 0.0),
             source=item.get("source") or "",
         )

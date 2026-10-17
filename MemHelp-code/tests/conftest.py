@@ -138,10 +138,23 @@ class EmptyRetriever:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, int]] = []
+        self.context_calls: list[tuple[str, str | None]] = []
 
     async def search(self, query: str, top_k: int = 5) -> list:
         self.calls.append((query, top_k))
         return []
+
+    async def answer_context(self, query: str, *, category: str | None = None):
+        """ch04 的在线检索协议。
+
+        刻意返回 ``refused=False`` + 空证据：这些用例要验的是对话与工具接线，
+        不是拒答逻辑。若在这里返回 refused，每一轮都会往低置信度池写一行，
+        把「没命中」和「拒答」两件事混进同一个测试关注点。
+        """
+        from tests.fakes import retrieval_outcome
+
+        self.context_calls.append((query, category))
+        return retrieval_outcome(query, (), refused=False)
 
     async def warmup(self) -> None:
         return None

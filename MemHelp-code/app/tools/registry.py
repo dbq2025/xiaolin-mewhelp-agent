@@ -1,4 +1,4 @@
-"""五个工具的注册表 —— 名字（字符串）与工具对象的唯一对应表。
+﻿"""五个工具的注册表 —— 名字（字符串）与工具对象的唯一对应表。
 
 ## 为什么是工厂而不是模块级常量
 
@@ -28,12 +28,12 @@
 from langchain_core.tools import BaseTool, tool
 
 from app.db.repositories import Repositories
-from app.knowledge.retrieval import RetrieverLike
 from app.tools.business import (
     query_logistics as _query_logistics,
     query_order as _query_order,
     query_product as _query_product,
 )
+from app.tools.knowledge import AnswerContextLike
 from app.tools.knowledge import query_faq as _query_faq
 from app.tools.schemas import (
     CreateTicketArgs,
@@ -57,7 +57,7 @@ TOOL_LABELS: dict[str, str] = {
 }
 
 
-def _make_tools(repositories: Repositories, retriever: RetrieverLike | None) -> list[BaseTool]:
+def _make_tools(repositories: Repositories, retriever: AnswerContextLike | None) -> list[BaseTool]:
     """按当次请求的仓库构造五个绑好依赖的工具。
 
     两个需要仓库的工具用**闭包**捕获 ``repositories``，``query_faq`` 额外捕获
@@ -91,14 +91,19 @@ def _make_tools(repositories: Repositories, retriever: RetrieverLike | None) -> 
         return _query_logistics(order_id)
 
     @tool("query_faq", args_schema=QueryFaqArgs)
-    async def query_faq(keyword: str) -> str:
-        """按**语义**检索平台的常见问题与规则库，返回最相关的问答对。
+    async def query_faq(keyword: str, category: str | None = None) -> str:
+        """检索平台的常见问题、规则库与商品型号参数，返回**带编号的依据**。
 
-        用于**平台规则类**问题：退货政策、退款流程、运费与包邮门槛、发票开具、
-        质保与赔付标准等。
-        参数请传**用户问题的完整原话**（如「邮费是多少」），不要截成名词——
-        语义检索靠整句匹配，换一种说法也能召回。
-        若返回 count 为 0，说明库里没有这条，请如实告知用户，不要编造规则。
+        用于**平台规则类**问题（退货政策、退款流程、运费与包邮门槛、发票开具、
+        质保与赔付标准）与**具体商品型号**问题（某个型号的参数、配件、价格）。
+        参数请传**用户问题的完整原话**（如「邮费是多少」），不要截成名词 ——
+        检索靠整句语义匹配，换一种说法也能召回。
+        用户明确点名了品类（如「售后政策」「商品参数」）就一并传 ``category``，
+        会先过滤再检索；没点名就不要猜。
+
+        返回里每个 item 带 ``n`` 与 ``section_path``：**正文引用时用 [n] 标注**。
+        若 ``refused`` 为 true，说明知识库里没有能回答这个问题的依据，请如实拒答，
+        不要编造规则，也不要引用不存在的编号。
         """
         # 闭包捕获当次请求的检索器 —— 它不是给模型的参数，所以不出现在签名里。
         #
@@ -111,10 +116,10 @@ def _make_tools(repositories: Repositories, retriever: RetrieverLike | None) -> 
             # 宁可失败得明明白白，也不要静默返回空结果 —— 那会把「装配漏了」
             # 伪装成「库里没有这条规则」。
             raise RuntimeError(
-                "query_faq 未装配向量检索器（retriever）。"
+                "query_faq 未装配检索器（retriever）。"
                 "请检查 create_app 的装配或测试注入。"
             )
-        return await _query_faq(keyword, retriever=retriever)
+        return await _query_faq(keyword, retriever=retriever, category=category)
 
     @tool("create_ticket", args_schema=CreateTicketArgs)
     async def create_ticket(description: str, ticket_type: str, conversation_id: str) -> str:
@@ -155,7 +160,7 @@ TOOL_NAMES: tuple[str, ...] = (
 
 
 def get_tools(
-    repositories: Repositories, retriever: RetrieverLike | None = None
+    repositories: Repositories, retriever: AnswerContextLike | None = None
 ) -> list[BaseTool]:
     """构造绑定到当次请求仓库（与检索器）的五个工具，供 ``model.bind_tools(...)``。
 
@@ -177,7 +182,7 @@ def get_tools(
 
 
 def get_tool(
-    name: str, repositories: Repositories, retriever: RetrieverLike | None = None
+    name: str, repositories: Repositories, retriever: AnswerContextLike | None = None
 ) -> BaseTool | None:
     """按名字取一个工具；未知名字返回 ``None``。
 

@@ -30,6 +30,51 @@ from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResu
 from pydantic import Field
 
 
+def retrieval_outcome(query: str, hits: Sequence[Any] = (), *, refused: bool = False):
+    """把「旧式 ``KnowledgeHit`` 列表」包成 ch04 的 ``RetrievalOutcome``。
+
+    ch04 起 ``query_faq`` 依赖 ``answer_context`` 而不是 ``search``。测试里的假检索器
+    大多只关心「收到什么查询、返回哪些命中」，所以用这个适配器把两种形状接起来，
+    而不是让每个测试文件各写一遍。
+    """
+    from app.knowledge.citations import build_evidence
+    from app.knowledge.hybrid import RetrievedChunk
+    from app.knowledge.pipeline import RetrievalOutcome
+    from app.knowledge.query import UnderstoodQuery
+
+    chunks = [
+        RetrievedChunk(
+            chunk_id=index,
+            question=getattr(hit, "question", ""),
+            answer=getattr(hit, "answer", ""),
+            category=getattr(hit, "category", ""),
+            section_path=f"测试路径 / 第{index}节",
+            content_type=None,
+            score=float(getattr(hit, "score", 0.0) or 0.0),
+            source="rerank",
+        )
+        for index, hit in enumerate(hits, start=1)
+    ]
+    return RetrievalOutcome(
+        query=UnderstoodQuery(original=query, standard=query, bm25_text=query),
+        evidence=build_evidence(chunks),
+        refused=refused,
+        refusal_source="retrieval_low_conf" if refused else None,
+        refusal_reason="测试里判定为低置信度" if refused else None,
+    )
+
+
+class SearchAsAnswerContext:
+    """把「只有 ``search`` 的假检索器」适配成 ch04 的 ``answer_context`` 协议。
+
+    假类继承它即可，不必每个文件重写一遍适配逻辑。
+    """
+
+    async def answer_context(self, query: str, *, category: str | None = None):
+        hits = await self.search(query)
+        return retrieval_outcome(query, hits)
+
+
 @dataclass
 class Recorder:
     """记录模型每次调用收到的消息。

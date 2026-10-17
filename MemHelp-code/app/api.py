@@ -48,7 +48,12 @@ from app.errors import (
 )
 from app.extract import ExtractionError, extract_request
 from app.knowledge.embedder import get_embedder
-from app.knowledge.retrieval import KnowledgeRetriever, RetrieverLike, warmup as warmup_rag
+from app.knowledge.hybrid import HybridRetriever
+from app.knowledge.pipeline import RagPipeline
+from app.knowledge.query import LlmRewriter, QueryUnderstander
+from app.knowledge.rerank import get_reranker
+from app.knowledge.sufficiency import SufficiencyJudge
+from app.knowledge.retrieval import warmup as warmup_rag
 from app.knowledge.vector_store import MilvusVectorStore
 from app.llm import get_chat_model
 from app.memory import InMemorySessionStore, get_session_store, new_session_id
@@ -61,6 +66,7 @@ from app.schemas import (
     SessionMessagesResponse,
 )
 from app.sse import SSE_MEDIA_TYPE, sse_frame
+from app.tools.knowledge import AnswerContextLike
 
 logger = logging.getLogger(__name__)
 
@@ -274,12 +280,15 @@ def _vector_store_for(uri: str, collection: str, dim: int) -> MilvusVectorStore:
 
 def get_retriever(
     request: Request, repositories: Repositories = Depends(get_repositories)
-) -> RetrieverLike:
-    """当次请求的向量检索器。
+) -> AnswerContextLike:
+    """当次请求的在线检索管线（`RagPipeline`）。
 
     两段式（与 ``get_repositories`` 同一个套路）：``app.state.retriever`` 有就用
-    （测试/演示注入）；否则用进程级单例的嵌入器 + Milvus 客户端，配上**当请求的**
-    chunk 仓库 —— 仓库绑着本次的 DB Session，不能跨请求共享。
+    （测试/演示注入）；否则用进程级单例的嵌入器 / Milvus 客户端 / 重排器，配上
+    **当请求的** chunk 仓库 —— 仓库绑着本次的 DB Session，不能跨请求共享。
+
+    ch04 起返回的是 ``RagPipeline``（理解 → 双路召回 → RRF → 重排 → 两道闸），
+    ch03 的 ``KnowledgeRetriever`` 只保留给评估脚本做「纯向量」基线。
     """
     injected = getattr(request.app.state, "retriever", None)
     if injected is not None:
@@ -289,11 +298,26 @@ def get_retriever(
     store = _vector_store_for(
         settings.milvus_uri, settings.milvus_collection, settings.embedding_dim
     )
-    return KnowledgeRetriever(
-        get_embedder(settings),
-        store,
-        repositories.knowledge,
-        default_top_k=settings.rag_top_k,
+    model = getattr(request.app.state, "chat_model", None) or get_chat_model(settings)
+    understander = QueryUnderstander(
+        LlmRewriter(model, timeout=settings.rag_rewrite_timeout),
+        enabled=settings.rag_query_rewrite,
+    )
+    retriever = HybridRetriever(
+        embedder=get_embedder(settings),
+        vector_store=store,
+        reranker=get_reranker(settings),
+        chunk_repo=repositories.knowledge,
+        hybrid_top_k=settings.rag_hybrid_top_k,
+        candidate_k=settings.rag_candidate_k,
+        rerank_top_n=settings.rag_rerank_top_n,
+    )
+    return RagPipeline(
+        understander=understander,
+        retriever=retriever,
+        sufficiency=SufficiencyJudge(model, timeout=settings.rag_rewrite_timeout),
+        min_score=settings.rag_min_rerank_score,
+        top_n=settings.rag_rerank_top_n,
     )
 
 
@@ -447,6 +471,12 @@ async def _db_session_messages_payload(
             traces = getattr(row, "tool_traces", None)
             item["tools"] = traces or _tool_traces(row.tool_calls, rows, index)
 
+        # ch04：引用快照。与 ``tools`` 同理 —— 只在有引用时出现，
+        # 前端 `if (msg.citations)` 一处判断就够。
+        citations = getattr(row, "citations", None)
+        if row.role == "assistant" and citations:
+            item["citations"] = citations
+
         payload.append(item)
 
     return SessionMessagesResponse(session_id=session_id, messages=payload)
@@ -486,7 +516,7 @@ async def _chat_stream_body(
     store: InMemorySessionStore,
     repositories: Repositories,
     session_id: str,
-    retriever: RetrieverLike | None = None,
+    retriever: AnswerContextLike | None = None,
 ) -> AsyncIterable[str]:
     """SSE 响应体：``meta`` → ``status``? → ``token``* → ``tools`` → ``done``。
 
@@ -499,6 +529,7 @@ async def _chat_stream_body(
     yield sse_frame("meta", {"session_id": session_id, "model": settings.openai_model})
 
     tool_summaries: list[dict[str, Any]] = []
+    citations: list[dict[str, Any]] = []
     try:
         async for event in astream_chat_with_tools(
             session_id=session_id,
@@ -518,6 +549,8 @@ async def _chat_stream_body(
                 yield sse_frame("token", event.payload)
             elif event.kind == "tools":
                 tool_summaries = list(event.payload.get("tools") or [])
+            elif event.kind == "citations":
+                citations = list(event.payload.get("citations") or [])
     except Exception as exc:  # noqa: BLE001 - 必须转成事件，不能让连接裸断
         err = _as_upstream_error(exc)
         yield sse_frame(
@@ -534,6 +567,8 @@ async def _chat_stream_body(
             "trimmed": meta.context.trimmed_messages if meta else 0,
             "kept": meta.context.kept_messages if meta else 0,
             "tools": tool_summaries,
+            # ch04：引用证据快照。前端靠它把正文里的 [n] 变成可点角标。
+            "citations": citations,
         },
     )
 
@@ -593,7 +628,7 @@ def create_app(
     settings: Settings | None = None,
     repositories: Repositories | None = None,
     db_ping: Any = None,
-    retriever: RetrieverLike | None = None,
+    retriever: AnswerContextLike | None = None,
     rag_warmup: bool | None = None,
 ) -> FastAPI:
     """构造应用。
@@ -718,7 +753,7 @@ def create_app(
         model_: BaseChatModel = Depends(get_model),
         store_: InMemorySessionStore = Depends(get_store),
         repositories_: Repositories = Depends(get_repositories),
-        retriever_: RetrieverLike = Depends(get_retriever),
+        retriever_: AnswerContextLike = Depends(get_retriever),
     ):
         """一个路径两种响应形态。
 

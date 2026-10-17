@@ -1,72 +1,126 @@
-"""``query_faq`` —— 向量语义检索（BGE-M3 + Milvus）。
+"""``query_faq`` —— 混合检索（BM25 + 稠密）+ 重排后的「带编号证据」。
 
-## 契约没变，内核换了
+## 契约只增不改
 
-| 项 | ch02（关键词） | ch03（向量） |
-|---|---|---|
-| 入参 | ``keyword: str`` | **不变** |
-| 出参 | ``{ok, keyword, count, items:[{question, answer, category}]}`` | **不变** |
-| 匹配方式 | ``LIKE %kw%`` | 语义相似度 Top-K |
+ch02 的出参是 ``{ok, keyword, count, items:[{question, answer, category}]}``；
+ch04 在这一层**只增字段**：每个 item 多出 ``n`` / ``chunk_id`` / ``section_path`` /
+``quote``，顶层多出 ``refused`` / ``refusal_source`` / ``refusal_reason``。
+前端徽章、历史评估集、工具 Schema 全都还认这个形状。
 
-所以这个文件只做三件事：调检索器、把命中映射成原来的 JSON 形状、把异常原样放行。
-**任何改写出参键名的冲动都要停下来** —— 前端徽章、评估集、ch02 的用例都钉着它。
+## ``items`` 的顺序是「首尾编排」，不是相关度序
+
+最相关的两条落在首尾、最弱的压中间（``citations.prompt_order``）——
+模型对上下文中段的注意力最弱。但每个 item 的 ``n`` 仍是**相关度序号**，
+不随呈现顺序变化：用户在页面上点 ``[3]`` 必须看到同一条。
+
+## 拒答时 ``items`` 为空
+
+``refused=true`` 时不给证据：给了模型就可能「手上有一堆材料舍不得浪费」而硬答。
+拒答话术由编排层直接吐，这里只负责把事实（为什么拒）带上去。
 
 ## 为什么不降级回关键词
 
-本章明确不做混合检索/关键词兜底。Milvus 挂了就让异常冒出去，由 ``executor.py``
-分类成 ``ok=false``：模型会如实告诉用户「暂时查不到规则」。
-偷偷回退到 ``LIKE`` 会让「向量库故障」伪装成「检索功能正常但结果一般」——
-故障被藏起来，比故障本身更贵。
-
-## 空白关键词
-
-模型偶尔会传纯空白。空串直接返回 ``count=0`` 且**不调检索器**（省一次前向）；
-纯标点（如「？」）走正常检索路径，交给嵌入模型处理 —— 它不会因此崩溃，
-而且对「？」这种输入返回空结果本来就是对的。
+检索层异常原样冒给 ``executor.py``：偷着回退会让「向量库/重排故障」伪装成
+「检索功能正常但结果一般」，而故障被藏起来比故障本身更贵。
 """
 
+from __future__ import annotations
+
 import json
+from typing import Protocol, Sequence
 
-from app.knowledge.retrieval import DEFAULT_TOP_K, KnowledgeHit, RetrieverLike
+from app.knowledge.citations import (
+    Evidence,
+    evidence_payload,
+    prompt_order,
+)
+from app.knowledge.pipeline import RetrievalOutcome
 
-__all__ = ["MAX_FAQ_ITEMS", "RetrieverLike", "query_faq"]
+__all__ = ["AnswerContextLike", "query_faq"]
 
-#: 兜底取数（与 ``Settings.rag_top_k`` 的默认值一致）。
-#: 真正生效的值来自配置：``KnowledgeRetriever`` 构造时用 ``RAG_TOP_K``，
-#: ``query_faq`` 不传 ``top_k`` 时由检索器决定。
-MAX_FAQ_ITEMS = DEFAULT_TOP_K
+#: 兜底取数（与 ``Settings.rag_top_k`` 的默认值一致，仅用于文档说明）。
+MAX_FAQ_ITEMS = 10
+
+
+class AnswerContextLike(Protocol):
+    """工具层对「在线检索管线」的最小依赖。"""
+
+    async def answer_context(
+        self, query: str, *, category: str | None = None
+    ) -> RetrievalOutcome: ...
+
+
+def _item(evidence: Evidence) -> dict:
+    return {
+        "n": evidence.n,
+        "chunk_id": evidence.chunk_id,
+        "section_path": evidence.section_path,
+        "category": evidence.category,
+        # question/answer 是 ch02 以来的「问答对语义」；quote 是「证据快照语义」。
+        # 当前取值相同，保留两个键是因为两者未来可能分叉（比如 quote 截断）。
+        "question": evidence.question or (
+            evidence.section_path.split(" / ")[-1] if evidence.section_path else ""
+        ),
+        "answer": evidence.quote,
+        "quote": evidence.quote,
+    }
 
 
 async def query_faq(
-    keyword: str, *, retriever: RetrieverLike, top_k: int | None = None
+    keyword: str,
+    *,
+    retriever: AnswerContextLike,
+    category: str | None = None,
 ) -> str:
-    """按语义检索平台规则库，返回最相关的问答对。
+    """检索平台规则/商品参数，返回带编号的证据。
 
-    :param keyword: **用户问题的完整原话**（如「邮费是多少」）。不要截成名词 ——
-        向量检索靠整句语义，截词反而丢信息。空白串直接返回空结果。
-    :param retriever: 检索器。生产用 ``KnowledgeRetriever``，测试用假实现。
-    :param top_k: 最多返回几条；``None`` 表示用检索器配置的默认值（``RAG_TOP_K``）。
-    :return: JSON 字符串，含 ``ok`` / ``keyword`` / ``count`` / ``items``
-        （每项含 ``question`` / ``answer`` / ``category``）。
-
-        ``count == 0`` 是**正常的业务结果**，不是错误。
+    :param keyword: **用户问题的完整原话**。不要截成名词 —— Query 理解与向量检索
+        都靠整句语义；截词反而丢信息。空白串直接返回空结果（不调检索）。
+    :param category: 用户明确点名的品类（如「售后政策」「商品参数」）。
+        传了就**先过滤再检索**；``None`` 表示不过滤。
+    :return: JSON 字符串，见模块 docstring。
 
     :raises Exception: 检索层的异常**原样冒出去**，由 ``executor.py`` 分类成
-        ``ok=false``。这里不能吞成空结果 —— 否则「向量库挂了」与「真的没查到」
+        ``ok=false``。这里不能吞成空结果 —— 否则「基础设施挂了」与「真的没查到」
         会变成同一个信号。
     """
-    query = keyword.strip()
-    hits: list[KnowledgeHit] = [] if not query else await retriever.search(query, top_k)
+    query = (keyword or "").strip()
+    if not query:
+        return _payload(query, outcome=None)
 
+    outcome = await retriever.answer_context(query, category=category)
+    return _payload(query, outcome=outcome)
+
+
+def _payload(query: str, *, outcome: RetrievalOutcome | None) -> str:
+    if outcome is None:
+        return json.dumps(
+            {
+                "ok": True,
+                "keyword": query,
+                "count": 0,
+                "items": [],
+                "refused": False,
+                "refusal_source": None,
+                "refusal_reason": None,
+            },
+            ensure_ascii=False,
+        )
+
+    items: Sequence[dict] = (
+        []
+        if outcome.refused
+        else [_item(evidence) for evidence in prompt_order(outcome.evidence)]
+    )
     return json.dumps(
         {
             "ok": True,
             "keyword": query,
-            "count": len(hits),
-            "items": [
-                {"question": hit.question, "answer": hit.answer, "category": hit.category}
-                for hit in hits
-            ],
+            "count": len(items),
+            "items": list(items),
+            "refused": outcome.refused,
+            "refusal_source": outcome.refusal_source,
+            "refusal_reason": outcome.refusal_reason,
         },
         ensure_ascii=False,
     )

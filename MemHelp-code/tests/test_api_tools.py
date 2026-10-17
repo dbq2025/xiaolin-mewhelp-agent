@@ -58,9 +58,11 @@ def test_injected_retriever_actually_reaches_query_faq(test_settings):
     """
     from app.knowledge.retrieval import KnowledgeHit
 
+    from tests.fakes import SearchAsAnswerContext
+
     calls: list[tuple[str, int | None]] = []
 
-    class _Retriever:
+    class _Retriever(SearchAsAnswerContext):
         async def search(self, query, top_k=None):
             calls.append((query, top_k))
             return [KnowledgeHit("运费怎么算", "满 99 元包邮", "物流", 0.9)]

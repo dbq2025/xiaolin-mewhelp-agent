@@ -45,7 +45,7 @@ def test_statements_drop_pure_comment_chunks(seed):
 
 def test_real_seed_file_keeps_set_names(seed):
     """真实种子文件里 ``SET NAMES utf8mb4`` 必须出现在切分结果中。"""
-    sql = (ROOT.parent / "sql" / "ch03-seed-history.sql").read_text(encoding="utf-8")
+    sql = (ROOT / "sql" / "ch03-seed-history.sql").read_text(encoding="utf-8")
     statements = seed._statements(sql)
     assert any("SET NAMES utf8mb4" in statement for statement in statements)
     assert sum("INSERT INTO conversations" in s for s in statements) == 30

@@ -83,6 +83,13 @@ class QueryFaqArgs(_Args):
             "**不要**截成名词，也不要带引号。"
         ),
     )
+    category: str | None = Field(
+        default=None,
+        description=(
+            "可选：用户**明确点名**的品类，例如「售后政策」「商品参数」「发票」。"
+            "传了会先按品类过滤再检索；用户没点名就别猜、留空。"
+        ),
+    )
 
     _normalise = field_validator("keyword")(_reject_blank)
 

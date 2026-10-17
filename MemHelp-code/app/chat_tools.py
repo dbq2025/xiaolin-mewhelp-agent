@@ -58,8 +58,15 @@ from app.chat import ChatMeta, _message_text
 from app.context import build_context
 from app.db.repositories import Repositories
 from app.errors import UpstreamEmptyResponse
-from app.knowledge.retrieval import RetrieverLike
-from app.prompts import build_tool_chat_messages
+from app.knowledge.citations import (
+    Evidence,
+    evidence_from_payload,
+    evidence_payload,
+    parse_citations,
+)
+from app.knowledge.pipeline import RetrievalOutcome
+from app.tools.knowledge import AnswerContextLike
+from app.prompts import REFUSAL_TEXT, build_tool_chat_messages
 from app.tools.executor import ToolResult, execute_tool, to_tool_message_content
 from app.tools.registry import TOOL_LABELS, get_tools
 
@@ -70,11 +77,11 @@ logger = logging.getLogger(__name__)
 class ToolEvent:
     """编排产出的事件。HTTP 层把它映射成 SSE 帧。
 
-    分三种：``status``（工具执行前，给人看的进行中提示）、
-    ``token``（逐字增量）、``tools``（本轮工具轨迹摘要，徽章的权威来源）。
+    分四种：``status``（工具执行前，给人看的进行中提示）、``token``（逐字增量）、
+    ``tools``（本轮工具轨迹摘要，徽章的权威来源）、``citations``（本轮引用证据快照）。
     """
 
-    kind: Literal["status", "token", "tools"]
+    kind: Literal["status", "token", "tools", "citations"]
     payload: dict[str, Any]
 
 
@@ -163,13 +170,43 @@ def _as_mapping(data: Any) -> dict[str, Any] | None:
     return None
 
 
+def _refusal_of(result: ToolResult) -> tuple[str, str] | None:
+    """工具是否报告「证据不足，必须拒答」。
+
+    返回 ``(source, reason)``：``source`` 直接作为 ``low_confidence_questions.source``
+    的 ENUM 值，所以只能是 ``retrieval_low_conf`` / ``self_check``。
+    """
+    payload = _as_mapping(result.data)
+    if not payload or not payload.get("refused"):
+        return None
+    source = str(payload.get("refusal_source") or "self_check")
+    reason = str(payload.get("refusal_reason") or "证据不足以回答这个问题")
+    return source, reason
+
+
+def _evidence_of(result: ToolResult) -> tuple[Evidence, ...]:
+    """从 ``query_faq`` 的出参还原证据。字段缺失/形状不对时返回空 —— 不抛。
+
+    编排层只负责「把编号映射回 chunk」，它不该因为工具多/少一个字段就炸掉整轮对话。
+    """
+    payload = _as_mapping(result.data)
+    if not payload:
+        return ()
+    items = payload.get("items") or []
+    try:
+        return evidence_from_payload(list(items))
+    except (KeyError, TypeError, ValueError):
+        logger.warning("query_faq 出参里的证据形状不对，本轮不提供引用", exc_info=True)
+        return ()
+
+
 async def astream_chat_with_tools(
     *,
     session_id: str,
     message: str,
     model: BaseChatModel,
     repositories: Repositories,
-    retriever: RetrieverLike | None = None,
+    retriever: AnswerContextLike | None = None,
     budget_tokens: int,
     model_name: str,
     timeout: float = 3.0,
@@ -207,6 +244,8 @@ async def astream_chat_with_tools(
     tools = get_tools(repositories, retriever)
     parts: list[str] = []
     tool_summaries: list[dict[str, Any]] = []
+    #: ch04：本轮引用的证据快照（落库 + 送前端）。无工具调用时保持空列表。
+    citations: list[dict[str, Any]] = []
     #: 落库用的那一行的完整信息。与 ``tool_summaries`` 分开：那个是给前端/日志看的摘要
     #: （``ToolResult.summary()``），不该为了落库再塞进 ``tool_call_id`` 与正文。
     persisted_tool_rows: list[dict[str, Any]] = []
@@ -271,6 +310,28 @@ async def astream_chat_with_tools(
                 }
             )
 
+            # -- ch04：证据不足 → **短路**，不再调用模型 ------------------
+            #
+            # 验收标准要求「问库里没有的内容必须得到明确拒答」，那就不能把
+            # 这件事交给模型的情绪与判断。走到这里时检索已经明确说「答不了」，
+            # 直接吐固定话术，并把原话落进低置信度池。
+            refusal = _refusal_of(result) if tool_name == "query_faq" else None
+            if refusal is not None:
+                source, reason = refusal
+                await _record_low_confidence(repositories, session_id, message, source, reason)
+                parts.append(REFUSAL_TEXT)
+                yield ToolEvent("token", {"delta": REFUSAL_TEXT})
+                await _persist(
+                    repositories,
+                    session_id,
+                    message,
+                    parts,
+                    persisted_tool_rows[0],
+                    citations=[],
+                )
+                yield ToolEvent("tools", {"tools": tool_summaries})
+                return
+
             # **原样复用第 1 次调用返回的那条 assistant 消息**，不要重建一条。
             #
             # 踩过的坑：``deepseek-flash`` 是思考模型，它的响应里除了 ``tool_calls``
@@ -304,6 +365,9 @@ async def astream_chat_with_tools(
                 fallback = fallback_answer(result)
                 parts.append(fallback)
                 yield ToolEvent("token", {"delta": fallback})
+
+            evidence = _evidence_of(result)
+            citations = _valid_citations("".join(parts), evidence)
     except BaseException:
         # 失败时只落用户那一轮（沿用 ch01「不落半截回答」）。
         # 落半截或落孤立的 tool 行都会污染下一轮上下文。
@@ -324,8 +388,12 @@ async def astream_chat_with_tools(
         message,
         parts,
         persisted_tool_rows[0] if persisted_tool_rows else None,
+        citations=citations,
     )
 
+    # 只有真有引用时才发这个事件：没有引用的普通闲聊多一个空事件没意义。
+    if citations:
+        yield ToolEvent("citations", {"citations": citations})
     yield ToolEvent("tools", {"tools": tool_summaries})
 
 
@@ -335,7 +403,7 @@ async def complete_chat_with_tools(
     message: str,
     model: BaseChatModel,
     repositories: Repositories,
-    retriever: RetrieverLike | None = None,
+    retriever: AnswerContextLike | None = None,
     budget_tokens: int,
     model_name: str,
     timeout: float = 3.0,
@@ -386,6 +454,8 @@ async def _persist(
     message: str,
     answer_parts: Sequence[str],
     tool_row: dict[str, Any] | None,
+    *,
+    citations: Sequence[dict[str, Any]] | None = None,
 ) -> None:
     """把这一轮落库。
 
@@ -395,6 +465,9 @@ async def _persist(
 
     ``tool_row`` 同时携带申请单与结果 —— 少了任何一行，
     下次重建历史时 ``ToolMessage`` 就找不到对应的申请单，上游会拒绝这段历史。
+
+    ``citations`` 只挂在**最终答案**那一行：带工具调用的申请单行没有引用可挂，
+    挂上去会让「这一轮到底引了什么」变得含糊。
     """
     conversation_id = await repositories.conversations.upsert_by_session(session_id, "anonymous")
 
@@ -426,5 +499,45 @@ async def _persist(
 
     if answer_parts:
         await repositories.messages.append(
-            conversation_id, role="assistant", content="".join(answer_parts)
+            conversation_id,
+            role="assistant",
+            content="".join(answer_parts),
+            citations=citations or None,
         )
+
+
+def _valid_citations(answer: str, evidence: Sequence[Evidence]) -> list[dict[str, Any]]:
+    """只把**正文真的引用了**的证据写进引用快照。
+
+    全部证据都存会带来一个副作用：用户点开 ``[3]`` 却发现这条根本没被上面的话用到。
+    快照应当回答「这段话依据了哪几条」，而不是「当时手里有什么」。
+    """
+    if not evidence:
+        return []
+    parsed = parse_citations(answer, evidence)
+    if parsed.dropped:
+        logger.warning(
+            "正文里有 %d 个角标映射不到本轮证据，已忽略（编号=%s）——"
+            "模型多写角标不该让回答消失，但值得看一眼",
+            len(parsed.dropped),
+            list(parsed.dropped),
+        )
+    wanted = set(parsed.valid)
+    return [item for item in evidence_payload(evidence) if item["n"] in wanted]
+
+
+async def _record_low_confidence(
+    repositories: Repositories,
+    session_id: str,
+    message: str,
+    source: str,
+    reason: str,
+) -> None:
+    """把「答不上来」的原话落进低置信度池。
+
+    先 upsert 会话拿 ``conversation_id``：池子有指向 ``conversations`` 的外键，
+    而这一轮的用户行是稍后才写的，不能指望它有 id。
+    """
+    conversation_id = await repositories.conversations.upsert_by_session(session_id, "anonymous")
+    await repositories.low_confidence.add(conversation_id, message, source, reason)
+    logger.info("低置信度问题已入池（source=%s）：%s", source, message[:60])
