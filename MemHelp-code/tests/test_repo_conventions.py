@@ -122,3 +122,20 @@ def test_seed_sql_never_contains_the_shipping_fee_keyword():
         "验收标准 3 的基线被破坏：种子语料里出现了「邮费」。"
         "「邮费是多少」将不再漏召回，ch03 的改造前基线随之消失。"
     )
+
+
+def test_sql_files_are_utf8_and_set_names():
+    """``sql/`` 下的文件必须能按 UTF-8 读，并且显式 ``SET NAMES utf8mb4``。
+
+    latin1 的默认 mysql client 会把中文 COMMENT double-encode，症状是
+    「表建好了、COMMENT 是乱码」—— 不影响功能，所以最容易一直没人管。
+    这里把它变成不会复发的不变量。
+    """
+    sql_dir = REPO_ROOT / "sql"
+    files = sorted(sql_dir.glob("*.sql"))
+    assert files, f"sql/ 目录不该是空的：{sql_dir}"
+
+    for path in files:
+        content = path.read_text(encoding="utf-8")
+        assert "SET NAMES utf8mb4" in content, f"{path.name} 缺少 SET NAMES utf8mb4"
+

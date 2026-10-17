@@ -6,12 +6,16 @@
 必须同时给出**同一批知识块**上关键词检索的命中情况，才能说明升级真的解决了漏召回
 （ch02 的验收 3 正是「关键词查不到『邮费』」）。
 
-## 两种基线
+## 三种基线（不能只报一个数）
 
-- **keyword**：在 ``knowledge_chunks`` 上做 ``LIKE``，跑**两种模式**取并集：
-  ① 用户整句；② ch02 时代模型会截出的名词（``keyword`` 字段）。
-  只跑整句会低估关键词基线，得出的对比不公平。
+- **kw-raw**：``knowledge_chunks`` 上对**用户整句**做 ``LIKE``。
+- **kw-noun**：对 ch02 时代模型会截出的名词（``keyword`` 字段）做 ``LIKE``。
+  ch02 的 ``query_faq`` 收到的其实是这个，所以它更接近历史行为。
 - **vector**：走 ``KnowledgeRetriever``（BGE-M3 + Milvus）。
+
+为什么要分两列：ch02 的 README 记录过「模型会把『邮费』归一化成『运费』再传参」，
+所以 kw-noun 有可能本来就命中。**只报 kw-raw 会夸大向量的优势**，只报 kw-noun
+又会掩盖「关键词检索依赖模型先猜对词」这件事。两列并排，读者自己判断。
 
 ## 用法
 
@@ -62,9 +66,11 @@ class CaseResult:
     case_id: str
     query: str
     paraphrase: bool
-    keyword_hit: bool | None = None
+    keyword_raw_hit: bool | None = None
+    keyword_noun_hit: bool | None = None
     vector_hit: bool | None = None
-    keyword_hits: list[str] = field(default_factory=list)
+    keyword_raw_hits: list[str] = field(default_factory=list)
+    keyword_noun_hits: list[str] = field(default_factory=list)
     vector_hits: list[str] = field(default_factory=list)
 
 
@@ -135,21 +141,20 @@ def _keyword_hits(session, term: str, limit: int = TOP_K) -> list[SimpleNamespac
 
 
 def run_baseline_keyword(session, cases: Sequence[dict]) -> list[CaseResult]:
-    """关键词基线：整句与「截出的名词」两种模式各查一次，取并集。"""
+    """关键词基线：整句与「截出的名词」各查一次，**分别记录**（不取并集）。"""
     results: list[CaseResult] = []
     for case in cases:
-        seen: dict[str, SimpleNamespace] = {}
-        for term in {case["query"], case["keyword"]}:
-            for item in _keyword_hits(session, term):
-                seen[item.answer] = item
-        hits = list(seen.values())
+        raw_hits = _keyword_hits(session, case["query"])
+        noun_hits = _keyword_hits(session, case["keyword"])
         results.append(
             CaseResult(
                 case_id=case["id"],
                 query=case["query"],
                 paraphrase=bool(case.get("paraphrase")),
-                keyword_hit=hit(case, hits),
-                keyword_hits=[item.answer[:40] for item in hits],
+                keyword_raw_hit=hit(case, raw_hits),
+                keyword_noun_hit=hit(case, noun_hits),
+                keyword_raw_hits=[item.answer[:40] for item in raw_hits],
+                keyword_noun_hits=[item.answer[:40] for item in noun_hits],
             )
         )
     return results
@@ -185,13 +190,14 @@ def _mark(value: bool | None) -> str:
 
 
 def render(results: Sequence[CaseResult]) -> str:
-    lines = [f"{'case':32s} {'换说法':6s} {'keyword':9s} {'vector':9s} query"]
+    lines = [f"{'case':32s} {'换说法':6s} {'kw-raw':8s} {'kw-noun':8s} {'vector':8s} query"]
     for result in results:
         lines.append(
             f"{result.case_id:32s} "
             f"{'是' if result.paraphrase else '否':6s} "
-            f"{_mark(result.keyword_hit)}  "
-            f"{_mark(result.vector_hit)}  "
+            f"{_mark(result.keyword_raw_hit)}"
+            f"{_mark(result.keyword_noun_hit)}"
+            f"{_mark(result.vector_hit)}"
             f"{result.query}"
         )
 
@@ -203,12 +209,12 @@ def render(results: Sequence[CaseResult]) -> str:
         return f"{sum(scored)}/{len(scored)}"
 
     paraphrases = [result for result in results if result.paraphrase]
-    lines.append("")
-    lines.append(f"全部用例：keyword {_rate('keyword_hit', results)} | vector {_rate('vector_hit', results)}")
-    lines.append(
-        f"换说法用例：keyword {_rate('keyword_hit', paraphrases)} | "
-        f"vector {_rate('vector_hit', paraphrases)}"
-    )
+    for label, subset in (("全部用例", results), ("换说法用例", paraphrases)):
+        lines.append(
+            f"{label}：kw-raw {_rate('keyword_raw_hit', subset)} | "
+            f"kw-noun {_rate('keyword_noun_hit', subset)} | "
+            f"vector {_rate('vector_hit', subset)}"
+        )
     return "\n".join(lines)
 
 
@@ -220,9 +226,11 @@ def _summarise_json(results: Sequence[CaseResult], milvus_count: int) -> dict:
                 "id": result.case_id,
                 "query": result.query,
                 "paraphrase": result.paraphrase,
-                "keyword_hit": result.keyword_hit,
+                "keyword_raw_hit": result.keyword_raw_hit,
+                "keyword_noun_hit": result.keyword_noun_hit,
                 "vector_hit": result.vector_hit,
-                "keyword_hits": result.keyword_hits,
+                "keyword_raw_hits": result.keyword_raw_hits,
+                "keyword_noun_hits": result.keyword_noun_hits,
                 "vector_hits": result.vector_hits,
             }
             for result in results
@@ -294,8 +302,12 @@ async def _run(args: argparse.Namespace) -> int:
         print(f"评估集缺少验收用例 {REQUIRED_VECTOR_CASE}", file=sys.stderr)
         return 1
     if required.vector_hit is None:
-        print(f"未运行向量基线，无法判定验收用例 {REQUIRED_VECTOR_CASE}", file=sys.stderr)
-        return 1
+        # 只跑关键词基线属于诊断模式：没有向量结果就无从判定验收，但不该算失败。
+        print(
+            f"未运行向量基线，跳过验收判定（{REQUIRED_VECTOR_CASE}）",
+            file=sys.stderr,
+        )
+        return 0
     if not required.vector_hit:
         print(f"验收用例 {REQUIRED_VECTOR_CASE} 未被向量检索命中", file=sys.stderr)
         return 1

@@ -311,3 +311,108 @@ powershell -ExecutionPolicy Bypass -File scripts/demo-ch02.ps1 `
 
 **明确未做（用户指定）**：多轮自动循环的 Agent Loop、向量检索 / RAG。
 
+---
+
+# 第三章「RAG 基础 · 向量语义检索」
+
+> 一句话：把 `query_faq` 的内部实现从「keyword 查 `LIKE`」换成「BGE-M3 + Milvus
+> 的 dense 语义检索」，**入参名与出参 JSON 一字不变**；补齐离线建库（结构感知切分 +
+> 对话挖知识）与 MySQL/Milvus 双写。
+
+## 1. 依赖与配置
+
+```powershell
+$env:UV_CACHE_DIR = "F:\DeepSeek-Harness\memhelp-code-myself\.uv-cache"
+$uv = "C:\Users\dbq\.local\bin\uv.exe"
+& $uv sync
+```
+
+本机需要：MySQL（3306，复用既有库）、Milvus（19530）。**嵌入走云端**，不本地部署模型。
+
+在 `MemHelp-code/.env` 里补三行（`EMBEDDING_API_KEY` 是硅基流动的账户 Key）：
+
+```dotenv
+EMBEDDING_BASE_URL=https://api.siliconflow.cn/v1
+EMBEDDING_API_KEY=sk-xxxx
+EMBEDDING_MODEL=BAAI/bge-m3
+```
+
+其余阈值（`RAG_TOP_K` / `CHUNK_MAX_CHARS` / `CHUNK_OVERLAP` / `QA_DEDUPE_THRESHOLD` …）
+见 `.env.example`，不改也能跑。
+
+## 2. 离线建库
+
+```powershell
+# 全量（三份 Markdown + 存量 faq 表）
+& $uv run --directory MemHelp-code python scripts/build_knowledge.py --docs knowledge --faq-table
+& $uv run --directory MemHelp-code python scripts/build_knowledge.py --status
+```
+
+`--status` 会并排打印两侧计数，例如
+`knowledge_chunks: pending=0 done=22 | milvus=22 → 一致`。
+
+### 验收 2：故意中断再重跑
+
+```powershell
+# 只补前 5 块的向量，模拟「跑到一半挂了」
+& $uv run --directory MemHelp-code python scripts/build_knowledge.py --docs knowledge --faq-table --rebuild --max-chunks 5
+& $uv run --directory MemHelp-code python scripts/build_knowledge.py --status     # pending = 总数-5
+# 重跑，只补漏下的
+& $uv run --directory MemHelp-code python scripts/build_knowledge.py --docs knowledge --faq-table
+& $uv run --directory MemHelp-code python scripts/build_knowledge.py --status     # pending=0 且 done==milvus
+```
+
+为什么能补齐：MySQL 记 `pending`，Milvus 用**确定性主键** `str(chunk_id)` upsert ——
+重写覆盖同一行，不产生重复向量。
+
+## 3. 对话挖知识（定时任务）
+
+```powershell
+# 先把演示历史会话灌进去（30 个 demo-ch03-* 会话，脚本幂等）
+& $uv run --directory MemHelp-code python scripts/seed_demo_history.py
+
+# 挖一批（默认 8 个会话一批，抽取 → 暂存 → 整体去重 → 入库 → 补向量）
+& $uv run --directory MemHelp-code python scripts/mine_conversations.py --limit 30
+& $uv run --directory MemHelp-code python scripts/mine_conversations.py --status
+& $uv run --directory MemHelp-code python scripts/mine_conversations.py --dedupe-only
+```
+
+注册成计划任务（每天 03:00）：
+
+```powershell
+schtasks /create /tn "MewHelpMineKnowledge" /sc daily /st 03:00 `
+  /tr "uv run --directory MemHelp-code python scripts/mine_conversations.py --limit 200"
+```
+
+## 4. 验收 1：换说法召回（关键词 vs 向量）
+
+```powershell
+& $uv run --directory MemHelp-code python evals/run_rag_evals.py
+```
+
+输出三列对照：`kw-raw`（整句 LIKE）、`kw-noun`（ch02 时代模型截出的名词）、
+`vector`（本章检索）。**为什么分两列**：ch02 的 README 记录过模型会把「邮费」归一化成
+「运费」再传参，只报整句会夸大向量优势、只报名词会掩盖「关键词依赖先猜对词」。
+
+## 5. 端到端
+
+```powershell
+& $uv run --directory MemHelp-code uvicorn app.main:app --port 8000
+```
+
+浏览器打开 <http://127.0.0.1:8000/chat/>，问 **「邮费是多少」**：
+应出现 `🔧 检索常见问题` 徽章，回答含「满 99 元包邮 / 未满 10 元」。
+
+> 启动时会预热（发一次真实嵌入请求 + 确认 Milvus 集合）。预热失败只告警不崩 ——
+> 但检索会因此 `ok=false`，看到「暂时查不到」时先看启动日志里的 warning。
+
+## 6. 本章留痕
+
+- 设计文档：`docs/superpowers/specs/2026-10-17-ch03-rag-design.md`
+- 实施计划：`docs/superpowers/plans/2026-10-17-ch03-rag-plan.md`
+- 开发过程追记：`dev-notes/ch03.md`
+- 建表 DDL / 演示会话：`../sql/ch03-ddl.sql`、`../sql/ch03-seed-history.sql`
+
+**本章不做（用户指定）**：关键词召回、混合检索、重排；只跑 dense 向量单路。
+
+
