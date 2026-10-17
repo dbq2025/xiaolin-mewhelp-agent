@@ -1047,6 +1047,14 @@ class FaithCaseRepository:
         """按处置状态取个案；``None`` 表示全部（最近见过的在前）。"""
         return await _run(self._list_by_status, status)
 
+    def _get(self, eval_id: str) -> FaithCaseRow | None:
+        row = self._session.scalar(select(FaithCase).where(FaithCase.eval_id == eval_id))
+        return _to_faith_case_row(row) if row is not None else None
+
+    async def get(self, eval_id: str) -> FaithCaseRow | None:
+        """按题号取一行；不存在返回 ``None``（由端点决定 404）。"""
+        return await _run(self._get, eval_id)
+
     def _update_status(self, eval_id: str, status: str, resolution: str | None) -> bool:
         if status not in FAITH_CASE_STATUSES:
             raise ValueError(

@@ -63,6 +63,7 @@ from app.schemas import (
     ContextStats,
     ErrorResponse,
     ExtractRequest,
+    FaithCaseUpdateRequest,
     SessionMessagesResponse,
 )
 from app.sse import SSE_MEDIA_TYPE, sse_frame
@@ -482,6 +483,29 @@ async def _db_session_messages_payload(
     return SessionMessagesResponse(session_id=session_id, messages=payload)
 
 
+def _faith_case_payload(row: Any) -> dict[str, Any]:
+    """把台账行转成对外 JSON。
+
+    时间统一 ISO 字符串：让前端直接 ``new Date(...)``，不必依赖某个时区格式。
+    """
+    return {
+        "eval_id": row.eval_id,
+        "bucket": row.bucket,
+        "query": row.query,
+        "strategy": row.strategy,
+        "answer": row.answer,
+        "reason": row.reason,
+        "citations": row.citations,
+        "judge_model": row.judge_model,
+        "status": row.status,
+        "seen_count": row.seen_count,
+        "first_seen_at": row.first_seen_at.isoformat() if row.first_seen_at else None,
+        "last_seen_at": row.last_seen_at.isoformat() if row.last_seen_at else None,
+        "resolution": row.resolution,
+        "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,
+    }
+
+
 def _tool_traces(
     tool_calls: Any, rows: list[Any], assistant_index: int
 ) -> list[dict[str, Any]]:
@@ -813,6 +837,48 @@ def create_app(
         而且重启服务后历史不会凭空消失。
         """
         return await _db_session_messages_payload(session_id, repositories_)
+
+    # -- ch04：编造个案台账（最小查询 / 处置面，不做页面）------------------
+
+    @app.get("/api/faith-cases")
+    async def list_faith_cases(
+        status: str | None = None,
+        repositories_: Repositories = Depends(get_repositories),
+    ) -> JSONResponse:
+        """按处置状态列出编造个案（不传 ``status`` 就是全部）。
+
+        为什么不做分页：台账按「一题一行」增长，一个评估集才几十条；
+        现在加页码只会增加一个没人调的参数。
+        """
+        rows = await repositories_.faith_cases.list_by_status(status)
+        return JSONResponse(
+            status_code=200,
+            content={"items": [_faith_case_payload(row) for row in rows]},
+        )
+
+    @app.patch("/api/faith-cases/{eval_id}")
+    async def update_faith_case(
+        eval_id: str,
+        req: FaithCaseUpdateRequest,
+        repositories_: Repositories = Depends(get_repositories),
+    ) -> JSONResponse:
+        """改一条个案的处置状态。
+
+        业务规则在仓库层（``FaithCaseRepository.update_status``）：
+        标「已解决/无需解决」必须写处置说明，退回「未解决」会清空它。
+        这里只负责把 ``ValueError`` 映射成 422、把「找不到」映射成 404。
+        """
+        try:
+            found = await repositories_.faith_cases.update_status(
+                eval_id, req.status, req.resolution
+            )
+        except ValueError as exc:
+            return _error(422, "validation_error", redact(str(exc)))
+
+        row = await repositories_.faith_cases.get(eval_id) if found else None
+        if row is None:
+            return _error(404, "not_found", f"台账里没有题号 {eval_id}。")
+        return JSONResponse(status_code=200, content=_faith_case_payload(row))
 
     # -- 结构化提取（一次返回完整 JSON，不流式）---------------------------
 

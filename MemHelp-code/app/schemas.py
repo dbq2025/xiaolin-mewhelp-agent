@@ -5,7 +5,7 @@ JSON Schema 交给模型，因此它们是提取准确率的一部分，不能�
 """
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -160,3 +160,24 @@ class ExtractRequest(BaseModel):
     """售后描述提取请求。"""
 
     text: str = Field(min_length=1, description="用户的售后描述原文。")
+
+
+# --------------------------------------------------------------------------
+# ch04：编造个案台账
+# --------------------------------------------------------------------------
+
+
+class FaithCaseUpdateRequest(BaseModel):
+    """台账处置请求。
+
+    ``status`` 用 ``Literal`` 收窄到 DDL 的三个 ENUM 取值：非法状态在**参数校验**阶段
+    就返回 422，而不是等到 flush 时抛 ``LookupError``。
+    """
+
+    status: Literal["未解决", "已解决", "无需解决"] = Field(
+        description="处置状态。标「已解决/无需解决」必须同时写 resolution；退回「未解决」会清空它。"
+    )
+    resolution: str | None = Field(
+        default=None,
+        description="处置说明：标已解决要写清怎么解决的，标无需解决要写清为什么不用改。",
+    )
