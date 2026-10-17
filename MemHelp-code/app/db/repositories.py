@@ -44,7 +44,9 @@ from app.db.models import (
     TICKET_TYPES as _TICKET_TYPES,
     Conversation,
     Faq,
+    KnowledgeChunk,
     Message,
+    QaStaging,
     Ticket,
 )
 
@@ -118,6 +120,49 @@ class MessageRow:
     created_at: datetime
     #: 给界面看的工具轨迹（含耗时/成败）。**不参与模型历史**，见 models.Message。
     tool_traces: list[dict[str, Any]] | None = None
+
+
+@dataclass(frozen=True)
+class ChunkRow:
+    """一条知识块（纯数据，跨线程安全）。
+
+    进向量的只有 ``category`` / ``questions`` / ``answer``；其余是元数据与双写状态。
+    """
+
+    id: int
+    category: str
+    questions: str
+    answer: str
+    section_path: str | None
+    content_type: str | None
+    is_key_clause: bool
+    prev_chunk_id: int | None
+    next_chunk_id: int | None
+    vector_id: str | None
+    vectorize_status: str
+
+
+@dataclass(frozen=True)
+class StagingRow:
+    """暂存表里的一条候选问答对。"""
+
+    id: int
+    batch_no: str
+    source_ref: str | None
+    question: str
+    answer: str
+    status: str
+
+
+def _field(row: object, name: str) -> Any:
+    """从 dict 或任意对象上取一个字段。
+
+    仓库层接受**duck-typed 行**：切分器有 ``Chunk``，挖矿有 ``ExtractedQa``，
+    测试有各种小类。让它们各自定义形状，比逼所有调用方 import 仓库层的类型好。
+    """
+    if isinstance(row, dict):
+        return row[name]
+    return getattr(row, name)
 
 
 # ---------------------------------------------------------------------------
@@ -335,8 +380,281 @@ class FaqRepository:
 
         返回空列表表示**没查到**（正常业务结果，不是错误）——
         验收标准 3 的「漏召回」正是走到这里。
+
+        注意：ch03 起 ``query_faq`` **不再调用本方法**（已改走向量检索）。
+        保留它是为了两件事：ch02 的既有测试，以及评估集里的**关键词基线**
+        （同一语料、只换检索方式，才能证明向量升级真的解决了漏召回）。
         """
         return await _run(self._search, keyword, limit)
+
+    def _list_all(self) -> list[FaqHit]:
+        rows = self._session.scalars(select(Faq).order_by(Faq.id)).all()
+        return [FaqHit(question=r.question, answer=r.answer, category=r.category) for r in rows]
+
+    async def list_all(self) -> list[FaqHit]:
+        """把 ``faq`` 表整表读出来 —— ch03 建库时把它灌进 ``knowledge_chunks``。"""
+        return await _run(self._list_all)
+
+
+# ---------------------------------------------------------------------------
+# ch03：知识块（原文权威源 + 双写状态机）
+# ---------------------------------------------------------------------------
+
+
+class KnowledgeChunkRepository:
+    """``knowledge_chunks`` 的读写。
+
+    ## 自然键幂等
+
+    chunk 的自增主键不能当幂等键（重跑会拿到新 id）。真正稳定的身份是
+    ``(content_type, section_path, questions)``：同一篇文档的同一节标题，
+    重跑一万次都指向同一行。``answer`` 变了就 UPDATE 并把状态打回 ``pending``，
+    让旧向量作废、等着重算。
+
+    ## ``section_path`` 用空串而不是 NULL
+
+    MySQL 里 ``NULL != NULL``，拿它参与自然键比较会让每一行都「不相等」，
+    幂等直接失效（表现为重跑后块数翻倍）。所以写入时统一 ``or ""``。
+    """
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def _upsert_chunk(self, chunk: object) -> tuple[int, bool]:
+        content_type = _field(chunk, "content_type")
+        section_path = _field(chunk, "section_path") or ""
+        questions = _field(chunk, "questions")
+        answer = _field(chunk, "answer")
+
+        existing = self._session.scalars(
+            select(KnowledgeChunk).where(
+                KnowledgeChunk.content_type == content_type,
+                KnowledgeChunk.section_path == section_path,
+                KnowledgeChunk.questions == questions,
+            )
+        ).first()
+
+        if existing is None:
+            row = KnowledgeChunk(
+                category=_field(chunk, "category"),
+                questions=questions,
+                answer=answer,
+                section_path=section_path,
+                content_type=content_type,
+                is_key_clause=bool(_field(chunk, "is_key_clause")),
+            )
+            self._session.add(row)
+            self._session.commit()
+            return int(row.id), True
+
+        if existing.answer != answer:
+            existing.answer = answer
+            # 原文变了 → 旧向量作废。不重置的话，检索会继续命中旧答案。
+            existing.vectorize_status = "pending"
+            existing.vector_id = None
+            existing.category = _field(chunk, "category")
+            existing.is_key_clause = bool(_field(chunk, "is_key_clause"))
+            self._session.commit()
+        return int(existing.id), False
+
+    async def upsert_chunk(self, chunk: object) -> tuple[int, bool]:
+        """按自然键写入一块，返回 ``(id, 是否新建)``。
+
+        :param chunk: duck-typed 行，需有 ``category`` / ``questions`` / ``answer`` /
+            ``section_path`` / ``content_type`` / ``is_key_clause``。
+        """
+        return await _run(self._upsert_chunk, chunk)
+
+    def _link_neighbours(self, ids: list[int]) -> None:
+        for left, right in zip(ids, ids[1:]):
+            self._session.query(KnowledgeChunk).filter(KnowledgeChunk.id == left).update(
+                {KnowledgeChunk.next_chunk_id: right}
+            )
+            self._session.query(KnowledgeChunk).filter(KnowledgeChunk.id == right).update(
+                {KnowledgeChunk.prev_chunk_id: left}
+            )
+        self._session.commit()
+
+    async def link_neighbours(self, ids_in_order: Sequence[int]) -> None:
+        """按给定顺序把同一篇内的块前后连起来。跨文档不要连。"""
+        await _run(self._link_neighbours, list(ids_in_order))
+
+    def _list_pending(self, limit: int | None) -> list[ChunkRow]:
+        stmt = (
+            select(KnowledgeChunk)
+            .where(
+                or_(
+                    KnowledgeChunk.vectorize_status == "pending",
+                    KnowledgeChunk.vector_id.is_(None),
+                )
+            )
+            .order_by(KnowledgeChunk.id)
+        )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        return [_to_chunk_row(r) for r in self._session.scalars(stmt).all()]
+
+    async def list_pending(self, limit: int | None = None) -> list[ChunkRow]:
+        """待向量化的块（``pending`` 或 ``vector_id`` 为空）。续跑只拣这些。"""
+        return await _run(self._list_pending, limit)
+
+    def _mark_done(self, pairs: list[tuple[int, str]]) -> None:
+        for chunk_id, vector_id in pairs:
+            self._session.query(KnowledgeChunk).filter(KnowledgeChunk.id == chunk_id).update(
+                {
+                    KnowledgeChunk.vector_id: vector_id,
+                    KnowledgeChunk.vectorize_status: "done",
+                }
+            )
+        self._session.commit()
+
+    async def mark_done(self, pairs: Sequence[tuple[int, str]]) -> None:
+        """回填 ``vector_id`` 并把状态转 ``done``（Milvus 写成功之后才调）。"""
+        await _run(self._mark_done, list(pairs))
+
+    def _get_many(self, ids: list[int]) -> list[ChunkRow]:
+        if not ids:
+            return []
+        rows = self._session.scalars(
+            select(KnowledgeChunk).where(KnowledgeChunk.id.in_(ids))
+        ).all()
+        return [_to_chunk_row(r) for r in rows]
+
+    async def get_many(self, ids: Sequence[int]) -> list[ChunkRow]:
+        """按 id 批量取。顺序由调用方按向量分数重排，这里不保证。"""
+        return await _run(self._get_many, list(ids))
+
+    def _count_by_status(self) -> dict[str, int]:
+        rows = self._session.execute(
+            select(KnowledgeChunk.vectorize_status, func.count()).group_by(
+                KnowledgeChunk.vectorize_status
+            )
+        ).all()
+        counts = {"pending": 0, "done": 0}
+        for status, n in rows:
+            counts[str(status)] = int(n)
+        return counts
+
+    async def count_by_status(self) -> dict[str, int]:
+        return await _run(self._count_by_status)
+
+    def _truncate(self) -> None:
+        # 用 DELETE 而不是 TRUNCATE：MySQL 的 TRUNCATE 会被自引用外键拒绝。
+        self._session.query(KnowledgeChunk).delete()
+        self._session.commit()
+
+    async def truncate(self) -> None:
+        await _run(self._truncate)
+
+
+def _to_chunk_row(row: KnowledgeChunk) -> ChunkRow:
+    return ChunkRow(
+        id=int(row.id),
+        category=row.category,
+        questions=row.questions,
+        answer=row.answer,
+        section_path=row.section_path,
+        content_type=row.content_type,
+        is_key_clause=bool(row.is_key_clause),
+        prev_chunk_id=row.prev_chunk_id,
+        next_chunk_id=row.next_chunk_id,
+        vector_id=row.vector_id,
+        vectorize_status=row.vectorize_status,
+    )
+
+
+# ---------------------------------------------------------------------------
+# ch03：问答抽取暂存表
+# ---------------------------------------------------------------------------
+
+
+class QaStagingRepository:
+    """``qa_extraction_staging`` 的读写。
+
+    这张表是「抽出来」与「判重入库」之间的缓冲：抽取按批写、去重在全量上做，
+    中间还能调阈值重跑（``--dedupe-only``）。
+    """
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def _add_rows(self, rows: list[object]) -> None:
+        for row in rows:
+            self._session.add(
+                QaStaging(
+                    batch_no=_field(row, "batch_no"),
+                    source_ref=_field(row, "source_ref"),
+                    question=_field(row, "question"),
+                    answer=_field(row, "answer"),
+                )
+            )
+        self._session.commit()
+
+    async def add_rows(self, rows: Sequence[object]) -> None:
+        """一批抽取结果一次性写入（整批提交：失败就整批不落，见 mining）。"""
+        await _run(self._add_rows, list(rows))
+
+    def _list_by_status(self, status: str) -> list[StagingRow]:
+        rows = self._session.scalars(
+            select(QaStaging).where(QaStaging.status == status).order_by(QaStaging.id)
+        ).all()
+        return [
+            StagingRow(
+                id=int(r.id),
+                batch_no=r.batch_no,
+                source_ref=r.source_ref,
+                question=r.question,
+                answer=r.answer,
+                status=r.status,
+            )
+            for r in rows
+        ]
+
+    async def list_by_status(self, status: str) -> list[StagingRow]:
+        return await _run(self._list_by_status, status)
+
+    def _mark(self, ids: list[int], status: str) -> None:
+        if not ids:
+            return
+        self._session.query(QaStaging).filter(QaStaging.id.in_(ids)).update(
+            {QaStaging.status: status}, synchronize_session=False
+        )
+        self._session.commit()
+
+    async def mark(self, ids: Sequence[int], status: str) -> None:
+        """把一批行标成 ``kept`` / ``discarded``（丢弃行留档，便于人工复核）。"""
+        await _run(self._mark, list(ids), status)
+
+    def _known_sources(self) -> set[str]:
+        rows = self._session.scalars(
+            select(QaStaging.source_ref).where(QaStaging.source_ref.is_not(None)).distinct()
+        ).all()
+        return {str(r) for r in rows if r is not None}
+
+    async def known_sources(self) -> set[str]:
+        """已经挖过的会话标识 —— 定时任务靠它做幂等（重跑不重复挖）。"""
+        return await _run(self._known_sources)
+
+    def _count_by_status(self) -> dict[str, int]:
+        rows = self._session.execute(
+            select(QaStaging.status, func.count()).group_by(QaStaging.status)
+        ).all()
+        return {str(status): int(n) for status, n in rows}
+
+    async def count_by_status(self) -> dict[str, int]:
+        return await _run(self._count_by_status)
+
+    def _update_questions(self, row_id: int, questions: str) -> None:
+        # 暂存表的列叫 question（单数）；合并后的多行问法直接写进这一列，
+        # 入 knowledge_chunks 时再原样搬到那边的 questions（复数）。
+        self._session.query(QaStaging).filter(QaStaging.id == row_id).update(
+            {QaStaging.question: questions}
+        )
+        self._session.commit()
+
+    async def update_questions(self, row_id: int, questions: str) -> None:
+        """同义问法合并后回写 ``question``（多行）。"""
+        await _run(self._update_questions, row_id, questions)
 
 
 # ---------------------------------------------------------------------------
@@ -422,12 +740,16 @@ class Repositories:
     messages: MessageRepository
     faq: FaqRepository
     tickets: TicketRepository
+    #: ch03：知识块（原文权威源 + 双写状态）
+    knowledge: KnowledgeChunkRepository
+    #: ch03：对话抽取暂存
+    qa_staging: QaStagingRepository
 
     @classmethod
     def from_session(cls, session: Session) -> "Repositories":
-        """按一个 ``Session`` 装配出四个仓库。
+        """按一个 ``Session`` 装配出全部仓库。
 
-        **同步**方法（不是 ``async``）：它只是构造四个对象，没有任何 IO。
+        **同步**方法（不是 ``async``）：它只是构造几个对象，没有任何 IO。
         写成 ``async`` 会逼每个调用方 ``await`` 一个不等待任何东西的调用。
         """
         return cls(
@@ -435,4 +757,6 @@ class Repositories:
             messages=MessageRepository(session),
             faq=FaqRepository(session),
             tickets=TicketRepository(session),
+            knowledge=KnowledgeChunkRepository(session),
+            qa_staging=QaStagingRepository(session),
         )

@@ -284,5 +284,192 @@ def test_repositories_container_is_synchronous_assembly(sqlite_session):
     from app.db.repositories import Repositories
 
     repos = Repositories.from_session(sqlite_session)
-    for name in ("conversations", "messages", "faq", "tickets"):
+    for name in ("conversations", "messages", "faq", "tickets", "knowledge", "qa_staging"):
         assert getattr(repos, name) is not None
+
+
+# ---------------------------------------------------------------------------
+# ch03：知识库 chunk（双写状态机）
+# ---------------------------------------------------------------------------
+
+
+class _Chunk:
+    """最小 chunk 形状（duck typing）—— 仓库层不该 import 切分器的类型。
+
+    ``ordinal`` 是切分器给的文档内序号；仓库层只用它来决定「同一篇里的先后」，
+    不落库（DDL 没有这一列）。
+    """
+
+    category = "售后"
+    questions = "能退吗"
+    answer = "7 天无理由"
+    section_path = "售后 / 退货"
+    content_type = "faq"
+    is_key_clause = False
+    ordinal = 0
+
+
+async def test_upsert_chunk_is_idempotent_by_natural_key(sqlite_session):
+    """同一 (content_type, section_path, questions) 再写一次不能新增行。
+
+    这是「建库重跑不翻倍」的第一道闸：没有它，`--rebuild` 之外的任何重跑都会
+    让库里的块数翻倍，而检索结果看起来还「挺正常」。
+    """
+    from app.db.repositories import KnowledgeChunkRepository
+
+    repo = KnowledgeChunkRepository(sqlite_session)
+    id1, created1 = await repo.upsert_chunk(_Chunk())
+    id2, created2 = await repo.upsert_chunk(_Chunk())
+
+    assert created1 is True and created2 is False
+    assert id2 == id1
+    assert await repo.count_by_status() == {"pending": 1, "done": 0}
+
+
+async def test_upsert_chunk_resets_status_when_answer_changes(sqlite_session):
+    """原文改了 → 旧向量作废，必须回到 pending 等着重算。
+
+    不重置的话，改了答案的块会一直用旧向量被检索到 —— 用户看到的是**旧答案**，
+    而库里明明已经是新答案，排查方向会完全跑偏。
+    """
+    from app.db.repositories import KnowledgeChunkRepository
+
+    repo = KnowledgeChunkRepository(sqlite_session)
+    cid, _ = await repo.upsert_chunk(_Chunk())
+    await repo.mark_done([(cid, str(cid))])
+    assert await repo.count_by_status() == {"pending": 0, "done": 1}
+
+    class _Changed(_Chunk):
+        answer = "7 天无理由，需保持完好"
+
+    cid2, created = await repo.upsert_chunk(_Changed())
+
+    assert cid2 == cid and created is False
+    assert await repo.count_by_status() == {"pending": 1, "done": 0}
+    rows = await repo.list_pending()
+    assert rows[0].answer == "7 天无理由，需保持完好"
+    assert rows[0].vector_id is None
+
+
+async def test_list_pending_returns_only_pending_and_respects_limit(sqlite_session):
+    from app.db.repositories import KnowledgeChunkRepository
+
+    repo = KnowledgeChunkRepository(sqlite_session)
+    ids = []
+    for i in range(3):
+        class _Ci(_Chunk):
+            questions = f"问法{i}"
+            ordinal = i
+
+        cid, _ = await repo.upsert_chunk(_Ci())
+        ids.append(cid)
+    await repo.mark_done([(ids[0], str(ids[0]))])
+
+    assert [r.id for r in await repo.list_pending()] == [ids[1], ids[2]]
+    assert [r.id for r in await repo.list_pending(limit=1)] == [ids[1]]
+
+    # 「状态是 done 但 vector_id 为空」= 回填丢了一半，也必须被拣出来重算。
+    from sqlalchemy import text
+
+    sqlite_session.execute(
+        text("UPDATE knowledge_chunks SET vectorize_status='done' WHERE id = :i"),
+        {"i": ids[2]},
+    )
+    sqlite_session.commit()
+    assert ids[2] in [r.id for r in await repo.list_pending()]
+
+
+async def test_link_neighbours_sets_prev_and_next(sqlite_session):
+    """文档内顺序由调用方给（切分器算出的 ordinal），仓库层只连指针。
+
+    跨文档不连：不同章节「首尾相连」会让检索命中后顺着链走到无关章节。
+    """
+    from app.db.repositories import KnowledgeChunkRepository
+
+    repo = KnowledgeChunkRepository(sqlite_session)
+    a, _ = await repo.upsert_chunk(_Chunk())
+
+    class _B(_Chunk):
+        questions = "第二问"
+        ordinal = 1
+
+    b, _ = await repo.upsert_chunk(_B())
+    await repo.link_neighbours([a, b])
+
+    rows = {r.id: r for r in await repo.get_many([a, b])}
+    assert rows[a].prev_chunk_id is None and rows[a].next_chunk_id == b
+    assert rows[b].prev_chunk_id == a and rows[b].next_chunk_id is None
+
+
+async def test_get_many_preserves_nothing_and_returns_empty_for_unknown(sqlite_session):
+    """``get_many`` 只是批量取行，顺序由调用方按向量分数重排（见 retrieval）。"""
+    from app.db.repositories import KnowledgeChunkRepository
+
+    repo = KnowledgeChunkRepository(sqlite_session)
+    a, _ = await repo.upsert_chunk(_Chunk())
+
+    assert [r.id for r in await repo.get_many([a])] == [a]
+    assert await repo.get_many([9999]) == []
+
+
+async def test_truncate_clears_all_rows(sqlite_session):
+    """``--rebuild`` 用；只清表不清 Milvus 会留下孤儿向量（见 ingest.rebuild）。"""
+    from app.db.repositories import KnowledgeChunkRepository
+
+    repo = KnowledgeChunkRepository(sqlite_session)
+    await repo.upsert_chunk(_Chunk())
+    await repo.truncate()
+    assert await repo.count_by_status() == {"pending": 0, "done": 0}
+
+
+# ---------------------------------------------------------------------------
+# ch03：问答暂存表
+# ---------------------------------------------------------------------------
+
+
+async def test_qa_staging_marks_and_counts(sqlite_session):
+    from app.db.repositories import QaStagingRepository
+
+    repo = QaStagingRepository(sqlite_session)
+    await repo.add_rows(
+        [
+            {"batch_no": "b1", "source_ref": "s1", "question": "邮费？", "answer": "满 99 包邮"},
+            {"batch_no": "b1", "source_ref": "s2", "question": "能退吗？", "answer": "七天无理由"},
+        ]
+    )
+    assert await repo.count_by_status() == {"extracted": 2}
+    assert await repo.known_sources() == {"s1", "s2"}
+
+    rows = await repo.list_by_status("extracted")
+    await repo.mark([rows[1].id], "discarded")
+    assert await repo.count_by_status() == {"extracted": 1, "discarded": 1}
+
+
+async def test_qa_staging_updates_merged_questions(sqlite_session):
+    """同义问法合并后要能回写 ``questions``（多行）。"""
+    from app.db.repositories import QaStagingRepository
+
+    repo = QaStagingRepository(sqlite_session)
+    await repo.add_rows([{"batch_no": "b", "source_ref": "s", "question": "邮费是多少", "answer": "a"}])
+    row = (await repo.list_by_status("extracted"))[0]
+    await repo.update_questions(row.id, "邮费是多少\n寄回去要我付邮费吗")
+    assert (await repo.list_by_status("extracted"))[0].question == "邮费是多少\n寄回去要我付邮费吗"
+
+
+async def test_faq_repository_list_all_returns_every_row(sqlite_session):
+    """存量 FAQ 要能整表读出来灌进知识库（content_type='faq'）。"""
+    from app.db.models import Faq
+    from app.db.repositories import FaqRepository
+
+    sqlite_session.add_all(
+        [
+            Faq(question="退货政策", answer="7 天无理由", category="售后"),
+            Faq(question="运费怎么算", answer="满 99 包邮", category="物流"),
+        ]
+    )
+    sqlite_session.commit()
+
+    rows = await FaqRepository(sqlite_session).list_all()
+    assert [r.question for r in rows] == ["退货政策", "运费怎么算"]
+    assert rows[1].category == "物流"
+
