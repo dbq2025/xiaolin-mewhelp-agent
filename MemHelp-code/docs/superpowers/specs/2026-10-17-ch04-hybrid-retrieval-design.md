@@ -314,8 +314,12 @@ class Evidence:
 塞进 prompt 的顺序：奇数位升序 + 偶数位降序：
 
 ```
-[1, 3, 5, 7, 9, 10, 8, 6, 4, 2]
+k=10 → [1, 3, 5, 7, 9, 10, 8, 6, 4, 2]
+k=5  → [1, 3, 5, 4, 2]
 ```
+
+通式：`[n | n 为奇数且升序] + [n | n 为偶数且降序]`。k 为奇数时最后落单的奇数位
+（示例里的 5）落在第二个位置，最弱的证据仍在正中。
 
 最相关的两条落在首尾（模型中段注意力最弱），最不相关的压中间。
 编号不变，所以正文里的 `[n]` 仍指向正确证据。
@@ -349,8 +353,15 @@ class Evidence:
 | 检索层 | 0 命中，或最高分 < `RAG_MIN_RERANK_SCORE`（默认 0.3） | `retrieval_low_conf` | 确定性规则 |
 | 生成层 | 模型自评 `sufficient=false` | `self_check` | judge 模型 |
 
+这两道闸**只在线上链路（`hybrid_rerank`）生效**：评估脚本要量的就是「没有闸时四策略
+各自的表现」，所以评估跑检索时不做拒答、也不写池。反过来说，`RAG_MIN_RERANK_SCORE`
+只对带重排分的管线有意义；纯 BM25 / 纯向量策略没有重排分，不参与该闸的标定。
+
 `RAG_MIN_RERANK_SCORE` 用评估集的 8 条负样本 + 40 条正样本标定：取「正样本最低分」
-与「负样本最高分」之间的中点；标定结果与理由写进评估报告。
+与「负样本最高分」之间的中点；**若两侧分数重叠**（正样本最低分 < 负样本最高分），
+改取正样本 5 分位与负样本 95 分位的中点，并把重叠区间写进报告 —— 重叠本身就是要
+报出来的事实，不是要抹平的瑕疵。分数区间以 Task 0 实测为准（若接口返回 logits 而不是
+0~1 的 relevance，阈值按实测重新标定）。
 
 ### 9.2 自评 judge
 
@@ -445,9 +456,14 @@ query_faq 返回 {refused: true, source, reason, message}
  "behavior":"refuse","gold_anchors":[]}
 ```
 
-**gold 用唯一锚串**：跑评估时把锚串解析成 chunk_id，并断言「恰好命中 1 块」——
-解析到 0 块或多块都直接报错（前者是标注错，后者是锚串不唯一）。重切 chunk 后
-锚串仍然有效，不会像硬写 chunk_id 那样一改切分就全错。
+**gold 用锚串标注**：跑评估时在 `knowledge_chunks` 的 `questions` / `answer` 上做子串匹配，
+把锚串解析成 chunk_id 集合；gold 集合 = 各锚串命中块的**并集**。判定规则：
+
+- 某个锚串命中 **0 块** → 直接报错退出（标注写错了，或语料里根本没这段）；
+- 某个锚串命中 **> 3 块** → 打印警告（锚串太泛，建议加长），不中断；
+- 每个锚串命中的块数写进报告，方便回头修标注。
+
+锚串而不是硬写 chunk_id：重切 chunk 后锚串仍然有效，不会一改切分就全错。
 
 ### 11.2 指标
 
@@ -523,7 +539,7 @@ query_faq 返回 {refused: true, source, reason, message}
 | `test_tool_knowledge` | 出参向后兼容（原有键仍在）+ 新证据字段；refused 短路 |
 | `test_chat_citations` | 证据捕获、拒答短路不发起第二次模型调用、入池参数、`messages.citations` 落库 |
 | `test_db_models` | 两张新表 + `messages.citations` 逐列对齐 |
-| `test_probe_prompts` | 新增约束条款与引用规范逐字存在 |
+| `test_prompts`（扩展） | 新增约束条款与引用规范逐字存在 |
 
 **真机集成**：真 Milvus 建集合 + 型号 BM25 命中 + 过滤；真 MySQL 建表/列/仓库；
 真 `/rerank` 调一次。集成测试沿用 ch03 的 skip 策略（没起服务就跳过，不伪装通过）。
@@ -567,6 +583,7 @@ uv run python scripts/show_low_confidence.py    # 池子里应有这一行
 | 计划 | `docs/superpowers/plans/2026-10-17-ch04-hybrid-retrieval-plan.md` |
 | 留痕 | `dev-notes/ch04.md`（逐阶段追记）+ `dev-notes/ch04-eval-report.md` |
 | 检索 | `app/knowledge/query.py`、`hybrid.py`、`rerank.py`、`citations.py`、`sufficiency.py` |
+| 工具契约 | `app/tools/knowledge.py`、`registry.py`、`schemas.py`（`query_faq` 新增可选 `category`） |
 | 数据 | `app/db/models.py`、`repositories.py`、`sql/ch04-ddl.sql`（含 `messages.citations`） |
 | 语料 | `knowledge/商品型号手册.md`（新增） |
 | 评估 | `evals/ch04_cases.jsonl`、`evals/run_ch04_evals.py`、`evals/reports/` |
