@@ -292,3 +292,71 @@ def test_ch03_settings_reject_invalid_values(overrides):
     base.update(overrides)
     with pytest.raises(ValidationError):
         Settings(**base)
+
+
+# ---------------------------------------------------------------------------
+# ch04：重排与混合检索
+# ---------------------------------------------------------------------------
+
+
+def _ch04_base(**overrides):
+    base = {
+        "openai_base_url": "https://gw.example.com/v1",
+        "openai_api_key": "sk-test",
+        "openai_model": "m",
+    }
+    base.update(overrides)
+    return Settings(**base)
+
+
+def test_ch04_defaults():
+    """默认值必须与 spec §13 逐字一致 —— 它们是评估报告可复现的一部分。"""
+    s = _ch04_base()
+    assert s.rag_hybrid_top_k == 50
+    assert s.rag_candidate_k == 20
+    assert s.rag_rerank_top_n == 10
+    assert s.rag_min_rerank_score == 0.3
+    assert s.rag_query_rewrite is True
+    assert s.rerank_model == "BAAI/bge-reranker-v2-m3"
+
+
+def test_require_rerank_key_falls_back_to_embedding_key():
+    """同一家账户，不想让用户填两遍 Key。"""
+    s = _ch04_base(rerank_api_key="", embedding_api_key="sk-embed")
+    assert s.require_rerank_key() == "sk-embed"
+
+
+def test_require_rerank_key_prefers_its_own_key():
+    s = _ch04_base(rerank_api_key="sk-rerank", embedding_api_key="sk-embed")
+    assert s.require_rerank_key() == "sk-rerank"
+
+
+def test_require_rerank_key_points_at_both_keys():
+    s = _ch04_base(rerank_api_key="", embedding_api_key="")
+    with pytest.raises(ValueError, match="RERANK_API_KEY"):
+        s.require_rerank_key()
+
+
+def test_rerank_url_strips_trailing_slash():
+    s = _ch04_base(rerank_base_url="https://api.siliconflow.cn/v1/")
+    assert s.rerank_url() == "https://api.siliconflow.cn/v1/rerank"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"rag_min_rerank_score": 1.5},
+        {"rag_min_rerank_score": -0.1},
+        {"rag_hybrid_top_k": 0},
+        {"rag_hybrid_top_k": 999},
+        {"rag_candidate_k": 0},
+        {"rag_rerank_top_n": 0},
+        {"rerank_timeout": 0},
+        {"rag_rewrite_timeout": 0},
+    ],
+    ids=["score-over", "score-negative", "hybrid-k-zero", "hybrid-k-too-big",
+         "candidate-k-zero", "rerank-top-n-zero", "timeout-zero", "rewrite-timeout-zero"],
+)
+def test_ch04_settings_reject_invalid_values(overrides):
+    with pytest.raises(ValidationError):
+        _ch04_base(**overrides)

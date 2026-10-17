@@ -138,6 +138,62 @@ class Settings(BaseSettings):
         description="问答对语义去重的余弦阈值：≥ 该值判为同义问法。",
     )
 
+    # -- ch04：混合检索 + 重排 -------------------------------------------------
+    #
+    # 重排走另一家的 /rerank（本机没有 GPU，也不下模型）。默认复用嵌入那家
+    # （硅基流动）的账户，所以 api_key 默认留空、由 require_rerank_key() 回落。
+    rerank_base_url: str = Field(
+        default="https://api.siliconflow.cn/v1",
+        min_length=1,
+        description="重排服务的根地址（实际请求 {base}/rerank）。",
+    )
+    rerank_api_key: str = Field(
+        default="",
+        description=(
+            "重排服务的 API Key。**允许为空**：空则回落到 ``EMBEDDING_API_KEY``"
+            "（同一家账户）；两者都空时重排降级为 RRF 序，不让检索失败。"
+        ),
+    )
+    rerank_model: str = Field(
+        default="BAAI/bge-reranker-v2-m3",
+        min_length=1,
+        description="重排模型名。本章按用户指定固定为 bge-reranker-v2-m3。",
+    )
+    rerank_timeout: float = Field(
+        default=10.0, gt=0, description="单次重排请求超时（秒）。"
+    )
+    rag_hybrid_top_k: int = Field(
+        default=50,
+        ge=1,
+        le=200,
+        description="混合检索中**每一路**（dense / BM25）各召回多少条。",
+    )
+    rag_candidate_k: int = Field(
+        default=20,
+        ge=1,
+        le=200,
+        description="RRF 融合后送进重排的候选数。比 rerank_top_n 大，给重排留跨路候选。",
+    )
+    rag_rerank_top_n: int = Field(
+        default=10, ge=1, le=50, description="重排后保留、并作为证据编号的条数。"
+    )
+    rag_min_rerank_score: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "检索层低置信阈值：最高重排分低于它就拒答并写低置信度池。"
+            "默认值用评估集的正负样本标定，见 dev-notes/ch04-eval-report.md。"
+        ),
+    )
+    rag_query_rewrite: bool = Field(
+        default=True,
+        description="口语问法是否调模型归一改写。关掉只走静态表（排障用）。",
+    )
+    rag_rewrite_timeout: float = Field(
+        default=3.0, gt=0, description="单次 Query 改写请求超时（秒）。"
+    )
+
     def require_embedding_key(self) -> str:
         """返回嵌入服务密钥；没配就抛可读错误。
 
@@ -160,6 +216,29 @@ class Settings(BaseSettings):
     def embedding_url(self) -> str:
         """``{EMBEDDING_BASE_URL}/embeddings``，去掉 base 末尾多余的斜杠。"""
         return f"{self.embedding_base_url.rstrip('/')}/embeddings"
+
+    def require_rerank_key(self) -> str:
+        """返回重排服务密钥；自己的没配就用嵌入那家的（同一账户）。
+
+        为什么允许回落：硅基流动一个账户同时供 ``/embeddings`` 与 ``/rerank``，
+        让用户为同一把 Key 填两遍只会制造「填了一处、另一处 401」的排查成本。
+
+        为什么两者都空时不抛在构造期：与 ``require_embedding_key`` 同理 ——
+        离线测试与 ``--status`` 不该因为没配 Key 就崩。真到要发请求时由
+        调用方决定是降级（重排可降级）还是报错。
+        """
+        key = self.rerank_api_key or self.embedding_api_key
+        if not key:
+            raise ValueError(
+                "缺少 RERANK_API_KEY（硅基流动账户 API Key）。"
+                "可以留空复用 EMBEDDING_API_KEY，或单独设置；"
+                f"请检查 {ENV_FILE}，或参考 .env.example。"
+            )
+        return key
+
+    def rerank_url(self) -> str:
+        """``{RERANK_BASE_URL}/rerank``，去掉 base 末尾多余的斜杠。"""
+        return f"{self.rerank_base_url.rstrip('/')}/rerank"
 
     def database_url(self) -> str:
         """拼出 SQLAlchemy 用的 MySQL 连接串。
