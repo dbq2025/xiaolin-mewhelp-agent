@@ -338,3 +338,22 @@ async def rebuild(
     """
     await vector_store.reset()
     await chunk_repo.truncate()
+
+
+async def reindex(
+    *, chunk_repo: KnowledgeChunkRepository, vector_store: VectorStore
+) -> int:
+    """重建向量索引，**保留全部原文**（含挖矿产物）。
+
+    与 :func:`rebuild` 的区别：不 ``truncate``，而是把每块打回 ``pending`` 并清掉
+    ``vector_id``，之后 ``vectorize_pending`` 会把它们全部重新写进新集合。
+
+    为什么需要这条路：ch04 的 BM25 字段与 analyzer 只能在**建集合时**声明，
+    所以集合必须 drop 重建；但 ``knowledge_chunks`` 里可能躺着从真实对话挖出来的
+    问答对（``content_type='mined'``），清表就把它们一起删了 —— 那是最贵的数据
+    （要花 LLM 费用重挖，且内容未必一样）。
+
+    :return: 被打回 ``pending`` 的块数。
+    """
+    await vector_store.reset()
+    return await chunk_repo.reset_status()

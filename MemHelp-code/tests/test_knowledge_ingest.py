@@ -147,6 +147,47 @@ async def test_vector_records_carry_bm25_text_and_metadata(sqlite_session, sampl
     assert len(first.id) == len(str(int(first.id)))  # 主键是 str(chunk.id)
 
 
+async def test_reindex_keeps_rows_and_resets_status(sqlite_session, sample_doc):
+    """重建向量索引不能清表：``mined`` 那类数据重挖一次要花 LLM 费用。"""
+    from app.knowledge.ingest import reindex
+
+    repo, store, embedder = _repo(sqlite_session), _FakeStore(), _FakeEmbedder()
+    await ingest_markdown([sample_doc], chunk_repo=repo, vector_store=store, embedder=embedder)
+    assert await repo.count_by_status() == {"pending": 0, "done": 2}
+
+    pending = await reindex(chunk_repo=repo, vector_store=store)
+
+    assert pending == 2
+    assert await repo.count_by_status() == {"pending": 2, "done": 0}
+    assert len(store.rows) == 0          # 集合被重建
+    assert store.reset_calls == 1
+
+
+async def test_rebuild_still_clears_the_table(sqlite_session, sample_doc):
+    """``--rebuild`` 的语义保持原样：清表 + 重建集合。"""
+    from app.knowledge.ingest import rebuild
+
+    repo, store, embedder = _repo(sqlite_session), _FakeStore(), _FakeEmbedder()
+    await ingest_markdown([sample_doc], chunk_repo=repo, vector_store=store, embedder=embedder)
+
+    await rebuild(chunk_repo=repo, vector_store=store)
+
+    assert await repo.count_by_status() == {"pending": 0, "done": 0}
+
+
+async def test_vectorize_pending_after_reindex_rewrites_everything(sqlite_session, sample_doc):
+    from app.knowledge.ingest import reindex, vectorize_pending
+
+    repo, store, embedder = _repo(sqlite_session), _FakeStore(), _FakeEmbedder()
+    await ingest_markdown([sample_doc], chunk_repo=repo, vector_store=store, embedder=embedder)
+
+    await reindex(chunk_repo=repo, vector_store=store)
+    written = await vectorize_pending(chunk_repo=repo, vector_store=store, embedder=embedder)
+
+    assert written == 2
+    assert await repo.count_by_status() == {"pending": 0, "done": 2}
+
+
 async def test_ingest_is_idempotent_on_rerun(sqlite_session, sample_doc):
     repo, store, embedder = _repo(sqlite_session), _FakeStore(), _FakeEmbedder()
     first = await ingest_markdown(

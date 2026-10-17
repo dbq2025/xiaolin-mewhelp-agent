@@ -47,6 +47,7 @@ from app.knowledge.ingest import (  # noqa: E402
     ingest_faq_table,
     ingest_markdown,
     rebuild,
+    reindex,
     vectorize_pending,
 )
 from app.knowledge.vector_store import MilvusVectorStore  # noqa: E402
@@ -63,7 +64,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--faq-table", action="store_true", help="把存量 faq 表也灌进知识库"
     )
     parser.add_argument(
-        "--rebuild", action="store_true", help="先清空 Milvus 集合与 knowledge_chunks"
+        "--rebuild",
+        action="store_true",
+        help="先清空 Milvus 集合与 knowledge_chunks（会丢掉挖矿产物）",
+    )
+    parser.add_argument(
+        "--reindex",
+        action="store_true",
+        help=(
+            "只重建向量索引：drop 集合并把所有块打回 pending，**保留原文**"
+            "（含 mined）。schema 升级（如 ch04 的 BM25 字段）时用这个"
+        ),
     )
     parser.add_argument(
         "--max-chunks",
@@ -118,7 +129,10 @@ async def _run(args: argparse.Namespace) -> int:
     vector_store = MilvusVectorStore(
         settings.milvus_uri, settings.milvus_collection, settings.embedding_dim
     )
-    await vector_store.ensure_collection()
+    # 重建路径**不能**先 ensure：旧集合（ch03 的 id+vector）会被结构自检拦下，
+    # 而那正是本次要替换掉的东西。重建分支会自己 drop 再按新 schema 建。
+    if not (args.rebuild or args.reindex):
+        await vector_store.ensure_collection()
 
     if args.status:
         with factory() as session:
@@ -131,9 +145,19 @@ async def _run(args: argparse.Namespace) -> int:
     with factory() as session:
         repositories = Repositories.from_session(session)
 
+        if args.rebuild and args.reindex:
+            print("--rebuild 与 --reindex 不能同时用：一个会清表，一个要保留原文")
+            return 1
+
         if args.rebuild:
             await rebuild(chunk_repo=repositories.knowledge, vector_store=vector_store)
             print("已清空 Milvus 集合与 knowledge_chunks")
+
+        if args.reindex:
+            pending = await reindex(
+                chunk_repo=repositories.knowledge, vector_store=vector_store
+            )
+            print(f"已重建集合，{pending} 块打回 pending（原文保留），接下来重新向量化")
 
         report = IngestReport()
         written_total = 0

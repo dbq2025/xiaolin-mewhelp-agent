@@ -358,6 +358,131 @@ body {
 }
 .messages::-webkit-scrollbar-thumb:hover { background: #c3c9d4; }
 
+/* ---------- ch04：引用角标 ---------- */
+
+.cite {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  margin: 0 1px;
+  border: 0;
+  border-radius: 5px;
+  background: #e8eefc;
+  color: #1d4ed8;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  vertical-align: 1px;
+  cursor: pointer;
+  transition: background .15s ease;
+}
+
+.cite:hover { background: #cfdcfb; }
+.cite:focus-visible { outline: 2px solid #2563eb; outline-offset: 1px; }
+
+/* ---------- ch04：证据抽屉 ---------- */
+
+.cite-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: min(420px, 92vw);
+  height: 100vh;
+  background: #fff;
+  border-left: 1px solid var(--line, #e6e8ee);
+  box-shadow: -12px 0 32px rgba(15, 23, 42, .12);
+  padding: 18px 20px;
+  overflow-y: auto;
+  z-index: 40;
+}
+
+.cite-drawer[hidden] { display: none; }
+
+.cite-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.cite-drawer-title { font-size: 13px; font-weight: 600; color: #6b7280; }
+
+.cite-drawer-close {
+  border: 0;
+  background: transparent;
+  font-size: 20px;
+  line-height: 1;
+  color: #9aa2af;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+
+.cite-drawer-close:hover { color: #374151; }
+
+.cite-path {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1f2937;
+  margin-bottom: 4px;
+  word-break: break-all;
+}
+
+.cite-meta { font-size: 11.5px; color: #9aa2af; margin-bottom: 12px; }
+
+.cite-quote {
+  margin: 0;
+  padding: 12px 14px;
+  background: #f8fafc;
+  border-left: 3px solid #c7d2fe;
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #374151;
+  white-space: pre-wrap;
+}
+
+/* ---------- ch04：满意度反馈 ---------- */
+
+.feedback {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: #9aa2af;
+}
+
+.feedback-label { margin-right: 2px; }
+
+.feedback-btn {
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 7px;
+  padding: 1px 5px;
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+  filter: grayscale(1);
+  opacity: .65;
+  transition: all .15s ease;
+}
+
+.feedback-btn:hover:not(:disabled) { opacity: 1; background: #f1f5f9; }
+
+.feedback-btn.active {
+  filter: none;
+  opacity: 1;
+  border-color: #c7d2fe;
+  background: #eef2ff;
+}
+
+.feedback-btn:disabled { cursor: default; }
+
+.feedback-note { color: #16a34a; font-size: 11px; }
+
 /* ---------- 窄屏 ---------- */
 
 @media (max-width: 720px) {

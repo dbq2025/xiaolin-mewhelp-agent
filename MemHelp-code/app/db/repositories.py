@@ -640,6 +640,24 @@ class KnowledgeChunkRepository:
     async def truncate(self) -> None:
         await _run(self._truncate)
 
+    def _reset_status(self) -> int:
+        """把**所有**块打回 ``pending`` 并清掉 ``vector_id``，原文本行不动。
+
+        用途：Milvus 集合因 schema 升级被重建（ch04 的 BM25 字段只能在建集合时声明），
+        而 ``knowledge_chunks`` 里的原文与「挖矿」产物要保留。只清表会丢数据；
+        只删向量又会让 ``vectorize_status='done'`` 说谎 —— 续跑只拣 ``pending``，
+        于是那些块永远回不到索引里，表现为「库里明明有，检索就是查不到」。
+        """
+        result = self._session.execute(
+            update(KnowledgeChunk).values(vectorize_status="pending", vector_id=None)
+        )
+        self._session.commit()
+        return int(result.rowcount or 0)
+
+    async def reset_status(self) -> int:
+        """把所有块打回 ``pending``，返回受影响行数。"""
+        return await _run(self._reset_status)
+
     def _list_by_scope(self, root: str) -> list[ChunkRow]:
         """取某篇文档派生出的全部块（``section_path`` 以该标题为根）。
 

@@ -241,6 +241,9 @@
     if (event === 'done') {
       ctx.finish();
       attachTools(ctx.bot, data.tools);
+      // 引用与反馈都挂在最终答案上：流式过程中 cites 还没到，先不管。
+      decorateCitations(ctx.bot.bubble, data.citations);
+      attachFeedback(ctx.bot);
       if (els.stats.checked) {
         const s = el('div', 'stats');
         s.innerHTML = `上下文：保留 <code>${data.kept}</code> 条，`
@@ -254,6 +257,141 @@
     if (event === 'error') {
       ctx.fail(data);
     }
+  }
+
+  // ------------------------------------------------------- 引用角标与证据抽屉
+
+  /* ch04：把正文里的 [n] 变成可点角标。
+   *
+   * 为什么不在 renderMarkdown 里用正则替换：那是在**转义后的 HTML 字符串**上做替换，
+   * 很容易把类名、属性里的方括号也换掉。这里走 DOM 文本节点 —— 只碰显示文本，
+   * 天然不会破坏标签结构。
+   */
+  function decorateCitations(bubble, citations) {
+    if (!citations || !citations.length) return;
+    const byNumber = new Map(citations.map((c) => [c.n, c]));
+    const walker = document.createTreeWalker(bubble, NodeFilter.SHOW_TEXT, null);
+    const targets = [];
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      if (/\[\d{1,2}\]/.test(node.nodeValue)) targets.push(node);
+    }
+
+    targets.forEach((node) => {
+      const pieces = node.nodeValue.split(/(\[\d{1,2}\])/g);
+      const frag = document.createDocumentFragment();
+      pieces.forEach((piece) => {
+        const match = /^\[(\d{1,2})\]$/.exec(piece);
+        const cite = match ? byNumber.get(Number(match[1])) : null;
+        if (!cite) {
+          frag.appendChild(document.createTextNode(piece));
+          return;
+        }
+        const button = el('button', 'cite', match[1]);
+        button.type = 'button';
+        button.title = cite.section_path || '查看来源';
+        button.addEventListener('click', () => openEvidence(cite));
+        frag.appendChild(button);
+      });
+      node.parentNode.replaceChild(frag, node);
+    });
+  }
+
+  let drawer = null;   // 懒创建：没引用时页面上不该多一个空面板
+
+  function ensureDrawer() {
+    if (drawer) return drawer;
+    drawer = el('aside', 'cite-drawer');
+    drawer.hidden = true;
+
+    const head = el('div', 'cite-drawer-head');
+    head.appendChild(el('span', 'cite-drawer-title', '来源'));
+    const close = el('button', 'cite-drawer-close', '×');
+    close.type = 'button';
+    close.setAttribute('aria-label', '关闭');
+    close.addEventListener('click', () => { drawer.hidden = true; });
+    head.appendChild(close);
+
+    const path = el('div', 'cite-path');
+    const meta = el('div', 'cite-meta');
+    const quote = el('blockquote', 'cite-quote');
+
+    drawer.appendChild(head);
+    drawer.appendChild(path);
+    drawer.appendChild(meta);
+    drawer.appendChild(quote);
+    document.body.appendChild(drawer);
+    return drawer;
+  }
+
+  function openEvidence(cite) {
+    const panel = ensureDrawer();
+    panel.querySelector('.cite-path').textContent = cite.section_path || '（没有章节路径）';
+    panel.querySelector('.cite-meta').textContent =
+      `来源 chunk #${cite.chunk_id}` + (cite.category ? ` · ${cite.category}` : '');
+    panel.querySelector('.cite-quote').textContent = cite.quote || '（没有原文快照）';
+    panel.hidden = false;
+  }
+
+  // ---------------------------------------------------------- 满意度反馈
+  //
+  // 纯前端采集：一次点击即锁定，写进 localStorage，供后续做数据飞轮时读取。
+  // 键里带序号，刷新后能对上同一条回答；序号取「当前是第几条 bot 消息」，
+  // 与 restoreHistory 的渲染顺序一致。
+
+  const FEEDBACK_PREFIX = 'mewhelp.feedback.';
+
+  function botIndexOf(row) {
+    const rows = Array.from(document.querySelectorAll('.row.bot'));
+    return rows.indexOf(row);
+  }
+
+  function feedbackKey(index) {
+    return `${FEEDBACK_PREFIX}${sessionId || 'anon'}.${index}`;
+  }
+
+  function applyFeedbackLock(box, choice) {
+    box.dataset.choice = choice;
+    box.querySelectorAll('button').forEach((button) => {
+      const pressed = button.dataset.vote === choice;
+      button.setAttribute('aria-pressed', pressed ? 'true' : 'false');
+      button.disabled = true;
+      button.classList.toggle('active', pressed);
+    });
+    const note = box.querySelector('.feedback-note');
+    if (note) note.textContent = '已反馈';
+  }
+
+  function attachFeedback(target) {
+    const existing = target.wrap.querySelector('.feedback');
+    if (existing) existing.remove();
+
+    const index = botIndexOf(target.row);
+    const box = el('div', 'feedback');
+    box.appendChild(el('span', 'feedback-label', '这条回答有帮助吗'));
+
+    ['up', 'down'].forEach((vote) => {
+      const button = el('button', 'feedback-btn', vote === 'up' ? '👍' : '👎');
+      button.type = 'button';
+      button.dataset.vote = vote;
+      button.setAttribute('aria-pressed', 'false');
+      button.addEventListener('click', () => {
+        if (box.dataset.choice) return;   // 一次性：已锁就不再写
+        box.dataset.choice = vote;
+        try {
+          localStorage.setItem(feedbackKey(index), vote);
+        } catch { /* 隐私模式写不进去也别挡住聊天 */ }
+        applyFeedbackLock(box, vote);
+      });
+      box.appendChild(button);
+    });
+
+    box.appendChild(el('span', 'feedback-note'));
+    target.wrap.appendChild(box);
+
+    let saved = null;
+    try { saved = localStorage.getItem(feedbackKey(index)); } catch { saved = null; }
+    if (saved === 'up' || saved === 'down') applyFeedbackLock(box, saved);
   }
 
   // ------------------------------------------------------------------ 历史回读
@@ -292,6 +430,9 @@
             : '<span style="color:#9aa2af">（客服没有返回内容）</span>';
           // 徽章随历史一起还原 —— 这正是「刷新后徽章还在」的实现
           attachTools(row, m.tools);
+          // 引用与反馈同理：刷新后角标仍可点、已反馈仍是已反馈
+          decorateCitations(row.bubble, m.citations);
+          attachFeedback(row);
         }
       });
       scrollToBottom(true);
