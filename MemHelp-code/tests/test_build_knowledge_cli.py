@@ -66,3 +66,16 @@ def test_summarise_treats_pending_as_inconsistent_even_when_counts_match(cli):
     """还有 pending 就说明没补完 —— 即使 done 数与 Milvus 相等也不能说「一致」。"""
     text = cli.summarise({"pending": 3, "done": 8}, 8)
     assert "不一致" in text
+
+
+def test_remaining_budget_is_shared_across_build_steps(cli):
+    """``--max-chunks`` 是**整次运行**的预算，不是每个建库步骤各一份。
+
+    各给一份的话，`--max-chunks 5` 在「文档 + FAQ 表」两个步骤里会写 10 条，
+    中断演示的预期数字（pending = 总数-5）就跟着错。
+    """
+    assert cli.remaining_budget(None, 7) is None
+    assert cli.remaining_budget(5, 0) == 5
+    assert cli.remaining_budget(5, 3) == 2
+    assert cli.remaining_budget(5, 5) == 0
+    assert cli.remaining_budget(5, 9) == 0  # 不会变成负数

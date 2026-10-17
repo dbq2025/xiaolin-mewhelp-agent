@@ -47,9 +47,12 @@ class _FakeLlm:
     def __init__(self, pairs_factory) -> None:
         self._pairs_factory = pairs_factory
         self.calls = 0
+        self.methods: list[str | None] = []
 
-    def with_structured_output(self, schema):
+    def with_structured_output(self, schema, **kwargs):
         assert schema is ExtractionBatch
+        # 必须走 tool-calling：json_schema 会被 DeepSeek 网关 400 掉
+        self.methods.append(kwargs.get("method"))
         self.calls += 1
         return _FakeStructured(self._pairs_factory)
 
@@ -101,6 +104,8 @@ async def test_batches_are_sized_and_each_gets_a_batch_no(sqlite_session):
 
     assert report.batches == 3
     assert llm.calls == 3
+    # 必须走 tool-calling（json_schema 会被 DeepSeek 网关 400 掉）
+    assert set(llm.methods) == {"function_calling"}
     rows = await repos.qa_staging.list_by_status("extracted")
     assert len(rows) == 3
     assert len({row.batch_no for row in rows}) == 3
@@ -110,7 +115,7 @@ async def test_failed_batch_writes_nothing_and_other_batches_continue(sqlite_ses
     calls = {"n": 0}
 
     class _FlakyLlm(_FakeLlm):
-        def with_structured_output(self, schema):
+        def with_structured_output(self, schema, **kwargs):
             calls["n"] += 1
             if calls["n"] == 2:
                 class _Boom:

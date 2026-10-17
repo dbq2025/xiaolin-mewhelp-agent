@@ -283,3 +283,37 @@ async def test_rebuild_clears_vectors_before_rows(sqlite_session, sample_doc):
     assert store.reset_calls == 1
     assert await store.count() == 0
     assert await repo.count_by_status() == {"pending": 0, "done": 0}
+
+
+async def test_multi_chunk_section_does_not_collapse_in_the_database(sqlite_session):
+    """同一个 section 切成的多块必须是多行 —— 不能被自然键合并成一行。
+
+    这条是**真事故的回填**：大表格被切成两块，两块共用
+    ``(content_type, section_path, questions)``，于是第二块覆盖了第一块，
+    表格后半截静默消失；建库报告只显示 ``created`` 比 ``total`` 少，不报错。
+    修法是切分器给同节的第 2、3…块在 ``section_path`` 后加 ``#n``。
+    """
+    path = Path(__file__).resolve().parent / "_tmp_ch03_table.md"
+    rows = "\n".join(f"| P{i} | {i} 元 |" for i in range(1, 26))
+    path.write_text(
+        f"# 价格表\n\n## 运费\n\n| 商品 | 价格 |\n| --- | --- |\n{rows}\n", encoding="utf-8"
+    )
+    try:
+        repo, store, embedder = _repo(sqlite_session), _FakeStore(), _FakeEmbedder()
+        report = await ingest_markdown(
+            [path],
+            chunk_repo=repo,
+            vector_store=store,
+            embedder=embedder,
+            max_chars=300,
+            overlap=0,
+            vector_limit=0,
+        )
+    finally:
+        path.unlink(missing_ok=True)
+
+    assert report.chunks_total == report.chunks_created > 1
+    rows_in_db = await repo.list_pending()
+    assert len(rows_in_db) == report.chunks_total
+    # 两个块都还在，没有任何一行被覆盖掉
+    assert all("| 商品 | 价格 |" in row.answer for row in rows_in_db)

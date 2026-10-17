@@ -331,16 +331,24 @@ def split_markdown(
             continue
 
         units = _body_units(body, max_chars, section.title)
+        base_path = " / ".join(section.path)
+        emitted = 0
         for piece in _pack(units, max_chars, overlap):
             answer = piece.strip()
             if not answer:
                 continue
+            emitted += 1
+            # 同一节切出的第 2、3…块，在 section_path 后加序号。
+            # **这不只是给人看的**：section_path 是仓库层自然键的一部分
+            # （content_type + section_path + questions）。同节多块共用同一个路径时，
+            # 写入 MySQL 会被判成同一行 —— 后一块覆盖前一块，大表格后半截静默消失，
+            # 建库报告只会显示 created 比 total 少，不报错。
             chunks.append(
                 Chunk(
                     category=" / ".join(section.path[:-1]) or section.path[-1],
                     questions=section.title,
                     answer=answer,
-                    section_path=" / ".join(section.path),
+                    section_path=base_path if emitted == 1 else f"{base_path} #{emitted}",
                     content_type=content_type,
                     is_key_clause=section.is_key_clause,
                     ordinal=ordinal,

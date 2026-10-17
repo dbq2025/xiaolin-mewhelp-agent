@@ -238,7 +238,10 @@ async def extract_batch(llm: Any, digests: Sequence[ConversationDigest]) -> list
     :raises Exception: 上游故障原样抛出，由 ``mine_conversations`` 按批处理。
     """
     prompt = build_extraction_prompt(digests)
-    structured = llm.with_structured_output(ExtractionBatch)
+    # 必须显式 method="function_calling"：langchain-openai 对 Pydantic schema 默认用
+    # json_schema（发 response_format），而 DeepSeek 网关会直接 400
+    # "This response_format type is unavailable now"。与 ``app/extract.py`` 同一条纪律。
+    structured = llm.with_structured_output(ExtractionBatch, method="function_calling")
     result = await structured.ainvoke([SystemMessage(content=prompt)])
     pairs = getattr(result, "pairs", None) or []
     return _filter_pairs(pairs, {digest.session_id for digest in digests})

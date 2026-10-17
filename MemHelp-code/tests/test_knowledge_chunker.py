@@ -150,6 +150,30 @@ def test_small_table_stays_in_one_block():
     assert "| P1 | 9 元 |" in chunks[0].answer and "| P2 | 19 元 |" in chunks[0].answer
 
 
+def test_multi_chunk_sections_get_unique_section_paths():
+    """同一节切成的多块，``section_path`` 必须互不相同。
+
+    这是**自然键的一部分**（``content_type + section_path + questions``）：两块
+    路径相同的话，写入 MySQL 时会被判成同一行 —— 后一块覆盖前一块，
+    大表格的后半截就此消失，而且建库报告只会显示 ``created`` 比 ``total`` 少，
+    不报任何错。
+    """
+    chunks = split_markdown(_big_table_doc(), content_type="manual", max_chars=300, overlap=0)
+    paths = [chunk.section_path for chunk in chunks]
+    assert len(paths) == len(set(paths))
+    assert paths[0] == "价格表 / 运费"
+    assert paths[1] == "价格表 / 运费 #2"
+
+
+def test_multi_chunk_non_table_section_also_gets_suffixes():
+    body = "。".join(["这是一句足够长的售后说明文字"] * 40) + "。"
+    chunks = split_markdown(
+        f"# 手册\n\n## 长篇\n\n{body}", content_type="manual", max_chars=150, overlap=0
+    )
+    assert len(chunks) > 2
+    assert len({chunk.section_path for chunk in chunks}) == len(chunks)
+
+
 # ---------------------------------------------------------------------------
 # 关键条款与编码
 # ---------------------------------------------------------------------------

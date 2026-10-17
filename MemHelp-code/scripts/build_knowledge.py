@@ -87,6 +87,17 @@ def summarise(db_counts: dict[str, int], milvus_count: int) -> str:
     )
 
 
+def remaining_budget(max_chunks: int | None, written: int) -> int | None:
+    """``--max-chunks`` 是**整次运行**的预算，不是每个建库步骤各一份。
+
+    文档建库与 FAQ 建库都要向量化；若各给一次预算，`--max-chunks 5` 会写成 10 条，
+    与「本次最多补 5 条」的直觉不符，中断演示的预期数字也会跟着错。
+    """
+    if max_chunks is None:
+        return None
+    return max(max_chunks - written, 0)
+
+
 def _collect_docs(target: str) -> list[Path]:
     path = Path(target)
     if path.is_dir():
@@ -122,6 +133,7 @@ async def _run(args: argparse.Namespace) -> int:
             print("已清空 Milvus 集合与 knowledge_chunks")
 
         report = IngestReport()
+        written_total = 0
         if args.docs:
             docs = _collect_docs(args.docs)
             if not docs:
@@ -134,8 +146,9 @@ async def _run(args: argparse.Namespace) -> int:
                 embedder=embedder,
                 max_chars=settings.chunk_max_chars,
                 overlap=settings.chunk_overlap,
-                vector_limit=args.max_chunks,
+                vector_limit=remaining_budget(args.max_chunks, written_total),
             )
+            written_total += report.vectors_written
             print(
                 f"文档建库：docs={report.docs} total={report.chunks_total} "
                 f"created={report.chunks_created} updated={report.chunks_updated} "
@@ -148,8 +161,9 @@ async def _run(args: argparse.Namespace) -> int:
                 chunk_repo=repositories.knowledge,
                 vector_store=vector_store,
                 embedder=embedder,
-                vector_limit=args.max_chunks,
+                vector_limit=remaining_budget(args.max_chunks, written_total),
             )
+            written_total += faq_report.vectors_written
             print(
                 f"FAQ 表建库：total={faq_report.chunks_total} "
                 f"created={faq_report.chunks_created} updated={faq_report.chunks_updated} "

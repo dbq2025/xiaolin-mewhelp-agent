@@ -226,13 +226,18 @@ def test_get_embedder_is_a_process_singleton():
     os.getenv("MEMHELP_TEST_EMBED") != "1", reason="需要真实硅基流动 API"
 )
 async def test_real_api_is_1024_dim_and_semantic():
+    """真 API 验收：1024 维、可区分同义与无关。
+
+    这是**集成**用例，它本来就依赖宿主机配置，所以显式读项目 `.env`
+    （``_env_file=`` 覆盖掉套件为隔离而置空的那个设置）。
+    """
     import numpy as np
 
-    from app.config import get_settings
+    from app.config import ENV_FILE, Settings
     from app.knowledge.embedder import get_embedder, reset_embedders
 
     reset_embedders()
-    settings = get_settings()
+    settings = Settings(_env_file=ENV_FILE)
     settings.require_embedding_key()  # 没密钥时给一条明确信息，而不是 401
     embedder = get_embedder(settings)
 
