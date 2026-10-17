@@ -154,6 +154,14 @@ class StagingRow:
     status: str
 
 
+@dataclass(frozen=True)
+class SessionRow:
+    """会话的轻量视图（挖矿时用来枚举「有哪些会话」）。"""
+
+    session_id: str
+    status: str
+
+
 def _field(row: object, name: str) -> Any:
     """从 dict 或任意对象上取一个字段。
 
@@ -208,6 +216,23 @@ class ConversationRepository:
 
     async def find_id(self, session_id: str) -> int | None:
         return await _run(self._find_id, session_id)
+
+    def _list_sessions(self, limit: int | None) -> list[SessionRow]:
+        stmt = select(Conversation.session_id, Conversation.status).order_by(Conversation.id)
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        return [
+            SessionRow(session_id=str(session_id), status=str(status))
+            for session_id, status in self._session.execute(stmt).all()
+        ]
+
+    async def list_sessions(self, limit: int | None = None) -> list[SessionRow]:
+        """按创建顺序枚举会话（ch03 挖矿的输入）。
+
+        只返回 ``session_id`` 与 ``status``：挖矿只需要「有哪些会话」以及
+        「是否已结束」，不需要把整个会话对象搬出来。
+        """
+        return await _run(self._list_sessions, limit)
 
 
 # ---------------------------------------------------------------------------

@@ -473,3 +473,16 @@ async def test_faq_repository_list_all_returns_every_row(sqlite_session):
     assert [r.question for r in rows] == ["退货政策", "运费怎么算"]
     assert rows[1].category == "物流"
 
+
+async def test_list_sessions_returns_ids_in_creation_order(sqlite_session):
+    """挖矿要先枚举「有哪些会话」——没有这个方法，定时任务只能一张表一张表地摸。"""
+    from app.db.repositories import ConversationRepository
+
+    repo = ConversationRepository(sqlite_session)
+    await repo.upsert_by_session("s-1", "anonymous")
+    await repo.upsert_by_session("s-2", "anonymous")
+
+    rows = await repo.list_sessions()
+    assert [r.session_id for r in rows] == ["s-1", "s-2"]
+    assert [r.session_id for r in await repo.list_sessions(limit=1)] == ["s-1"]
+
