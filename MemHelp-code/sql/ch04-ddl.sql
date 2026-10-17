@@ -17,6 +17,11 @@ CREATE TABLE low_confidence_questions (
   reason          TEXT            NULL                    COMMENT '判不能的原因,留作复盘',
   created_at      DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '入池时间',
   PRIMARY KEY (id),
+  -- 索引名用 DDL 原样的 idx_source / idx_created_at。ORM 里写的是 idx_lcq_source /
+  -- idx_lcq_created_at —— **只有索引名不同**：SQLite 的索引名是库级全局的，
+  -- 直接用 idx_source 会和 qa_extraction_staging 的索引撞名（ch02 的
+  -- idx_category → idx_chunks_category 是同一条约定）。MySQL 只在表内唯一，
+  -- 两种名字都合法，代码也从不引用索引名。
   KEY idx_source (source),
   KEY idx_created_at (created_at),
   CONSTRAINT fk_lcq_conversation FOREIGN KEY (conversation_id) REFERENCES conversations (id)
@@ -55,3 +60,19 @@ CREATE TABLE faith_cases (
   KEY idx_status (status),
   KEY idx_last_seen_at (last_seen_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='ch04 忠实度编造个案台账';
+
+-- =============================================================
+-- ch04 追加：引用证据快照
+--
+-- 为什么需要这一列：聊天页的引用角标要能「刷新后还点得开」。角标 [n] 只在当轮
+-- SSE 里存在的话，刷新一次就全成了死链，与 ch02「刷新后工具徽章还在」的标准不一致。
+--
+-- 为什么存快照而不是只存 chunk_id：chunk 日后会被重切或删除（--rebuild 会清表重建），
+-- 审计时要能看到**当时**喂给模型的到底是什么文本。只留 id 的话，一次重建就把
+-- 历史引用变成悬空指针 —— 而那正是「用户投诉的回答到底依据了什么」最需要答案的时刻。
+-- 结构：[{n, chunk_id, section_path, category, quote}]，与 faith_cases.citations 同构。
+-- =============================================================
+
+ALTER TABLE messages
+  ADD COLUMN citations JSON NULL
+  COMMENT '本轮引用快照:[{n,chunk_id,section_path,category,quote}];刷新后引用仍可点开';

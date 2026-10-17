@@ -37,6 +37,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -78,8 +79,7 @@ VECTORIZE_STATUSES: tuple[str, ...] = ("pending", "done")
 #: 分不清「这条是文档里的还是对话里挖的」。
 CONTENT_TYPES: tuple[str, ...] = ("faq", "policy", "manual", "mined")
 
-#: ch03：对话抽取暂存表的状态。
-#:
+#: ch03：对话抽取暂存表的状态。#:
 #: **真库是 5 值超集**（实测 ``SHOW CREATE TABLE``：后续章节加了
 #: ``approved`` / ``rejected``）。ORM 必须带上这两个值：只写 3 值的话，读到别人
 #: 写进去的 ``approved`` 行会在加载时抛 ``LookupError``，表现为「暂存表偶尔读不出来」。
@@ -147,6 +147,12 @@ class Message(Base):
     #: ``TypeError: tool_call() got an unexpected keyword argument 'duration_ms'``。
     #: 所以模型历史保持干净的 ``{name, args, id}``，界面信息另开一列。
     tool_traces: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    #: ch04：本轮引用证据的**快照**，形如
+    #: ``[{"n":1,"chunk_id":3,"section_path":"…","category":"…","quote":"…"}]``。
+    #:
+    #: 为什么存快照而不是只存 chunk_id：chunk 日后会被重切/删除，审计时要能看到
+    #: **当时**喂给模型的到底是什么文本；只留 id 的话，一次重建就把证据变成悬空指针。
+    citations: Mapped[list | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
     )
@@ -316,4 +322,112 @@ class QaStaging(Base):
     __table_args__ = (
         Index("idx_batch_no", "batch_no"),
         Index("idx_status", "status"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# ch04：低置信度问题池 + 编造个案台账
+# ---------------------------------------------------------------------------
+
+#: 低置信度问题的入池入口。取值与 ``sql/ch04-ddl.sql`` 的 ENUM 逐字相同。
+#:
+#: - ``retrieval_low_conf``：检索 0 命中，或最高分低于 ``RAG_MIN_RERANK_SCORE``；
+#: - ``self_check``：生成前模型自评「证据不够答」；
+#: - ``user_feedback``：用户反馈未解决（留给后续章节，本章不写这个值）。
+LOW_CONFIDENCE_SOURCES: tuple[str, ...] = (
+    "retrieval_low_conf",
+    "self_check",
+    "user_feedback",
+)
+
+#: 编造个案台账的处置状态（中文取值，与 DDL 一致）。
+FAITH_CASE_STATUSES: tuple[str, ...] = ("未解决", "已解决", "无需解决")
+
+
+class LowConfidenceQuestion(Base):
+    """低置信度问题池 —— 客服「答不上来」的原话沉淀。
+
+    这张表是数据飞轮的入口：一条原话 + 它为什么答不上来，比一句
+    「今天拒答了 12 次」有用得多。``reason`` 留的是复盘材料，不是给用户看的。
+
+    ``conversation_id`` 可空：池子允许收进来路不明的问题（人工补录、离线评测），
+    有来源会话时才填 —— 但填了就必须指向真实会话（外键）。
+    """
+
+    __tablename__ = "low_confidence_questions"
+
+    id: Mapped[int] = mapped_column(_AUTOINC_PK, primary_key=True, autoincrement=True)
+    conversation_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    #: 用户原话（带情绪口语），**不做归一化** —— 池子的价值就在于保留原始说法。
+    raw_question: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(
+        SAEnum(*LOW_CONFIDENCE_SOURCES, name="low_confidence_source"), nullable=False
+    )
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["conversation_id"],
+            ["conversations.id"],
+            name="fk_lcq_conversation",
+        ),
+        Index("idx_lcq_source", "source"),
+        Index("idx_lcq_created_at", "created_at"),
+    )
+
+
+class FaithCase(Base):
+    """编造个案台账 —— 忠实度裁判判出的每条编造，一题一行长期管理。
+
+    ## 为什么不是「报告里列一下」
+
+    报告是产物，重跑一次就被覆盖。个案的价值在跨轮追溯：同一道题反复被判编造，
+    说明库里那一格一直没补对。所以同一题不新增行，只累加 ``seen_count``、
+    刷新最近一次的答案/理由/角标快照。
+
+    ## 复发要退回未解决
+
+    已标「已解决」的题又被判出来，是**复发**而不是新问题：状态退回「未解决」，
+    让它重新出现在待处理列表里。``resolved_at`` 仍保留 —— 那张时间戳正是
+    「上次解决过、这次又犯了」的证据。
+    """
+
+    __tablename__ = "faith_cases"
+
+    id: Mapped[int] = mapped_column(_AUTOINC_PK, primary_key=True, autoincrement=True)
+    #: 评估集题号（如 ``A43``），一题一行。
+    eval_id: Mapped[str] = mapped_column(String(16), nullable=False)
+    bucket: Mapped[str] = mapped_column(String(24), nullable=False)
+    query: Mapped[str] = mapped_column(String(512), nullable=False)
+    strategy: Mapped[str] = mapped_column(String(24), nullable=False, server_default="hybrid_rerank")
+    #: 被判编造的那版生成答案原文。
+    answer: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 裁判给的理由（编在哪一句）。
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 这一轮喂给模型的 Top-K 证据**全集**快照（答案里的 ``[n]`` 就是它的序号）。
+    citations: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    judge_model: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(
+        SAEnum(*FAITH_CASE_STATUSES, name="faith_case_status"),
+        nullable=False,
+        server_default=FAITH_CASE_STATUSES[0],
+    )
+    seen_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    #: 处置说明：标已解决要写清怎么解决，标无需解决要写清为什么不用改。
+    resolution: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("eval_id", name="uk_eval_id"),
+        Index("idx_faith_status", "status"),
+        Index("idx_faith_last_seen_at", "last_seen_at"),
     )

@@ -10,10 +10,11 @@
 """
 
 
-def test_metadata_has_exactly_six_tables():
+def test_metadata_has_exactly_eight_tables():
     """多一张少一张都要红 —— 表名漂移会让 compose 灌好的数据白费。
 
-    ch03 新增 `knowledge_chunks` / `qa_extraction_staging`，所以是六张。
+    ch03 新增 `knowledge_chunks` / `qa_extraction_staging`（六张）；
+    ch04 新增 `low_confidence_questions` / `faith_cases`（八张）。
     """
     import app.db.models  # noqa: F401 - 必须先 import 才会注册进 metadata
     from app.db.base import Base
@@ -25,6 +26,8 @@ def test_metadata_has_exactly_six_tables():
         "tickets",
         "knowledge_chunks",
         "qa_extraction_staging",
+        "low_confidence_questions",
+        "faith_cases",
     }
 
 
@@ -59,7 +62,7 @@ def test_conversation_session_id_is_unique_and_not_nullable():
 
 
 def test_message_columns_match_ddl():
-    """列名必须与 sql/ch02-ddl.sql 的 messages 表逐字相同。"""
+    """列名必须与 sql/ch02-ddl.sql 的 messages 表逐字相同（ch04 追加 citations）。"""
     from app.db.models import Message
 
     assert set(Message.__table__.c.keys()) == {
@@ -70,6 +73,7 @@ def test_message_columns_match_ddl():
         "tool_calls",
         "tool_call_id",
         "tool_traces",
+        "citations",
         "created_at",
     }
 
@@ -281,3 +285,96 @@ def test_vectorize_status_constants_and_content_types():
     assert VECTORIZE_STATUSES == ("pending", "done")
     # mined：本章挖矿产物的第 4 个取值；DDL 注释里的「等」字留了口子。
     assert CONTENT_TYPES == ("faq", "policy", "manual", "mined")
+
+
+# ---------------------------------------------------------------------------
+# ch04：低置信度池 / 编造台账 / 引用快照
+# ---------------------------------------------------------------------------
+
+
+def test_low_confidence_columns_and_enum():
+    from sqlalchemy import Enum as SAEnum
+
+    from app.db.models import LOW_CONFIDENCE_SOURCES, LowConfidenceQuestion
+
+    assert LOW_CONFIDENCE_SOURCES == (
+        "retrieval_low_conf",
+        "self_check",
+        "user_feedback",
+    )
+    assert set(LowConfidenceQuestion.__table__.c.keys()) == {
+        "id",
+        "conversation_id",
+        "raw_question",
+        "source",
+        "reason",
+        "created_at",
+    }
+    assert LowConfidenceQuestion.__table__.c.conversation_id.nullable is True
+    assert LowConfidenceQuestion.__table__.c.raw_question.nullable is False
+    source = LowConfidenceQuestion.__table__.c.source
+    assert isinstance(source.type, SAEnum)
+    assert set(source.type.enums) == set(LOW_CONFIDENCE_SOURCES)
+
+
+def test_low_confidence_foreign_key_is_named_like_the_ddl():
+    from app.db.models import LowConfidenceQuestion
+
+    names = {
+        constraint.name
+        for constraint in LowConfidenceQuestion.__table__.constraints
+        if constraint.name
+    }
+    assert "fk_lcq_conversation" in names
+
+
+def test_faith_case_columns_and_enum():
+    from app.db.models import FAITH_CASE_STATUSES, FaithCase
+
+    assert FAITH_CASE_STATUSES == ("未解决", "已解决", "无需解决")
+    assert set(FaithCase.__table__.c.keys()) == {
+        "id",
+        "eval_id",
+        "bucket",
+        "query",
+        "strategy",
+        "answer",
+        "reason",
+        "citations",
+        "judge_model",
+        "status",
+        "seen_count",
+        "first_seen_at",
+        "last_seen_at",
+        "resolution",
+        "resolved_at",
+    }
+    table = FaithCase.__table__
+    assert table.c.eval_id.type.length == 16
+    assert table.c.query.type.length == 512
+    assert table.c.resolution.type.length == 300
+    assert table.c.citations.nullable is True
+    assert table.c.resolved_at.nullable is True
+    assert set(table.c.status.type.enums) == set(FAITH_CASE_STATUSES)
+
+
+def test_faith_case_eval_id_is_unique():
+    """一题一行靠唯一键兜住：并发写同一个题号也不会插出两行。"""
+    from app.db.models import FaithCase
+
+    names = {
+        constraint.name
+        for constraint in FaithCase.__table__.constraints
+        if constraint.name
+    }
+    assert "uk_eval_id" in names
+
+
+def test_message_citations_is_json_and_nullable():
+    from sqlalchemy import JSON
+
+    from app.db.models import Message
+
+    column = Message.__table__.c.citations
+    assert isinstance(column.type, JSON)
+    assert column.nullable is True

@@ -40,11 +40,15 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.db.models import (
+    FAITH_CASE_STATUSES as _FAITH_CASE_STATUSES,
+    LOW_CONFIDENCE_SOURCES as _LOW_CONFIDENCE_SOURCES,
     MESSAGE_ROLES,
     TICKET_TYPES as _TICKET_TYPES,
     Conversation,
+    FaithCase,
     Faq,
     KnowledgeChunk,
+    LowConfidenceQuestion,
     Message,
     QaStaging,
     Ticket,
@@ -59,6 +63,10 @@ T = TypeVar("T")
 #: 若让工具层自己写一份常量，DDL 改了 ENUM 而常量没跟上，就会变成
 #: 「参数校验通过、写库被拒」这种最难查的半对齐状态。
 TICKET_TYPES: tuple[str, ...] = _TICKET_TYPES
+
+#: ch04：低置信度入池入口与台账处置状态，同样取自 ORM 层的单一来源。
+LOW_CONFIDENCE_SOURCES: tuple[str, ...] = _LOW_CONFIDENCE_SOURCES
+FAITH_CASE_STATUSES: tuple[str, ...] = _FAITH_CASE_STATUSES
 
 #: ``LIKE`` 的转义字符。SQL 标准里 ``LIKE ... ESCAPE '\'`` 指定它；
 #: MySQL 默认就是 ``\``，但显式写出来才不依赖默认值。
@@ -120,6 +128,8 @@ class MessageRow:
     created_at: datetime
     #: 给界面看的工具轨迹（含耗时/成败）。**不参与模型历史**，见 models.Message。
     tool_traces: list[dict[str, Any]] | None = None
+    #: ch04：本轮引用证据快照。刷新页面后角标还能点开，就靠它。
+    citations: list[dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True)
@@ -160,6 +170,39 @@ class SessionRow:
 
     session_id: str
     status: str
+
+
+@dataclass(frozen=True)
+class LowConfidenceRow:
+    """低置信度池里的一条。"""
+
+    id: int
+    conversation_id: int | None
+    raw_question: str
+    source: str
+    reason: str | None
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class FaithCaseRow:
+    """编造个案台账里的一条。"""
+
+    id: int
+    eval_id: str
+    bucket: str
+    query: str
+    strategy: str
+    answer: str
+    reason: str
+    citations: list[dict[str, Any]] | None
+    judge_model: str | None
+    status: str
+    seen_count: int
+    first_seen_at: datetime
+    last_seen_at: datetime
+    resolution: str | None
+    resolved_at: datetime | None
 
 
 def _field(row: object, name: str) -> Any:
@@ -254,6 +297,7 @@ class MessageRepository:
         tool_calls: Sequence[dict[str, Any]] | None,
         tool_call_id: str | None,
         tool_traces: Sequence[dict[str, Any]] | None,
+        citations: Sequence[dict[str, Any]] | None = None,
     ) -> None:
         # 入口校验：非法 role 在这里就炸，错误信息带角色名。
         # 靠 MySQL 的 ENUM 兜会拖到 commit，报的是驱动的
@@ -271,6 +315,7 @@ class MessageRepository:
                 tool_calls=list(tool_calls) if tool_calls is not None else None,
                 tool_call_id=tool_call_id,
                 tool_traces=list(tool_traces) if tool_traces is not None else None,
+                citations=list(citations) if citations is not None else None,
             )
         )
         self._session.commit()
@@ -284,12 +329,16 @@ class MessageRepository:
         tool_calls: Sequence[dict[str, Any]] | None = None,
         tool_call_id: str | None = None,
         tool_traces: Sequence[dict[str, Any]] | None = None,
+        citations: Sequence[dict[str, Any]] | None = None,
     ) -> None:
         """追加一条消息。``role`` 必须是 ``MESSAGE_ROLES`` 之一。
 
         :param tool_traces: 给界面看的工具轨迹（含耗时/成败）。
             **必须与 ``tool_calls`` 分开传** —— 后者会被当模型历史回灌，
             字段是严格的（多一个键就会让 ``AIMessage`` 构造失败）。
+
+        :param citations: ch04 的引用证据快照。只有**最终答案**那一行需要它；
+            带工具调用的「申请单」行不需要。
 
         :raises ValueError: 角色不在 DDL 的 ENUM 取值内。
         """
@@ -301,6 +350,7 @@ class MessageRepository:
             tool_calls,
             tool_call_id,
             tool_traces,
+            citations,
         )
 
     def _list(self, conversation_id: int) -> list[MessageRow]:
@@ -318,6 +368,7 @@ class MessageRepository:
                 tool_call_id=row.tool_call_id,
                 created_at=row.created_at,
                 tool_traces=row.tool_traces,
+                citations=row.citations,
             )
             for row in rows
         ]
@@ -607,6 +658,20 @@ class KnowledgeChunkRepository:
         """按文档根标题取块 —— 增量重建时用来找出「本次已不存在的旧块」。"""
         return await _run(self._list_by_scope, root)
 
+    def _list_all(self, limit: int | None) -> list[ChunkRow]:
+        statement = select(KnowledgeChunk).order_by(KnowledgeChunk.id)
+        if limit is not None:
+            statement = statement.limit(limit)
+        return [_to_chunk_row(row) for row in self._session.scalars(statement).all()]
+
+    async def list_all(self, limit: int | None = None) -> list[ChunkRow]:
+        """取全部块的轻量视图 —— 评估集把「金标锚串」解析成 chunk_id 时用。
+
+        为什么不写在评估脚本里：项目约定「查询一律在 repositories」，
+        脚本里写裸 SQL 会让「表结构改了但脚本没跟上」变成运行期才发现的错误。
+        """
+        return await _run(self._list_all, limit)
+
     def _delete_ids(self, ids: list[int]) -> int:
         if not ids:
             return 0
@@ -798,6 +863,242 @@ class TicketRepository:
 
 
 # ---------------------------------------------------------------------------
+# ch04：低置信度池 / 编造个案台账
+# ---------------------------------------------------------------------------
+
+
+class LowConfidenceQuestionRepository:
+    """``low_confidence_questions`` 的写入与查询。
+
+    **不做去重**：同一个问题问三次就是三行。这张表是「什么时候、因为什么答不上来」
+    的时间序列，压成一行会把复发频率这条最有用的信号丢掉；归并是后续章节的事。
+    """
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def _add(
+        self,
+        conversation_id: int | None,
+        raw_question: str,
+        source: str,
+        reason: str | None,
+    ) -> int:
+        if source not in LOW_CONFIDENCE_SOURCES:
+            raise ValueError(
+                f"非法入池来源 {source!r}，只允许 {LOW_CONFIDENCE_SOURCES}"
+                "（对应 DDL 的 ENUM）"
+            )
+        if not raw_question.strip():
+            raise ValueError("入池的 raw_question 不能为空 —— 空问题没有复盘价值")
+
+        row = LowConfidenceQuestion(
+            conversation_id=conversation_id,
+            raw_question=raw_question,
+            source=source,
+            reason=reason,
+        )
+        self._session.add(row)
+        self._session.commit()
+        return int(row.id)
+
+    async def add(
+        self,
+        conversation_id: int | None,
+        raw_question: str,
+        source: str,
+        reason: str | None = None,
+    ) -> int:
+        """把一条答不上来的原话落进池子，返回主键。
+
+        :param source: ``retrieval_low_conf`` / ``self_check`` / ``user_feedback``。
+        :param reason: 判「不能答」的原因，复盘时看的就是它。
+        """
+        return await _run(self._add, conversation_id, raw_question, source, reason)
+
+    def _list_recent(self, limit: int) -> list[LowConfidenceRow]:
+        rows = self._session.scalars(
+            select(LowConfidenceQuestion)
+            .order_by(LowConfidenceQuestion.id.desc())
+            .limit(limit)
+        ).all()
+        return [
+            LowConfidenceRow(
+                id=int(row.id),
+                conversation_id=row.conversation_id,
+                raw_question=row.raw_question,
+                source=row.source,
+                reason=row.reason,
+                created_at=row.created_at,
+            )
+            for row in rows
+        ]
+
+    async def list_recent(self, limit: int = 20) -> list[LowConfidenceRow]:
+        """最近入池的若干条（新的在前）。"""
+        return await _run(self._list_recent, limit)
+
+    def _count_by_source(self) -> dict[str, int]:
+        rows = self._session.execute(
+            select(LowConfidenceQuestion.source, func.count()).group_by(
+                LowConfidenceQuestion.source
+            )
+        ).all()
+        counts = {source: 0 for source in LOW_CONFIDENCE_SOURCES}
+        for source, number in rows:
+            counts[str(source)] = int(number)
+        return counts
+
+    async def count_by_source(self) -> dict[str, int]:
+        return await _run(self._count_by_source)
+
+
+class FaithCaseRepository:
+    """``faith_cases`` 的写入与处置。
+
+    写入是 **upsert**（一题一行）：同一道题再次被判编造只累加 ``seen_count``、
+    刷新答案/理由/角标快照，绝不新增第二行。
+    """
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def _upsert_from_judgement(
+        self,
+        eval_id: str,
+        bucket: str,
+        query: str,
+        strategy: str,
+        answer: str,
+        reason: str,
+        citations: Sequence[dict[str, Any]] | None,
+        judge_model: str | None,
+    ) -> None:
+        now = datetime.now()
+        existing = self._session.scalar(
+            select(FaithCase).where(FaithCase.eval_id == eval_id)
+        )
+        if existing is None:
+            self._session.add(
+                FaithCase(
+                    eval_id=eval_id,
+                    bucket=bucket,
+                    query=query,
+                    strategy=strategy,
+                    answer=answer,
+                    reason=reason,
+                    citations=list(citations) if citations is not None else None,
+                    judge_model=judge_model,
+                    status=FAITH_CASE_STATUSES[0],
+                    seen_count=1,
+                    first_seen_at=now,
+                    last_seen_at=now,
+                )
+            )
+        else:
+            existing.bucket = bucket
+            existing.query = query
+            existing.strategy = strategy
+            existing.answer = answer
+            existing.reason = reason
+            existing.citations = list(citations) if citations is not None else None
+            existing.judge_model = judge_model
+            existing.seen_count = int(existing.seen_count or 1) + 1
+            existing.last_seen_at = now
+            # **复发**：已标已解决的题又被判出来，退回未解决。
+            # resolved_at 保留 —— 「上次解决过、这次又犯了」正是要看见的信号。
+            if existing.status == "已解决":
+                existing.status = "未解决"
+                existing.resolution = None
+        self._session.commit()
+
+    async def upsert_from_judgement(
+        self,
+        *,
+        eval_id: str,
+        bucket: str,
+        query: str,
+        answer: str,
+        reason: str,
+        strategy: str = "hybrid_rerank",
+        citations: Sequence[dict[str, Any]] | None = None,
+        judge_model: str | None = None,
+    ) -> None:
+        """记一条编造个案（同一 ``eval_id`` 累加，不新增行）。"""
+        await _run(
+            self._upsert_from_judgement,
+            eval_id,
+            bucket,
+            query,
+            strategy,
+            answer,
+            reason,
+            citations,
+            judge_model,
+        )
+
+    def _list_by_status(self, status: str | None) -> list[FaithCaseRow]:
+        statement = select(FaithCase).order_by(FaithCase.last_seen_at.desc())
+        if status is not None:
+            statement = statement.where(FaithCase.status == status)
+        return [_to_faith_case_row(row) for row in self._session.scalars(statement).all()]
+
+    async def list_by_status(self, status: str | None = None) -> list[FaithCaseRow]:
+        """按处置状态取个案；``None`` 表示全部（最近见过的在前）。"""
+        return await _run(self._list_by_status, status)
+
+    def _update_status(self, eval_id: str, status: str, resolution: str | None) -> bool:
+        if status not in FAITH_CASE_STATUSES:
+            raise ValueError(
+                f"非法处置状态 {status!r}，只允许 {FAITH_CASE_STATUSES}"
+            )
+        if status != "未解决" and not (resolution or "").strip():
+            raise ValueError(
+                f"把状态标成 {status!r} 必须写处置说明（resolution）——"
+                "空着的处置在台账上等于没有交代"
+            )
+
+        row = self._session.scalar(select(FaithCase).where(FaithCase.eval_id == eval_id))
+        if row is None:
+            return False
+
+        row.status = status
+        if status == "未解决":
+            row.resolution = None
+        else:
+            row.resolution = (resolution or "").strip()
+            row.resolved_at = datetime.now()
+        self._session.commit()
+        return True
+
+    async def update_status(
+        self, eval_id: str, status: str, resolution: str | None = None
+    ) -> bool:
+        """改处置状态。返回 ``False`` 表示台账里没有这个 ``eval_id``。"""
+        return await _run(self._update_status, eval_id, status, resolution)
+
+
+def _to_faith_case_row(row: FaithCase) -> FaithCaseRow:
+    return FaithCaseRow(
+        id=int(row.id),
+        eval_id=row.eval_id,
+        bucket=row.bucket,
+        query=row.query,
+        strategy=row.strategy,
+        answer=row.answer,
+        reason=row.reason,
+        citations=row.citations,
+        judge_model=row.judge_model,
+        status=row.status,
+        seen_count=int(row.seen_count),
+        first_seen_at=row.first_seen_at,
+        last_seen_at=row.last_seen_at,
+        resolution=row.resolution,
+        resolved_at=row.resolved_at,
+    )
+
+
+# ---------------------------------------------------------------------------
 # 容器
 # ---------------------------------------------------------------------------
 
@@ -818,6 +1119,10 @@ class Repositories:
     knowledge: KnowledgeChunkRepository
     #: ch03：对话抽取暂存
     qa_staging: QaStagingRepository
+    #: ch04：低置信度问题池
+    low_confidence: LowConfidenceQuestionRepository
+    #: ch04：编造个案台账
+    faith_cases: FaithCaseRepository
 
     @classmethod
     def from_session(cls, session: Session) -> "Repositories":
@@ -833,4 +1138,6 @@ class Repositories:
             tickets=TicketRepository(session),
             knowledge=KnowledgeChunkRepository(session),
             qa_staging=QaStagingRepository(session),
+            low_confidence=LowConfidenceQuestionRepository(session),
+            faith_cases=FaithCaseRepository(session),
         )

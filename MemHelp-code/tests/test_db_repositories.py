@@ -486,3 +486,179 @@ async def test_list_sessions_returns_ids_in_creation_order(sqlite_session):
     assert [r.session_id for r in rows] == ["s-1", "s-2"]
     assert [r.session_id for r in await repo.list_sessions(limit=1)] == ["s-1"]
 
+
+# ---------------------------------------------------------------------------
+# ch04：低置信度池
+# ---------------------------------------------------------------------------
+
+
+async def test_low_confidence_add_and_list_newest_first(sqlite_session):
+    from app.db.repositories import ConversationRepository, LowConfidenceQuestionRepository
+
+    conversation_id = await ConversationRepository(sqlite_session).upsert_by_session(
+        "s-lcq", "anonymous"
+    )
+    repo = LowConfidenceQuestionRepository(sqlite_session)
+
+    await repo.add(conversation_id, "你们支持货到付款吗", "self_check", "证据不足")
+    await repo.add(conversation_id, "红包怎么用", "retrieval_low_conf", "0 命中")
+
+    rows = await repo.list_recent(10)
+    assert [r.raw_question for r in rows] == ["红包怎么用", "你们支持货到付款吗"]
+    assert rows[0].source == "retrieval_low_conf"
+    assert rows[1].reason == "证据不足"
+    assert (await repo.count_by_source())["self_check"] == 1
+
+
+async def test_low_confidence_rejects_unknown_source(sqlite_session):
+    from app.db.repositories import LowConfidenceQuestionRepository
+
+    repo = LowConfidenceQuestionRepository(sqlite_session)
+    with pytest.raises(ValueError, match="self_check"):
+        await repo.add(None, "q", "made_up", "r")
+
+
+async def test_low_confidence_rejects_blank_question(sqlite_session):
+    from app.db.repositories import LowConfidenceQuestionRepository
+
+    repo = LowConfidenceQuestionRepository(sqlite_session)
+    with pytest.raises(ValueError, match="不能为空"):
+        await repo.add(None, "   ", "self_check", "r")
+
+
+async def test_low_confidence_allows_missing_conversation(sqlite_session):
+    """池子允许收进来路不明的问题（人工补录/离线评测），``conversation_id`` 可空。"""
+    from app.db.repositories import LowConfidenceQuestionRepository
+
+    repo = LowConfidenceQuestionRepository(sqlite_session)
+    await repo.add(None, "离线补录的问题", "user_feedback", None)
+
+    rows = await repo.list_recent(1)
+    assert rows[0].conversation_id is None
+
+
+# ---------------------------------------------------------------------------
+# ch04：编造个案台账
+# ---------------------------------------------------------------------------
+
+
+def _judgement(**overrides):
+    payload = {
+        "eval_id": "A01",
+        "bucket": "A_policy",
+        "query": "你们支持货到付款吗",
+        "answer": "支持的，货到付款很方便。",
+        "reason": "证据里没有货到付款这条",
+        "strategy": "hybrid_rerank",
+        "citations": [{"n": 1, "chunk_id": 3, "section_path": "售后手册 / 运费与包邮对照表",
+                       "category": "售后手册", "quote": "满 99 元包邮"}],
+        "judge_model": "deepseek-flash",
+    }
+    payload.update(overrides)
+    return payload
+
+
+async def test_faith_case_upsert_accumulates_seen_count(sqlite_session):
+    from app.db.repositories import FaithCaseRepository
+
+    repo = FaithCaseRepository(sqlite_session)
+    await repo.upsert_from_judgement(**_judgement())
+    await repo.upsert_from_judgement(**_judgement(answer="第二版答案"))
+
+    rows = await repo.list_by_status()
+    assert len(rows) == 1          # 一题一行，不是两行
+    assert rows[0].seen_count == 2
+    assert rows[0].answer == "第二版答案"   # 只保留最近一次
+    assert rows[0].status == "未解决"
+
+
+async def test_faith_case_relapses_from_resolved(sqlite_session):
+    """已标已解决 → 又被判编造 → 退回未解决；resolved_at 保留作为复发证据。"""
+    from app.db.repositories import FaithCaseRepository
+
+    repo = FaithCaseRepository(sqlite_session)
+    await repo.upsert_from_judgement(**_judgement())
+    assert await repo.update_status("A01", "已解决", "补了货到付款条款") is True
+    before = (await repo.list_by_status())[0]
+    assert before.resolved_at is not None
+
+    await repo.upsert_from_judgement(**_judgement())
+
+    rows = await repo.list_by_status("未解决")
+    assert [r.eval_id for r in rows] == ["A01"]
+    assert rows[0].resolution is None
+    assert rows[0].resolved_at is not None      # 保留
+
+
+async def test_faith_case_status_requires_resolution(sqlite_session):
+    from app.db.repositories import FaithCaseRepository
+
+    repo = FaithCaseRepository(sqlite_session)
+    await repo.upsert_from_judgement(**_judgement())
+
+    with pytest.raises(ValueError, match="resolution"):
+        await repo.update_status("A01", "已解决", "")
+    with pytest.raises(ValueError, match="resolution"):
+        await repo.update_status("A01", "无需解决", None)
+
+
+async def test_faith_case_update_unknown_eval_id_returns_false(sqlite_session):
+    from app.db.repositories import FaithCaseRepository
+
+    assert await FaithCaseRepository(sqlite_session).update_status(
+        "ZZZ", "无需解决", "题号写错了"
+    ) is False
+
+
+async def test_faith_case_rejects_unknown_status(sqlite_session):
+    from app.db.repositories import FaithCaseRepository
+
+    repo = FaithCaseRepository(sqlite_session)
+    await repo.upsert_from_judgement(**_judgement())
+    with pytest.raises(ValueError, match="未解决"):
+        await repo.update_status("A01", "搞定了", "乱写的状态")
+
+
+# ---------------------------------------------------------------------------
+# ch04：消息上的引用快照 / 全量块
+# ---------------------------------------------------------------------------
+
+
+async def test_message_citations_roundtrip(sqlite_session):
+    from app.db.repositories import ConversationRepository, MessageRepository
+
+    cid = await ConversationRepository(sqlite_session).upsert_by_session("s-cite", "anonymous")
+    repo = MessageRepository(sqlite_session)
+    snapshot = [{"n": 1, "chunk_id": 3, "section_path": "商品FAQ / 商品与配送 / 运费怎么算",
+                 "category": "商品FAQ", "quote": "单笔订单满 99 元包邮"}]
+
+    await repo.append(cid, role="user", content="运费怎么算")
+    await repo.append(cid, role="assistant", content="满 99 包邮[1]。", citations=snapshot)
+
+    rows = await repo.list_for_conversation(cid)
+    assert rows[0].citations is None            # 用户轮没有引用
+    assert rows[1].citations == snapshot
+
+
+async def test_knowledge_list_all_returns_every_chunk(sqlite_session):
+    """评估集把金标锚串解析成 chunk_id 时需要一个全量视图。"""
+    from app.db.repositories import KnowledgeChunkRepository
+
+    repo = KnowledgeChunkRepository(sqlite_session)
+    for index, questions in enumerate(("运费怎么算", "能退货吗"), start=1):
+        await repo.upsert_chunk(
+            {
+                "category": "商品FAQ",
+                "questions": questions,
+                "answer": f"答案 {index}",
+                "section_path": f"商品FAQ / 商品与配送 / {questions}",
+                "content_type": "faq",
+                "is_key_clause": False,
+                "ordinal": index,
+            }
+        )
+
+    rows = await repo.list_all()
+    assert [r.questions for r in rows] == ["运费怎么算", "能退货吗"]
+    assert len(await repo.list_all(limit=1)) == 1
+

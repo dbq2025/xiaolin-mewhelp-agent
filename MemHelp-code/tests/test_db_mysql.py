@@ -57,6 +57,13 @@ KNOWN_SCHEMA_DIVERGENCES: dict[str, dict[str, object]] = {
         "extra_enum_values": {"approved", "rejected"},
         "note": "后续章节加的人工审核状态；ORM 的 SAEnum 必须包含它们，否则读到即 LookupError",
     },
+    "low_confidence_questions": {
+        "extra_columns": {"retrieved_chunks", "matched_review_id"},
+        "note": (
+            "后续章节给低置信度池加了「当时召回的块」与「归并到的复盘条目」两列；"
+            "本章只写 raw_question/source/reason，两列都可空，不影响插入"
+        ),
+    },
 }
 
 
@@ -509,3 +516,83 @@ async def test_deleting_linked_chunks_works_against_self_referencing_foreign_key
             ).count() == 0
         finally:
             session.rollback()
+
+
+# ---------------------------------------------------------------------------
+# ch04：低置信度池 / 编造台账
+# ---------------------------------------------------------------------------
+
+
+def test_ch04_tables_have_the_ddl_unique_key(engine):
+    """``uk_eval_id`` 必须真的存在：一题一行靠它兜住并发。
+
+    只断言**列集合**，不断言索引名 —— ORM 里叫 ``idx_faith_status`` 而 DDL 与真库
+    叫 ``idx_status``（SQLite 的索引名是库级全局的，必须加前缀）。索引名从不被代码
+    引用，钉名字只会制造无意义的红。
+    """
+    unique_columns = {
+        tuple(constraint["column_names"])
+        for constraint in inspect(engine).get_unique_constraints("faith_cases")
+    }
+    unique_indexes = {
+        tuple(index["column_names"])
+        for index in inspect(engine).get_indexes("faith_cases")
+        if index.get("unique")
+    }
+    assert ("eval_id",) in unique_columns | unique_indexes
+
+
+def test_ch04_status_indexes_exist(engine):
+    """状态筛选是台账最常用的查询，索引丢了会变成全表扫。"""
+    for table, column in (
+        ("faith_cases", "status"),
+        ("low_confidence_questions", "source"),
+    ):
+        columns = [
+            tuple(index["column_names"]) for index in inspect(engine).get_indexes(table)
+        ]
+        assert (column,) in columns, f"{table}.{column} 缺索引"
+
+
+def test_ch04_chinese_status_round_trips_verbatim(engine):
+    """中文 ENUM 值必须逐字往返 —— latin1 double-encode 会让「已解决」变乱码。"""
+    from datetime import datetime
+
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+
+    from app.db.models import FaithCase
+
+    eval_id = f"it-{os.getpid()}"
+    with Session(engine) as session:
+        session.add(
+            FaithCase(
+                eval_id=eval_id,
+                bucket="A_policy",
+                query="集成测试题",
+                strategy="hybrid_rerank",
+                answer="答案",
+                reason="理由",
+                status="无需解决",
+                seen_count=1,
+                first_seen_at=datetime.now(),
+                last_seen_at=datetime.now(),
+                resolution="测试数据，不需要处理",
+            )
+        )
+        session.commit()
+        try:
+            row = session.scalar(select(FaithCase).where(FaithCase.eval_id == eval_id))
+            assert row is not None
+            assert row.status == "无需解决"
+            assert row.resolution == "测试数据，不需要处理"
+        finally:
+            session.rollback()
+
+
+def test_messages_citations_column_is_json_and_nullable(engine):
+    """引用快照要能存 ``[{...}]``，且老消息（没有引用）不该被 NOT NULL 卡住。"""
+    columns = {col["name"]: col for col in inspect(engine).get_columns("messages")}
+    assert "citations" in columns, "真库缺 messages.citations —— 请先执行 sql/ch04-ddl.sql"
+    assert columns["citations"]["nullable"] is True
+    assert "JSON" in str(columns["citations"]["type"]).upper()
