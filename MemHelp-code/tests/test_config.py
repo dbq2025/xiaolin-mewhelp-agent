@@ -220,7 +220,12 @@ def test_rag_settings_have_stable_defaults():
     s = Settings(openai_base_url="https://x/v1", openai_api_key="k", openai_model="m")
     assert s.milvus_uri == "http://127.0.0.1:19530"
     assert s.milvus_collection == "knowledge"
+    assert s.embedding_base_url == "https://api.siliconflow.cn/v1"
+    assert s.embedding_model == "BAAI/bge-m3"
     assert s.embedding_dim == 1024
+    assert s.embedding_timeout == 30.0
+    assert s.embedding_batch_size == 32
+    assert s.embedding_max_retries == 2
     assert s.rag_top_k == 5
     assert s.rag_warmup is True
     assert s.chunk_max_chars == 600
@@ -229,26 +234,41 @@ def test_rag_settings_have_stable_defaults():
     assert s.qa_dedupe_threshold == 0.92
 
 
-def test_embedding_model_dir_is_absolute_and_cwd_independent():
-    """相对路径必须按 PROJECT_ROOT 解析：从仓库根还是从代码目录起进程，
-    模型都得找得到（与 `.env` 绝对路径同一条纪律）。"""
-    from app.config import PROJECT_ROOT
+def test_embedding_key_may_be_absent_until_first_call():
+    """没密钥也要能 import 配置、跑离线测试、看 --status。
 
+    只有**真正要发请求**时才允许报错 —— 否则「本机没配 key」会让整个套件
+    与健康检查一起崩，而那不是配置错误，是环境差异。
+    """
+    s = Settings(openai_base_url="https://x/v1", openai_api_key="k", openai_model="m")
+    assert s.embedding_api_key == ""
+
+
+def test_require_embedding_key_points_at_env_file():
+    s = Settings(openai_base_url="https://x/v1", openai_api_key="k", openai_model="m")
+    with pytest.raises(ValueError, match="EMBEDDING_API_KEY"):
+        s.require_embedding_key()
+
+
+def test_embedding_url_strips_trailing_slash():
     s = Settings(
         openai_base_url="https://x/v1",
         openai_api_key="k",
         openai_model="m",
-        embedding_model_path="models/bge-m3",
+        embedding_base_url="https://api.siliconflow.cn/v1/",
     )
-    d = s.embedding_model_dir()
-    assert d.is_absolute()
-    assert d == PROJECT_ROOT / "models" / "bge-m3"
+    assert s.embedding_url() == "https://api.siliconflow.cn/v1/embeddings"
 
 
 @pytest.mark.parametrize(
     "overrides",
     [
         {"embedding_dim": 0},
+        {"embedding_timeout": 0},
+        {"embedding_batch_size": 0},
+        {"embedding_batch_size": 999},
+        {"embedding_max_retries": -1},
+        {"embedding_max_retries": 9},
         {"rag_top_k": 0},
         {"chunk_max_chars": 0},
         {"chunk_overlap": -1},
@@ -256,8 +276,10 @@ def test_embedding_model_dir_is_absolute_and_cwd_independent():
         {"qa_dedupe_threshold": 1.5},
         {"qa_dedupe_threshold": -0.1},
     ],
-    ids=["dim-zero", "topk-zero", "chunk-zero", "overlap-negative",
-         "batch-zero", "threshold-over-one", "threshold-negative"],
+    ids=["dim-zero", "timeout-zero", "batch-zero", "batch-too-big",
+         "retries-negative", "retries-too-many", "topk-zero", "chunk-zero",
+         "overlap-negative", "qa-batch-zero", "threshold-over-one",
+         "threshold-negative"],
 )
 def test_ch03_settings_reject_invalid_values(overrides):
     """去重阈值 >1 会让「永远不判重」，维数 0 会让 Milvus 建集合失败 —

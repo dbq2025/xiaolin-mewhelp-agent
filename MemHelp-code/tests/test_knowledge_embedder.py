@@ -1,125 +1,209 @@
-"""BGE-M3 嵌入器。
+"""嵌入器 —— 硅基流动云端 BGE-M3（OpenAI 兼容 HTTP）。
 
-**默认不加载真模型**：2.3GB / 首载 20-40s，套件必须能离线秒跑。真模型用例由
-``MEMHELP_TEST_EMBED=1`` 显式开启（见文件末尾）。
+**默认不发任何网络请求**：用 ``httpx.MockTransport`` 当假服务端，把「请求长什么样、
+响应怎么解析」钉死。真实 API 的用例在文件末尾，由 ``MEMHELP_TEST_EMBED=1`` 开启。
 
-这一层要钉住三件事：
-1. 模型**只加载一次**（每个进程一份，否则一次检索要等两次加载）；
-2. 输入顺序与输出顺序一一对应（顺序错位在检索里表现为「答非所问」，且极难复现）；
-3. 输出是 **Python list**，不是 numpy 数组 —— Milvus 不接受 numpy，而错误信息
-   只在真实写入时才出现。
+这一层要钉住的四件事（全部是云端特有的失败模式）：
+
+1. **请求形状**：`{base}/embeddings`、`Authorization: Bearer <key>`、
+   body 含 `model` / `input` / `encoding_format=float`；
+2. **按 `index` 排序**：服务端不保证返回顺序等于输入顺序，错位不会报错，
+   只会让检索答非所问；
+3. **重试边界**：429/5xx 退避重试，4xx 立刻失败；
+4. **失败要早**：没密钥在发请求前就抛可读错误。
 """
 
 from __future__ import annotations
 
+import json
 import os
-from pathlib import Path
 
-import numpy as np
+import httpx
 import pytest
 
-from app.knowledge.embedder import BgeM3Embedder
+from app.knowledge.embedder import SiliconFlowEmbedder
 
 
-class _FakeModel:
-    """假的 sentence-transformers 模型：记录调用参数，返回固定维度向量。"""
-
-    def __init__(self) -> None:
-        self.calls: list[list[str]] = []
-        self.kwargs: list[dict] = []
-        self.max_seq_length = 8192
-
-    def encode(self, texts, **kwargs):
-        self.calls.append(list(texts))
-        self.kwargs.append(kwargs)
-        # 用文本长度区分向量，方便断言「顺序没被打乱」
-        return np.array([[0.1 + len(t) / 100.0] * 1024 for t in texts], dtype="float32")
+def _client(handler) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
-async def test_embed_returns_python_lists_in_input_order():
-    model = _FakeModel()
-    embedder = BgeM3Embedder(Path("unused"), model_factory=lambda _: model)
-
-    vectors = await embedder.embed(["甲", "乙乙"])
-
-    assert isinstance(vectors, list)
-    assert all(isinstance(v, list) and len(v) == 1024 for v in vectors)
-    assert all(isinstance(x, float) for x in vectors[0])
-    assert vectors[0][0] != vectors[1][0]  # 顺序没有被打乱
-    assert model.calls == [["甲", "乙乙"]]
-
-
-async def test_embed_asks_for_normalised_vectors():
-    """向量必须 L2 归一化：Milvus 用 COSINE，但换度量/换库时不想依赖实现细节。"""
-    model = _FakeModel()
-    embedder = BgeM3Embedder(Path("unused"), model_factory=lambda _: model)
-
-    await embedder.embed(["甲"])
-
-    kwargs = model.kwargs[0]
-    assert kwargs["normalize_embeddings"] is True
-    assert kwargs["convert_to_numpy"] is True
-    assert kwargs["batch_size"] == 32
+def _embedder(handler, *, dim=4, batch_size=32, max_retries=2, key="sk-test"):
+    return SiliconFlowEmbedder(
+        base_url="https://api.siliconflow.cn/v1",
+        api_key=key,
+        model="BAAI/bge-m3",
+        dim=dim,
+        batch_size=batch_size,
+        max_retries=max_retries,
+        client=_client(handler),
+    )
 
 
-async def test_model_is_loaded_only_once():
-    loaded: list[str] = []
-
-    def factory(path: str):
-        loaded.append(path)
-        return _FakeModel()
-
-    embedder = BgeM3Embedder(Path("some/dir"), model_factory=factory)
-    await embedder.embed(["a"])
-    await embedder.embed(["b"])
-    await embedder.warmup()
-
-    assert loaded == [str(Path("some/dir"))]
+# ---------------------------------------------------------------------------
+# 请求形状与解析
+# ---------------------------------------------------------------------------
 
 
-async def test_empty_input_does_not_load_the_model():
-    def factory(path: str):  # pragma: no cover - 不该被调用
-        raise AssertionError("空输入不应加载模型")
+async def test_embed_posts_openai_compatible_body():
+    seen: dict = {}
 
-    embedder = BgeM3Embedder(Path("unused"), model_factory=factory)
-    assert await embedder.embed([]) == []
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["auth"] = request.headers["authorization"]
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"index": 0, "embedding": [0.1] * 4},
+                    {"index": 1, "embedding": [0.2] * 4},
+                ]
+            },
+        )
+
+    out = await _embedder(handler).embed(["甲", "乙"])
+
+    assert seen["url"] == "https://api.siliconflow.cn/v1/embeddings"
+    assert seen["auth"] == "Bearer sk-test"
+    assert seen["body"] == {
+        "model": "BAAI/bge-m3",
+        "input": ["甲", "乙"],
+        "encoding_format": "float",
+    }
+    assert [v[0] for v in out] == [0.1, 0.2]
+    assert all(isinstance(x, float) for x in out[0])
 
 
-async def test_missing_model_dir_raises_actionable_error():
-    embedder = BgeM3Embedder(Path("definitely/not/here"))
-    with pytest.raises(FileNotFoundError, match="download_model"):
-        await embedder.embed(["甲"])
+async def test_embed_sorts_by_index_not_by_response_order():
+    """服务端返回顺序不保证等于输入顺序 —— 必须按 index 对齐。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"index": 1, "embedding": [0.2] * 4},
+                    {"index": 0, "embedding": [0.1] * 4},
+                ]
+            },
+        )
+
+    assert [v[0] for v in await _embedder(handler).embed(["a", "b"])] == [0.1, 0.2]
+
+
+async def test_embed_splits_into_batches_and_keeps_order():
+    sizes: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        inputs = json.loads(request.content)["input"]
+        sizes.append(len(inputs))
+        # 每批都按 index 倒序返回，验证跨批拼接后仍然是输入顺序
+        data = [
+            {"index": i, "embedding": [float(i)] * 4} for i in reversed(range(len(inputs)))
+        ]
+        return httpx.Response(200, json={"data": data})
+
+    emb = _embedder(handler, batch_size=2)
+    out = await emb.embed(["a", "b", "c", "d", "e"])
+
+    assert sizes == [2, 2, 1]
+    assert [v[0] for v in out] == [0.0, 1.0, 0.0, 1.0, 0.0]
+
+
+async def test_empty_input_does_not_call_the_api():
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError("空输入不该发请求")
+
+    assert await _embedder(handler).embed([]) == []
+
+
+# ---------------------------------------------------------------------------
+# 失败与重试
+# ---------------------------------------------------------------------------
+
+
+async def test_rate_limit_is_retried_then_succeeds():
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(429, json={"message": "rate limited"})
+        return httpx.Response(200, json={"data": [{"index": 0, "embedding": [0.1] * 4}]})
+
+    out = await _embedder(handler).embed(["a"])
+
+    assert out == [[0.1] * 4]
+    assert len(calls) == 2
+
+
+async def test_client_error_is_not_retried():
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(401, json={"message": "invalid api key"})
+
+    with pytest.raises(RuntimeError, match="401"):
+        await _embedder(handler).embed(["a"])
+    assert len(calls) == 1
+
+
+async def test_retries_are_bounded():
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(503, text="unavailable")
+
+    with pytest.raises(RuntimeError, match="503"):
+        await _embedder(handler, max_retries=1).embed(["a"])
+    assert len(calls) == 2  # 首次 + 1 次重试
+
+
+async def test_missing_key_fails_before_any_request():
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError("没有密钥不该发请求")
+
+    emb = _embedder(handler, key="")
+    with pytest.raises(ValueError, match="EMBEDDING_API_KEY"):
+        await emb.embed(["a"])
+
+
+async def test_dimension_mismatch_is_reported_early():
+    """趁早报错：等 Milvus 报维度不符时，往往已经跑完几百条嵌入。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"index": 0, "embedding": [0.1] * 3}]})
+
+    with pytest.raises(RuntimeError, match="维度不符"):
+        await _embedder(handler, dim=4).embed(["a"])
+
+
+async def test_missing_index_field_is_reported():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"embedding": [0.1] * 4}]})
+
+    with pytest.raises(RuntimeError, match="index"):
+        await _embedder(handler).embed(["a"])
+
+
+async def test_short_response_is_reported():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"index": 0, "embedding": [0.1] * 4}]})
+
+    with pytest.raises(RuntimeError, match="条目数不符"):
+        await _embedder(handler).embed(["a", "b"])
+
+
+# ---------------------------------------------------------------------------
+# 单例
+# ---------------------------------------------------------------------------
 
 
 def test_get_embedder_is_a_process_singleton():
-    """整个进程只该有一份模型：uvicorn 每请求 new 一个会直接把内存吃穿。"""
     from app.config import Settings
-    from app.knowledge.embedder import get_embedder, reset_embedders
-
-    reset_embedders()
-    settings = Settings(
-        openai_base_url="https://x/v1", openai_api_key="k", openai_model="m",
-        embedding_model_path="models/bge-m3",
-    )
-    first = get_embedder(settings)
-    second = get_embedder(settings)
-    assert first is second
-    reset_embedders()
-
-
-# ---------------------------------------------------------------------------
-# 真模型（默认 skip）
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.skipif(os.getenv("MEMHELP_TEST_EMBED") != "1", reason="需要真实 BGE-M3")
-async def test_real_model_is_1024_dim_and_semantic():
-    """真模型验收：维度、归一化、以及「同义句比无关句更近」这条前提。
-
-    配置**显式构造**而不是 ``get_settings()``：套件的 autouse fixture 会把
-    ``env_file`` 置空（让结果与宿主机 .env 无关），真模型用例只需要模型目录。
-    """
-    from app.config import PROJECT_ROOT, Settings
     from app.knowledge.embedder import get_embedder, reset_embedders
 
     reset_embedders()
@@ -127,13 +211,37 @@ async def test_real_model_is_1024_dim_and_semantic():
         openai_base_url="https://x/v1",
         openai_api_key="k",
         openai_model="m",
-        embedding_model_path=str(PROJECT_ROOT / "models" / "bge-m3"),
+        embedding_api_key="sk-test",
     )
+    assert get_embedder(settings) is get_embedder(settings)
+    reset_embedders()
+
+
+# ---------------------------------------------------------------------------
+# 真 API（默认 skip，需要 .env 里的 EMBEDDING_API_KEY）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    os.getenv("MEMHELP_TEST_EMBED") != "1", reason="需要真实硅基流动 API"
+)
+async def test_real_api_is_1024_dim_and_semantic():
+    import numpy as np
+
+    from app.config import get_settings
+    from app.knowledge.embedder import get_embedder, reset_embedders
+
+    reset_embedders()
+    settings = get_settings()
+    settings.require_embedding_key()  # 没密钥时给一条明确信息，而不是 401
     embedder = get_embedder(settings)
-    vectors = await embedder.embed(["邮费是多少", "运费怎么收", "发票怎么开"])
+
+    try:
+        vectors = await embedder.embed(["邮费是多少", "运费怎么收", "发票怎么开"])
+    finally:
+        await embedder.aclose()
+        reset_embedders()
 
     assert all(len(v) == 1024 for v in vectors)
     a, b, c = (np.array(v) for v in vectors)
-    assert abs(float(np.linalg.norm(a)) - 1.0) < 1e-3  # 已 L2 归一化
     assert float(a @ b) > float(a @ c) + 0.1  # 同义句明显比无关句更近
-    reset_embedders()

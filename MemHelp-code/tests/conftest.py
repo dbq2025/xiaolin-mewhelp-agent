@@ -111,6 +111,9 @@ def _offline_database(monkeypatch, sqlite_session):
     def _wrapped(*args, **kwargs):
         kwargs.setdefault("repositories", _make_repositories(sqlite_session))
         kwargs.setdefault("db_ping", lambda: True)
+        # ch03：测试**绝不**加载 2.3GB 的嵌入模型，也不连 Milvus。
+        kwargs.setdefault("retriever", EmptyRetriever())
+        kwargs.setdefault("rag_warmup", False)
         return _real_create_app(*args, **kwargs)
 
     # monkeypatch 会在测试结束后自动还原（按属性名记录原值）。
@@ -123,6 +126,30 @@ def _make_repositories(session):
     from app.db.repositories import Repositories
 
     return Repositories.from_session(session)
+
+
+class EmptyRetriever:
+    """测试默认注入的检索器：永远返回空列表。
+
+    ch01/ch02 的对话与工具用例不关心检索；给它们一个**不连 Milvus、不加载模型**
+    的空实现，既能让 ``query_faq`` 的接线成立，又不会拖慢套件。
+    需要真实命中的用例自己显式注入 ``fake_retriever`` 或真检索器。
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int]] = []
+
+    async def search(self, query: str, top_k: int = 5) -> list:
+        self.calls.append((query, top_k))
+        return []
+
+    async def warmup(self) -> None:
+        return None
+
+
+@pytest.fixture
+def empty_retriever() -> EmptyRetriever:
+    return EmptyRetriever()
 
 
 @pytest.fixture(autouse=True)
@@ -139,6 +166,10 @@ def _isolate_process_singletons():
     def clear() -> None:
         get_session_store()._sessions.clear()  # noqa: SLF001 - 测试清理内部状态
         _default_chat_model.cache_clear()
+        # ch03：嵌入器是进程单例，不清掉会让「上一个测试加载的模型」跨用例存活
+        from app.knowledge.embedder import reset_embedders
+
+        reset_embedders()
 
     clear()
     yield
@@ -173,6 +204,22 @@ def _isolate_real_env_file(monkeypatch):
         "MYSQL_DATABASE",
         "TOOL_TIMEOUT_SECONDS",
         "TOOL_MAX_RETRIES",
+        # ch03 新增：不清掉的话，宿主机设了 MILVUS_* / RAG_* 就会让套件结果依赖那台机器
+        "MILVUS_URI",
+        "MILVUS_COLLECTION",
+        "EMBEDDING_BASE_URL",
+        "EMBEDDING_API_KEY",
+        "EMBEDDING_MODEL",
+        "EMBEDDING_DIM",
+        "EMBEDDING_TIMEOUT",
+        "EMBEDDING_BATCH_SIZE",
+        "EMBEDDING_MAX_RETRIES",
+        "RAG_TOP_K",
+        "RAG_WARMUP",
+        "CHUNK_MAX_CHARS",
+        "CHUNK_OVERLAP",
+        "QA_BATCH_SIZE",
+        "QA_DEDUPE_THRESHOLD",
     ):
         monkeypatch.delenv(name, raising=False)
 

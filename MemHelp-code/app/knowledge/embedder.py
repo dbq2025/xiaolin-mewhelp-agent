@@ -1,38 +1,46 @@
-"""BGE-M3 嵌入器 —— 全章唯一的「文本 → 向量」入口。
+"""嵌入器 —— 硅基流动云端 BGE-M3（OpenAI 兼容 ``/embeddings``）。
 
-## 为什么要懒加载 + 进程单例
+## 为什么是 HTTP 而不是本地模型
 
-BGE-M3 是 568M 参数的模型（2.27GB 权重），一次加载 20-40s、常驻约 1.5GB 内存。
-每个请求 new 一个会把内存吃穿，每个进程里加载两份则是纯粹浪费。
-所以：``get_embedder(settings)`` 是 ``lru_cache`` 单例，模型在**第一次真正要编码时**
-才加载（``warmup`` 可以提前触发）。
+上游聊天模型（DeepSeek）没有 ``/embeddings`` 端点，所以嵌入必须走另一家。
+用户明确要求用**硅基流动的云端 API**、不要在本机部署模型（本地
+``sentence-transformers`` + 2.3GB 权重 + torch 的方案已作废）。
+于是本章的依赖里没有 torch，嵌入就是一次普通的 HTTP POST。
 
-## 为什么所有调用都进工作线程
+## 云端特有的四个坑（本地版没有）
 
-``model.encode`` 是 CPU 密集的同步调用。直接在 ``async def`` 里调它，阻塞的是
-事件循环本身 —— 单请求看不出问题，并发时所有请求排成一队等同一次前向。
-与仓库层同一条纪律：``async def`` 不等于不阻塞。
+1. **返回顺序**：响应里的 ``data`` 不保证与输入同序，必须按 ``index`` 排序后再对齐。
+   错位不会报错，只会让检索「答非所问」，而且不可复现。
+2. **限流**：429 与 503/504 要退避重试；400/401/403 重试多少次都是同样结果，不重试。
+3. **密钥**：没配 ``EMBEDDING_API_KEY`` 时**发请求前**就抛可读错误，
+   不要等拿到 401 再报一个看不懂的驱动错误。
+4. **批量长度**：一条请求带太多文本会被拒/变慢，所以按 ``batch_size`` 切片，
+   每批独立重试。
 
-## 为什么返回 list 而不是 numpy
+## 维度
 
-Milvus 的 gRPC 客户端只认真实的 Python list；numpy 的 ``float32`` 传进去会在
-**写入时**才报类型错误。在这一层就转成 ``list[float]``，把错误挡在最近的地方。
+``BAAI/bge-m3`` 固定 1024 维（硅基流动的 ``dimensions`` 参数只对 Qwen3 系列生效），
+所以维度由配置给出、并在返回时校验，不一致立刻报错 —— 让 Milvus 报
+「维度不匹配」时你已经跑完几百条嵌入，是最浪费的一种失败。
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Callable, Protocol, Sequence
+from typing import Any, Protocol, Sequence
 
-import anyio
+import httpx
 
 from app.config import Settings
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["BgeM3Embedder", "Embedder", "get_embedder"]
+__all__ = ["Embedder", "SiliconFlowEmbedder", "get_embedder", "reset_embedders"]
+
+#: 仅这些状态码值得重试：限流与上游暂时不可用。
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 
 
 class Embedder(Protocol):
@@ -42,95 +50,167 @@ class Embedder(Protocol):
 
 
 @dataclass
-class BgeM3Embedder:
-    """BGE-M3 的薄封装。
+class SiliconFlowEmbedder:
+    """把一批文本编码成向量，调硅基流动的 ``/embeddings``。
 
-    :param model_path: 模型目录（本地）。不存在时抛 ``FileNotFoundError``，
-        并在消息里指向 ``scripts/download_model.py``。
-    :param batch_size: 编码批大小。CPU 上 32 是稳妥值。
-    :param model_factory: 仅供测试注入；默认延迟 import ``sentence_transformers``。
-        延迟 import 很重要：否则 ``import app`` 就会把 torch 拖起来，
-        连 ``--status`` 这种不碰模型的命令都要等好几秒。
+    :param base_url: OpenAI 兼容根地址，例如 ``https://api.siliconflow.cn/v1``。
+    :param api_key: 硅基流动账户 API Key。
+    :param model: 模型名，例如 ``BAAI/bge-m3``。
+    :param dim: 期望维度；响应维度不符会抛错。
+    :param client: 仅供测试注入（``httpx.AsyncClient`` 带 ``MockTransport``）。
+        不注入时每次调用临时建一个，用完即关 —— 脚本进程里没必要常驻连接池。
     """
 
-    model_path: Path
+    base_url: str
+    api_key: str
+    model: str
+    dim: int = 1024
     batch_size: int = 32
-    model_factory: Callable[[str], Any] | None = None
-    _model: Any = field(default=None, init=False, repr=False)
+    timeout: float = 30.0
+    max_retries: int = 2
+    client: httpx.AsyncClient | None = None
+    _owned_client: httpx.AsyncClient | None = field(default=None, init=False, repr=False)
 
-    # -- 模型加载 -----------------------------------------------------
+    # -- 客户端 -------------------------------------------------------
 
-    def _default_factory(self, path: str) -> Any:
-        from sentence_transformers import SentenceTransformer
+    def _endpoint(self) -> str:
+        return f"{self.base_url.rstrip('/')}/embeddings"
 
-        logger.info("加载嵌入模型：%s（首次约 20-40s）", path)
-        model = SentenceTransformer(path, device="cpu")
-        model.eval()
-        return model
+    def _get_client(self) -> httpx.AsyncClient:
+        if self.client is not None:
+            return self.client
+        if self._owned_client is None:
+            self._owned_client = httpx.AsyncClient(timeout=self.timeout)
+        return self._owned_client
 
-    def _load(self) -> Any:
-        if self._model is not None:
-            return self._model
+    # -- 单批请求 -----------------------------------------------------
 
-        path = str(self.model_path)
-        if self.model_factory is None and not self.model_path.exists():
-            raise FileNotFoundError(
-                f"嵌入模型目录不存在：{path}。"
-                "先跑 `uv run --directory MemHelp-code python scripts/download_model.py` 下载模型。"
+    async def _request(self, texts: list[str]) -> list[list[float]]:
+        if not self.api_key:
+            # 提前失败：没有密钥时连请求都不发，错误消息指向 .env。
+            raise ValueError(
+                "缺少 EMBEDDING_API_KEY（硅基流动账户 API Key）。"
+                "请在 MemHelp-code/.env 里设置，例如 EMBEDDING_API_KEY=sk-xxx。"
             )
-        factory = self.model_factory or self._default_factory
-        self._model = factory(path)
-        return self._model
 
-    async def warmup(self) -> None:
-        """提前把模型加载进内存（lifespan 用）。
+        payload = {"model": self.model, "input": texts, "encoding_format": "float"}
+        headers = {"Authorization": f"Bearer {self.api_key}"}
 
-        **必须**送进工作线程：这一步就是 20-40s 的同步 IO/CPU，直接在事件循环里
-        做会让整个应用在这段时间里不响应任何请求。
-        """
-        await anyio.to_thread.run_sync(self._load)
+        last_error: Exception | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = await self._get_client().post(
+                    self._endpoint(), json=payload, headers=headers
+                )
+            except httpx.TransportError as exc:  # 网络层故障，值得重试
+                last_error = exc
+                if attempt >= self.max_retries:
+                    raise RuntimeError(f"嵌入请求网络故障（已重试 {attempt} 次）：{exc}") from exc
+                await asyncio.sleep(0.5 * (2**attempt))
+                continue
 
-    # -- 编码 ---------------------------------------------------------
+            if response.status_code in _RETRYABLE_STATUS and attempt < self.max_retries:
+                logger.warning(
+                    "嵌入请求返回 %s，第 %d 次重试", response.status_code, attempt + 1
+                )
+                await asyncio.sleep(0.5 * (2**attempt))
+                continue
 
-    def _encode(self, texts: list[str]) -> list[list[float]]:
-        model = self._load()
-        array = model.encode(
-            texts,
-            normalize_embeddings=True,
-            batch_size=self.batch_size,
-            convert_to_numpy=True,
-            show_progress_bar=False,
-        )
-        return [[float(x) for x in row] for row in array]
+            if response.status_code >= 400:
+                # 4xx（尤其是 401/403）重试多少次都一样，直接抛。
+                raise RuntimeError(
+                    f"嵌入请求失败（HTTP {response.status_code}）：{response.text[:300]}"
+                )
+
+            return self._parse(response.json(), expected=len(texts))
+
+        # 循环正常结束只可能在「最后一次仍可重试」时发生
+        raise RuntimeError(f"嵌入请求失败：{last_error or '未知错误'}")
+
+    def _parse(self, body: dict[str, Any], *, expected: int) -> list[list[float]]:
+        data = body.get("data")
+        if not isinstance(data, list) or len(data) != expected:
+            raise RuntimeError(
+                f"嵌入响应条目数不符：期望 {expected}，实际 "
+                f"{len(data) if isinstance(data, list) else '非列表'}"
+            )
+
+        # **按 index 排序**：服务端不保证返回顺序等于输入顺序。
+        try:
+            ordered = sorted(data, key=lambda item: int(item["index"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(f"嵌入响应缺少可用的 index 字段：{body}") from exc
+
+        vectors: list[list[float]] = []
+        for item in ordered:
+            vector = [float(x) for x in item["embedding"]]
+            if len(vector) != self.dim:
+                raise RuntimeError(
+                    f"嵌入维度不符：期望 {self.dim}，实际 {len(vector)}。"
+                    "检查 EMBEDDING_MODEL 与 EMBEDDING_DIM 是否配对。"
+                )
+            vectors.append(vector)
+        return vectors
+
+    # -- 对外接口 -----------------------------------------------------
 
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
-        """把一批文本编码成 L2 归一化的向量，顺序与输入一一对应。
+        """把一批文本编码成向量，顺序与输入一一对应。
 
-        空输入直接返回 ``[]`` 且**不加载模型** —— 建库空跑时不该付 30s 的加载成本。
+        空输入直接返回 ``[]`` 且**不发请求**（建库空跑时不该付一次网络往返）。
         """
         if not texts:
             return []
-        return await anyio.to_thread.run_sync(self._encode, list(texts))
+
+        items = list(texts)
+        vectors: list[list[float]] = []
+        for start in range(0, len(items), self.batch_size):
+            batch = items[start : start + self.batch_size]
+            vectors.extend(await self._request(batch))
+        return vectors
+
+    async def warmup(self) -> None:
+        """发一次真实嵌入请求，把密钥/模型名/网络问题提前到启动阶段。"""
+        await self.embed(["预热"])
+
+    async def aclose(self) -> None:
+        """关掉自己建的客户端（脚本与 lifespan 退出时用）。注入的客户端不关。"""
+        if self._owned_client is not None:
+            await self._owned_client.aclose()
+            self._owned_client = None
 
 
-_EMBEDDERS: dict[str, BgeM3Embedder] = {}
+_EMBEDDERS: dict[tuple[str, str, str, int], SiliconFlowEmbedder] = {}
 
 
-def get_embedder(settings: Settings) -> BgeM3Embedder:
-    """进程级单例（按模型目录区分）。
+def get_embedder(settings: Settings) -> SiliconFlowEmbedder:
+    """进程级单例（按 base_url/model/dim 区分：换模型要拿到新实例）。
 
     为什么不用 ``lru_cache(settings)``：pydantic 的 ``Settings`` 不可哈希，
     直接当缓存键会抛 ``TypeError: unhashable type`` —— 而且只有真跑到这条路径
-    才会发现。用模型目录字符串作键，既哈希得了，也正好是「换模型要换实例」的语义。
+    才会发现。
     """
-    key = str(settings.embedding_model_dir())
+    key = (
+        settings.embedding_base_url,
+        settings.embedding_model,
+        settings.embedding_api_key,
+        settings.embedding_dim,
+    )
     cached = _EMBEDDERS.get(key)
     if cached is None:
-        cached = BgeM3Embedder(Path(key))
+        cached = SiliconFlowEmbedder(
+            base_url=settings.embedding_base_url,
+            api_key=settings.embedding_api_key,
+            model=settings.embedding_model,
+            dim=settings.embedding_dim,
+            batch_size=settings.embedding_batch_size,
+            timeout=settings.embedding_timeout,
+            max_retries=settings.embedding_max_retries,
+        )
         _EMBEDDERS[key] = cached
     return cached
 
 
 def reset_embedders() -> None:
-    """丢掉进程内已加载的模型（测试与「热换模型」用）。生产代码不要调。"""
+    """丢掉进程内缓存的嵌入器（测试与「热换配置」用）。生产代码不要调。"""
     _EMBEDDERS.clear()

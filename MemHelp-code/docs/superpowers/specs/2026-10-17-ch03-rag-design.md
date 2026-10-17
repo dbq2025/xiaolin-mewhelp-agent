@@ -38,7 +38,7 @@
 
 | 决策点 | 结论 | 理由 |
 |---|---|---|
-| 嵌入运行形态 | **进程内 `sentence-transformers`，只跑 CPU** | 上游无 `/embeddings`（实测 404）；单进程失败面最小。GPU（RTX 5060 / sm_120）对 torch 版本过于挑剔，本章不赌 |
+| 嵌入运行形态 | **硅基流动云端 BGE-M3（OpenAI 兼容 `/embeddings`），模型名 `BAAI/bge-m3`** | 用户明确要求云端 API、不要本地部署（见 §2.3）。DeepSeek 无 `/embeddings`（实测 404），嵌入必须走另一家；本地方案（`sentence-transformers` + 2.3GB 权重 + torch）已作废 |
 | 语料来源 | **我写三份演示 Markdown**，与现有 `faq` 表口径一致 | 切分规则必须有真实形态的语料才能验收（多级标题 / 超长条款 / 大表格 / 关键条款） |
 | 定时任务形态 | **CLI 脚本 + 外部调度器** | 无新依赖、可观察、可重跑；文档给 Windows 计划任务与 cron 的注册写法 |
 | 契约不变的范围 | **改 `description`，参数名与出参 JSON 一字不动** | `description` 是写给模型的提示词，不是接口形状；不改它，模型会继续截成名词，向量检索的优势被耗掉一半 |
@@ -66,11 +66,33 @@
 | 实测通过的能力 | `create_schema` + `add_field` + `prepare_index_params` + `create_collection`；同主键 `upsert` 两次仍 1 行；`search(consistency_level='Strong')` 写完立刻可读；`query(filter='', output_fields=['count(*)'])` 可数行 |
 | 实测坑 | `get_collection_stats().row_count` 不可靠（写完仍报 0），**不用它**做校验 |
 | MySQL | 8.4.11；`knowledge_chunks` = 用户 DDL 逐列一致；`qa_extraction_staging.status` 真库是 5 值超集（多 `approved`/`rejected`） |
-| 上游 embeddings | `POST /v1/embeddings` → **404**，DeepSeek 不提供 |
-| BGE-M3 | `pytorch_model.bin` 2271 MB；ModelScope 4.32 MB/s vs HF 1.04 MB/s |
-| torch | 2.14.1 Windows 轮子 **124 MB（纯 CPU）**，不会拖 CUDA 组合包 |
+| 上游 embeddings | `POST /v1/embeddings` → **404**，DeepSeek 不提供；嵌入改走硅基流动（见 §2.3） |
+| BGE-M3（云端） | `POST https://api.siliconflow.cn/v1/embeddings`；`input` 支持字符串数组；`BAAI/bge-m3` 最大输入 **8192 token**；`dimensions` 只对 Qwen3 系列生效 → bge-m3 **固定 1024 维**；返回 `data:[{embedding, index}]`，**必须按 `index` 排序**才能与输入对齐；错误码 400/401/403/404/429/503/504 |
 | GPU | RTX 5060 Laptop 8GB（本章不用） |
 | 宿主机 HTTPS | PowerShell `Invoke-WebRequest` 全挂（schannel），探针一律走 Python `httpx` |
+
+### 2.3 用户更正（2026-10-17，实施到 Task 9 时）
+
+用户原话：
+
+> 「硅基流动 BGE-M3 云端 API。我打算使用的是这个云端的 api，不要帮我本地部署这个嵌入模型。」
+
+**影响范围**：只换「文本 → 向量」这一段。以下**不变**：切分规则、Milvus 集合
+（`id + vector`、COSINE、确定性主键）、MySQL 双写状态机、在线检索、挖矿去重、
+`query_faq` 契约。
+
+**作废的东西**：`sentence-transformers` / `torch` 依赖、`scripts/download_model.py`、
+`EMBEDDING_MODEL_PATH`、本机 `models/bge-m3`（2.1GB，已按用户指示删除）。
+
+**新引入的失败模式**（本地版没有的，必须正面处理）：
+
+| 失败模式 | 处理 |
+|---|---|
+| 429 限流 / 503 / 504 | 指数退避重试（默认 2 次）；只有 429 与 5xx 重试，400/401 不重试 |
+| 批量返回顺序 | 按响应里的 `index` 排序后再对应输入，不假设「按数组顺序返回」 |
+| 网络抖动 | 单次请求超时（默认 30s）；建库批量大，失败要能整批重跑 |
+| 密钥缺失/无权 | 首次调用时抛可读错误（指向 `.env` 的 `EMBEDDING_API_KEY`），不静默返回空向量 |
+| 服务商定期变更模型 | 模型名可配（`EMBEDDING_MODEL`），不写死在代码里 |
 
 ## 3. 数据层设计
 
@@ -246,15 +268,17 @@ class KnowledgeRetriever(Protocol):
 原 `MAX_FAQ_ITEMS=5` 不再是独立的业务常数：取数由 `RAG_TOP_K`（默认 5）决定，
 `query_faq` 只把它作为 `retriever.search` 的 `top_k` 传入。
 
-### 6.3 接线与冷启动
+### 6.3 接线与预热
 
-- `app/knowledge/embedder.py` 提供 `BgeM3Embedder`（懒加载单例）+ `Embedder` Protocol。
+- `app/knowledge/embedder.py` 提供 `SiliconFlowEmbedder`（HTTP 调云端 `/embeddings`，
+  `httpx.AsyncClient`，可注入 `transport` 供测试）+ `Embedder` Protocol。
 - `create_app` 新增两个可注入参数：`retriever` 与 `rag_warmup: bool = True`。
-  - `rag_warmup=True` → `lifespan` 里预热：加载模型 + `ensure_collection`。
-    预热失败**只告警不崩**（Milvus 挂了应用仍可起，查询时由 executor 分类成 `ok=false`）。
-  - 测试的 `conftest` 注入 `rag_warmup=False`，整套测试**不加载 2.3GB 模型**。
-- 冷启动成本：BGE-M3 首载约 20–40s，而 `TOOL_TIMEOUT_SECONDS=3`。所以
-  **必须预热**，否则演示的第一个问句必然超时——这是本章最容易被当成「检索坏了」的坑。
+  - `rag_warmup=True` → `lifespan` 里预热：**发一次真实嵌入请求**（顺便校验密钥与
+    模型名）+ `ensure_collection`。预热失败**只告警不崩**（Milvus 或嵌入服务暂时
+    不可用时应用仍要能起，查询时由 executor 分类成 `ok=false`）。
+  - 测试的 `conftest` 注入 `rag_warmup=False`，整套测试**不发任何网络请求**。
+- 预热为什么还留着：云端没有 20-40s 的模型加载，但**第一次调用要付 TLS+鉴权**，
+  而且密钥/模型名配错时，预热能在启动阶段就把问题喊出来，而不是等用户问第一句。
 - `get_tools(repositories, retriever)` 加一个参数；注册表自检逻辑不变。
 
 ## 7. 对话挖知识（`app/knowledge/mining.py` + `scripts/mine_conversations.py`）
@@ -298,8 +322,13 @@ class KnowledgeRetriever(Protocol):
 ```
 MILVUS_URI=http://127.0.0.1:19530
 MILVUS_COLLECTION=knowledge
-EMBEDDING_MODEL_PATH=models/bge-m3
+EMBEDDING_BASE_URL=https://api.siliconflow.cn/v1
+EMBEDDING_API_KEY=sk-***
+EMBEDDING_MODEL=BAAI/bge-m3
 EMBEDDING_DIM=1024
+EMBEDDING_TIMEOUT=30
+EMBEDDING_BATCH_SIZE=32
+EMBEDDING_MAX_RETRIES=2
 RAG_TOP_K=5
 RAG_WARMUP=true
 CHUNK_MAX_CHARS=600
@@ -308,24 +337,25 @@ QA_BATCH_SIZE=8
 QA_DEDUPE_THRESHOLD=0.92
 ```
 
-- `EMBEDDING_MODEL_PATH` 相对路径以 `PROJECT_ROOT` 解析（与 `.env` 同一条纪律，
-  不依赖 CWD）；目录不存在时给出明确报错，指向 `scripts/download_model.py`。
-- 依赖新增：`sentence-transformers`、`torch`（CPU）、`pymilvus>=2.6,<3`。
-  **不允许装 3.x**（实测服务端 2.6.22，官方兼容表要求 2.6.X）。
-- `models/` 加进 `.gitignore`（2.3GB 绝不入库）。
+- `EMBEDDING_API_KEY` **留空也能通过配置校验**（离线测试与 `--status` 不该因为没密钥就崩），
+  但真正发请求前会校验并抛出可读错误，指向 `.env`。
+- 实际请求路径是 `{EMBEDDING_BASE_URL}/embeddings`。
+- 依赖新增只有 `pymilvus>=2.6,<3` 与显式声明的 `httpx`（原本只是传递依赖）。
+  **不允许装 pymilvus 3.x**（实测服务端 2.6.22，官方兼容表要求 2.6.X）。
+- 本地模型方案作废：`models/` 已从磁盘与 `.gitignore` 移除。
 
 ## 9. 测试策略
 
 | 层 | 方式 | 钉住什么 |
 |---|---|---|
 | `chunker.py` | **TDD**，纯离线 | 标题栈、section_path/category/questions 映射、超长递归、重叠回退到句末、表头复制、关键条款标记、空节跳过 |
-| `embedder.py` | TDD，假后端 + 真模型（skip） | 懒加载只发生一次、归一化、维度 1024、批量顺序对齐 |
+| `embedder.py` | TDD，假 HTTP transport + 真 API（skip） | 请求形状（model/input/encoding_format）、**按 `index` 排序**、批次切分、429/5xx 重试、4xx 不重试、密钥缺失报错 |
 | `vector_store.py` | TDD，假客户端 + 真 Milvus（skip） | 建集合参数（dim/主键/COSINE）、幂等 upsert、Strong 读己写、count 口径 |
 | `ingest.py` | TDD，SQLite + 假嵌入 + 假向量库 | 自然键幂等、三种中断点收敛、prev/next 回填、pending 只补漏、rebuild |
 | `retrieval.py` | TDD，假嵌入 + 假向量库 + SQLite | 分数序保持、MySQL 缺行被丢弃、返回契约字段 |
 | `tools/knowledge.py` | TDD 改写（ch02 用例迁移） | **出参 JSON 形状一字不变**、`ok/count/items` 语义、异常原样冒出 |
 | `mining.py` | TDD，假 LLM + SQLite | 分批边界、整批失败不落库、跨批去重、kept 入库、幂等跳过 |
-| `api.py` / `chat_tools.py` | 扩展既有 HTTP 测试 | `retriever` 注入生效、`rag_warmup=False` 不加载模型 |
+| `api.py` / `chat_tools.py` | 扩展既有 HTTP 测试 | `retriever` 注入生效、`rag_warmup=False` 不发网络请求 |
 | **真实 Milvus** | `tests/test_knowledge_milvus.py`（`MEMHELP_TEST_MILVUS=1`） | 集合 schema、upsert 幂等、写完立刻搜得到 |
 | **真实 MySQL** | 扩展 `tests/test_db_mysql.py`（`MEMHELP_TEST_MYSQL=1`） | 两张新表逐列对齐、5 值 ENUM 可读写 |
 | **真实嵌入** | `MEMHELP_TEST_EMBED=1` | BGE-M3 真加载、1024 维、同义句余弦显著高于无关句 |
@@ -348,9 +378,8 @@ QA_DEDUPE_THRESHOLD=0.92
 $env:UV_CACHE_DIR = "F:\DeepSeek-Harness\memhelp-code-myself\.uv-cache"
 $uv = "C:\Users\dbq\.local\bin\uv.exe"
 
-# 0) 依赖 + 模型（一次性）
+# 0) 依赖（一次性）；嵌入走云端，需要在 .env 里填 EMBEDDING_API_KEY
 & $uv sync
-& $uv run --directory MemHelp-code python scripts/download_model.py
 
 # 1) 建库（文档 + faq 表）
 & $uv run --directory MemHelp-code python scripts/build_knowledge.py --docs knowledge --faq-table
@@ -382,7 +411,7 @@ $uv = "C:\Users\dbq\.local\bin\uv.exe"
 | 演示语料 | `MemHelp-code/knowledge/{退货政策,商品FAQ,售后手册}.md` |
 | 演示历史会话 | `sql/ch03-seed-history.sql`（`demo-ch03-*` 前缀） |
 | 后端 | `MemHelp-code/app/knowledge/**`、`app/db/{models,repositories}.py`、`app/tools/{knowledge,registry}.py`、`app/{api,config}.py` |
-| 脚本 | `scripts/{build_knowledge,mine_conversations,download_model}.py` |
+| 脚本 | `scripts/{build_knowledge,mine_conversations}.py` |
 | 评估集 | `evals/rag_cases.jsonl`、`evals/run_rag_evals.py` |
 | 测试 | `tests/test_knowledge_*.py`、`tests/test_tool_knowledge.py`、`tests/test_db_*.py` |
 | 开发留痕 | `MemHelp-code/dev-notes/ch03.md` |
@@ -392,11 +421,14 @@ $uv = "C:\Users\dbq\.local\bin\uv.exe"
 | 风险 | 应对 |
 |---|---|
 | pymilvus 版本漂移（默认装 3.0.2） | 引脚 `>=2.6,<3`；集成测试先断言 `get_server_version()` 与集合 schema |
-| 冷启动 20–40s 打穿 3s 工具超时 | `rag_warmup` 在 lifespan 预热；演示命令先起服务再问 |
-| CPU 编码慢（约 100–300ms/句） | 建库批 32；检索只编码 1 句，可接受 |
+| 首次调用要付 TLS+鉴权 | `rag_warmup` 在 lifespan 发一次真实嵌入请求；演示命令先起服务再问 |
+| 云端编码的往返延迟（受网络影响） | 检索只编码 1 句；单次超时 30s；工具超时仍为 3s —— 若云端抖动，工具会 `ok=false` 而不是卡死 |
+| 429 限流 / 503 / 504 | 指数退避重试（默认 2 次），仅 429 与 5xx |
+| 批量返回顺序 | 按响应 `index` 排序；有专门用例钉住 |
+| 密钥缺失或无权 | 发请求前校验并抛可读错误（指向 `.env` 的 `EMBEDDING_API_KEY`） |
+| 服务商调整可用模型 | 模型名可配（`EMBEDDING_MODEL`），不写死 |
 | `get_collection_stats` 不可靠 | 校验一律用 `query(count(*))` |
 | 真库 ENUM 超集 | ORM 含 5 值 + `KNOWN_SCHEMA_DIVERGENCES` 记录 |
 | `sql/` 目前未跟踪 | **已裁定**：`sql/` 全部首次提交（ch02 三份 + 本章两份），随本章代码一起进 git |
 | 切分参数（600/80）没有理论最优 | 用评估集回归；参数可配，改参不改进评估标准 |
 | 去重阈值 0.92 可能误杀 | 丢弃行留档可人工复核；阈值可配、有回归用例 |
-| 模型目录 2.3GB | 加 `.gitignore`；`download_model.py` 支持断点续传 |

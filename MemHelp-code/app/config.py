@@ -82,13 +82,38 @@ class Settings(BaseSettings):
     milvus_collection: str = Field(
         default="knowledge", min_length=1, description="Milvus 集合名。"
     )
-    embedding_model_path: str = Field(
-        default="models/bge-m3",
+    embedding_base_url: str = Field(
+        default="https://api.siliconflow.cn/v1",
         min_length=1,
-        description="BGE-M3 模型目录（本地路径或 HF id）。相对路径按项目根解析。",
+        description="嵌入服务的 OpenAI 兼容根地址（实际请求 {base}/embeddings）。",
+    )
+    embedding_api_key: str = Field(
+        default="",
+        description=(
+            "嵌入服务的 API Key（硅基流动账户 Key）。"
+            "**允许为空**：离线测试与 --status 不该因为没密钥就崩；"
+            "真正发请求前由 require_embedding_key() 报错。"
+        ),
+    )
+    embedding_model: str = Field(
+        default="BAAI/bge-m3",
+        min_length=1,
+        description="嵌入模型名。服务商会不定期调整可用模型，所以不写死在代码里。",
     )
     embedding_dim: int = Field(
         default=1024, ge=1, description="向量维度。BGE-M3 dense 输出固定 1024。"
+    )
+    embedding_timeout: float = Field(
+        default=30.0, gt=0, description="单次嵌入请求超时（秒）。"
+    )
+    embedding_batch_size: int = Field(
+        default=32, ge=1, le=256, description="单次请求最多带多少条文本。"
+    )
+    embedding_max_retries: int = Field(
+        default=2,
+        ge=0,
+        le=5,
+        description="仅对 429 与 5xx 的重试次数（不含首次）。4xx 不重试。",
     )
     rag_top_k: int = Field(
         default=5, ge=1, le=50, description="检索返回的最大条数（也是 query_faq 的取数上限）。"
@@ -113,16 +138,28 @@ class Settings(BaseSettings):
         description="问答对语义去重的余弦阈值：≥ 该值判为同义问法。",
     )
 
-    def embedding_model_dir(self) -> Path:
-        """嵌入模型的绝对路径。
+    def require_embedding_key(self) -> str:
+        """返回嵌入服务密钥；没配就抛可读错误。
 
-        相对路径按 ``PROJECT_ROOT`` 解析，理由与 ``ENV_FILE`` 相同：本仓库的
-        代码在 ``MemHelp-code/`` 子目录、仓库根在上一层，按 CWD 解析会让
-        「从仓库根起进程」和「从代码目录起进程」看到两个不同的模型目录 ——
-        症状是「第一次能跑，换一种启动方式就 FileNotFoundError」。
+        为什么不在 ``Settings`` 上设成必填：``EMBEDDING_API_KEY`` 只有「真正要
+        发嵌入请求」时才需要。设成必填会让离线单测、``--status``、健康检查
+        一起因为一个环境差异而崩 —— 而那不是配置错误，是这台机器还没填密钥。
+
+        为什么不用 ``OPENAI_API_KEY``：那是聊天上游（DeepSeek）的密钥，
+        两个服务商的额度与权限是分开的，混用会把「聊天能用但检索 401」
+        变成一条极难查的线索。
         """
-        path = Path(self.embedding_model_path)
-        return path if path.is_absolute() else PROJECT_ROOT / path
+        if not self.embedding_api_key:
+            raise ValueError(
+                "缺少 EMBEDDING_API_KEY（硅基流动账户 API Key）。"
+                "请在 MemHelp-code/.env 里设置，例如 EMBEDDING_API_KEY=sk-xxx；"
+                "或参考 .env.example。"
+            )
+        return self.embedding_api_key
+
+    def embedding_url(self) -> str:
+        """``{EMBEDDING_BASE_URL}/embeddings``，去掉 base 末尾多余的斜杠。"""
+        return f"{self.embedding_base_url.rstrip('/')}/embeddings"
 
     def database_url(self) -> str:
         """拼出 SQLAlchemy 用的 MySQL 连接串。

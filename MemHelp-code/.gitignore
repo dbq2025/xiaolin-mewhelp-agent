@@ -36,10 +36,6 @@ logs/
 data/
 uploads/
 
-# ---- ch03：嵌入模型（2.3GB，绝不入库）----
-# 由 scripts/download_model.py 下载；换机器只需重跑一次。
-models/
-
 # ---- 编辑器 / 操作系统 ----
 .idea/
 .vscode/

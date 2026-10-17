@@ -20,10 +20,9 @@ dependencies = [
     # pymilvus 必须 2.6.x：服务端实测 2.6.22，官方兼容表要求 2.6.X；
     # 3.x 面向 Milvus 3.0，装错会在建集合/搜索时踩到已改签的 API。
     "pymilvus>=2.6,<3",
-    # 嵌入模型本机跑（上游 DeepSeek 无 /embeddings 端点）。
-    # Windows 的 torch wheel 是纯 CPU 版（约 124MB），不会拖 CUDA 组合包。
-    "sentence-transformers>=5.0",
-    "torch>=2.4",
+    # 嵌入走硅基流动的云端 API（上游 DeepSeek 无 /embeddings）。
+    # httpx 本来就是传递依赖，但我们直接 import 了它，所以显式声明。
+    "httpx>=0.28",
 ]
 
 [dependency-groups]
