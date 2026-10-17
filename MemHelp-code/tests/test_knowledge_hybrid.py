@@ -195,6 +195,26 @@ async def test_bm25_skips_queries_without_searchable_characters():
     assert store.bm25_calls == []
 
 
+async def test_punctuation_only_query_short_circuits_every_strategy():
+    """线上走 hybrid_rerank —— 只拦 BM25 单路不够。
+
+    纯标点问法若照常发出去，稠密向量还会「拉」回一堆不相关的块，
+    用户拿到的是一条基于噪声的答案。
+    """
+    store = _FakeStore(hybrid=[VectorHit(id="1", score=0.03)])
+    repo = _FakeChunkRepo([_Row(1, "x", "y")])
+    retriever = _retriever(store, repo)
+
+    for strategy in ("vector", "bm25", "hybrid", "hybrid_rerank"):
+        result = await retriever.retrieve(
+            strategy, _understood(standard="？？？", bm25_text="？？？")
+        )
+        assert result.chunks == (), strategy
+
+    assert store.dense_calls == []
+    assert store.hybrid_calls == []
+
+
 # ---------------------------------------------------------------------------
 # hybrid
 # ---------------------------------------------------------------------------

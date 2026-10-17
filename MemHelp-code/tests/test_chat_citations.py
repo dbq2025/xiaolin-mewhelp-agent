@@ -148,6 +148,25 @@ async def test_retrieval_low_conf_source_is_recorded_verbatim(fake_repositories)
     assert rows[0].source == "retrieval_low_conf"
 
 
+async def test_pool_write_failure_does_not_break_the_refusal(fake_repositories):
+    """入池是旁路：池子写不进去也要把拒答话术给到用户。
+
+    反过来（先写池、失败就抛）会让「数据库抖一下」变成 500，
+    而验收 4 要求的是「明确拒答」这件用户可见的事。
+    """
+    async def _boom(*_args, **_kwargs):
+        raise RuntimeError("池子挂了")
+
+    fake_repositories.low_confidence.add = _boom  # type: ignore[assignment]
+
+    events, answer = await _run_turn(
+        fake_repositories, payload=_refusal_payload(), chunks=["x"]
+    )
+
+    assert answer == REFUSAL_TEXT
+    assert any(e.kind == "tools" for e in events)
+
+
 # ---------------------------------------------------------------------------
 # 引用捕获与落库
 # ---------------------------------------------------------------------------
@@ -240,3 +259,54 @@ def test_evidence_roundtrip_from_tool_items():
     assert isinstance(restored[0], Evidence)
     assert restored[0].chunk_id == 3
     assert restored[0].quote == "满 99 包邮"
+
+
+async def test_truncated_evidence_is_refilled_from_the_database(fake_repositories):
+    """给模型看的是节选，但用户点开引用必须看到原文。"""
+    full_text = "满 99 元包邮。" * 60
+
+    async def _seed_chunk():
+        await fake_repositories.knowledge.upsert_chunk(
+            {
+                "category": "售后政策",
+                "questions": "运费怎么算",
+                "answer": full_text,
+                "section_path": "售后政策 / 运费",
+                "content_type": "faq",
+                "is_key_clause": False,
+                "ordinal": 0,
+            }
+        )
+        rows = await fake_repositories.knowledge.list_all()
+        return rows[0].id
+
+    chunk_id = await _seed_chunk()
+
+    payload = {
+        "ok": True,
+        "keyword": MESSAGE,
+        "count": 1,
+        "items": [
+            {
+                "n": 1,
+                "chunk_id": chunk_id,
+                "section_path": "售后政策 / 运费",
+                "category": "售后政策",
+                "question": "运费怎么算",
+                "answer": full_text[:320],
+                "truncated": True,
+            }
+        ],
+        "refused": False,
+        "refusal_source": None,
+        "refusal_reason": None,
+    }
+
+    _, answer = await _run_turn(
+        fake_repositories, payload=payload, chunks=["满 99 元包邮[1]。"]
+    )
+
+    conversation_id = await fake_repositories.messages.find_conversation_id("sess-cite")
+    rows = await fake_repositories.messages.list_for_conversation(conversation_id)
+    answer_row = [row for row in rows if row.role == "assistant" and row.content][-1]
+    assert answer_row.citations[0]["quote"] == full_text   # 全文，不是节选

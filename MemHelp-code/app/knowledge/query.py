@@ -95,7 +95,13 @@ _COLLOQUIAL_MARKERS: tuple[str, ...] = (
 )
 
 #: 型号 token：两字母以上 + 可选连字符/空格 + 两位以上数字 + 可选尾字母。
-_MODEL_TOKEN = re.compile(r"\b([A-Za-z]{2,})\s*[-－—]?\s*(\d{2,})([A-Za-z]?)\b")
+#:
+#: 两侧用**ASCII 边界断言**而不是 ``\b``：中文也是 ``\w``，``\b`` 在「型号紧贴中文」
+#: 时（``XH3000A续航多久``）根本不成立 —— 那是用户最常写的一种形状，
+#: 用 ``\b`` 会让归一静默失效（真机评审实测）。
+_MODEL_TOKEN = re.compile(
+    r"(?<![A-Za-z0-9])([A-Za-z]{2,})\s*[-－—]?\s*(\d{2,})([A-Za-z]?)(?![A-Za-z0-9])"
+)
 
 _TAIL_PUNCT = "？?。.！!~～…、,，:：;；\"'“”‘’ "
 
@@ -150,8 +156,13 @@ def _looks_colloquial(text: str) -> bool:
 
     已经命中领域词（``SYNONYMS`` 的键）的问法一律不算口语 —— 它已经是标准问法，
     再改写一遍只是多一次调用。
+
+    带型号 token 的问法也一律不改写：改写 prompt 没有「原样保留型号」的约束，
+    模型完全可能把 ``XH-3000A`` 改写成「这款巡检仪」—— 型号一丢，BM25 直接全漏。
     """
     if any(term in text for term in SYNONYMS):
+        return False
+    if _MODEL_TOKEN.search(text):
         return False
     if any(marker in text for marker in _COLLOQUIAL_MARKERS):
         return True

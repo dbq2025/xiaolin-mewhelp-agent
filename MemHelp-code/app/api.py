@@ -279,6 +279,25 @@ def _vector_store_for(uri: str, collection: str, dim: int) -> MilvusVectorStore:
     return MilvusVectorStore(uri, collection, dim)
 
 
+#: ch04：Query 理解的缓存挂在 ``QueryUnderstander`` 实例上，所以实例必须**进程内复用**。
+#: 每请求新建一个的话，spec §4 要的 512 条缓存永远不会命中 —— 每一句口语问法都要多一次
+#: 改写模型调用（真机评审实测）。
+_UNDERSTANDERS: dict[tuple[bool, float], QueryUnderstander] = {}
+
+
+def _understander_for(settings: Settings, model: object) -> QueryUnderstander:
+    """按「是否启用改写 + 超时」取一个进程内复用的理解器。"""
+    key = (settings.rag_query_rewrite, settings.rag_rewrite_timeout)
+    understander = _UNDERSTANDERS.get(key)
+    if understander is None:
+        understander = QueryUnderstander(
+            LlmRewriter(model, timeout=settings.rag_rewrite_timeout),
+            enabled=settings.rag_query_rewrite,
+        )
+        _UNDERSTANDERS[key] = understander
+    return understander
+
+
 def get_retriever(
     request: Request, repositories: Repositories = Depends(get_repositories)
 ) -> AnswerContextLike:
@@ -300,10 +319,7 @@ def get_retriever(
         settings.milvus_uri, settings.milvus_collection, settings.embedding_dim
     )
     model = getattr(request.app.state, "chat_model", None) or get_chat_model(settings)
-    understander = QueryUnderstander(
-        LlmRewriter(model, timeout=settings.rag_rewrite_timeout),
-        enabled=settings.rag_query_rewrite,
-    )
+    understander = _understander_for(settings, model)
     retriever = HybridRetriever(
         embedder=get_embedder(settings),
         vector_store=store,

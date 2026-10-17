@@ -44,7 +44,7 @@ model.bind_tools(五工具).ainvoke(messages)     ← 第 1 次调用，非流�
 import json
 import logging
 from collections.abc import AsyncIterator, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -184,20 +184,43 @@ def _refusal_of(result: ToolResult) -> tuple[str, str] | None:
     return source, reason
 
 
-def _evidence_of(result: ToolResult) -> tuple[Evidence, ...]:
+async def _evidence_of(result: ToolResult, repositories: Repositories) -> tuple[Evidence, ...]:
     """从 ``query_faq`` 的出参还原证据。字段缺失/形状不对时返回空 —— 不抛。
 
     编排层只负责「把编号映射回 chunk」，它不该因为工具多/少一个字段就炸掉整轮对话。
+
+    出参里被截断的那些（``truncated: true``）要**回库取全文**：给模型看的是节选，
+    但用户点开引用时看到的必须是原文，否则「点开看来源」这件事就名不副实。
     """
     payload = _as_mapping(result.data)
     if not payload:
         return ()
-    items = payload.get("items") or []
+    items = list(payload.get("items") or [])
     try:
-        return evidence_from_payload(list(items))
+        evidence = evidence_from_payload(items)
     except (KeyError, TypeError, ValueError):
         logger.warning("query_faq 出参里的证据形状不对，本轮不提供引用", exc_info=True)
         return ()
+
+    truncated_ids = [
+        item.get("chunk_id")
+        for item in items
+        if item.get("truncated") and item.get("chunk_id") is not None
+    ]
+    if not truncated_ids:
+        return evidence
+
+    try:
+        wanted = [int(chunk_id) for chunk_id in truncated_ids]
+        rows = {row.id: row.answer for row in await repositories.knowledge.get_many(wanted)}
+    except Exception:  # noqa: BLE001 - 取全文失败不该毁掉整轮回答
+        logger.warning("引用原文回库补全失败，退回节选", exc_info=True)
+        return evidence
+
+    return tuple(
+        replace(item, quote=rows[item.chunk_id]) if item.chunk_id in rows else item
+        for item in evidence
+    )
 
 
 async def astream_chat_with_tools(
@@ -318,7 +341,15 @@ async def astream_chat_with_tools(
             refusal = _refusal_of(result) if tool_name == "query_faq" else None
             if refusal is not None:
                 source, reason = refusal
-                await _record_low_confidence(repositories, session_id, message, source, reason)
+                # 入池是**旁路**：池子写不进去也要把拒答话术给到用户。
+                # 反过来（先写池、失败就抛）会让「数据库抖一下」变成 500，
+                # 而验收 4 要求的是「明确拒答」这件用户可见的事。
+                try:
+                    await _record_low_confidence(
+                        repositories, session_id, message, source, reason
+                    )
+                except Exception:  # noqa: BLE001 - 入池失败不该吞掉拒答
+                    logger.exception("低置信度入池失败（已忽略，仍然给出拒答）")
                 parts.append(REFUSAL_TEXT)
                 yield ToolEvent("token", {"delta": REFUSAL_TEXT})
                 await _persist(
@@ -366,7 +397,7 @@ async def astream_chat_with_tools(
                 parts.append(fallback)
                 yield ToolEvent("token", {"delta": fallback})
 
-            evidence = _evidence_of(result)
+            evidence = await _evidence_of(result, repositories)
             citations = _valid_citations("".join(parts), evidence)
     except BaseException:
         # 失败时只落用户那一轮（沿用 ch01「不落半截回答」）。

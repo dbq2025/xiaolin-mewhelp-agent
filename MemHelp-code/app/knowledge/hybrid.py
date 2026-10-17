@@ -161,6 +161,12 @@ class HybridRetriever:
         """按指定策略检索。空结果不是错误。"""
         expr = build_expr(category, content_type)
 
+        # 没有任何可检索字符（纯标点/空白）时四种策略都直接返回空：
+        # 只拦 BM25 单路是不够的 —— 线上走 hybrid_rerank，那种问法会被原样发给
+        # Milvus 的 BM25 检索，还可能被稠密向量「拉」回一堆不相关的块。
+        if not _has_searchable_characters(query.standard):
+            return StrategyResult(chunks=(), strategy=strategy)
+
         if strategy == "bm25":
             hits = await self._bm25_hits(query, expr)
             return StrategyResult(

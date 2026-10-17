@@ -283,9 +283,13 @@ body `{model, query, documents, top_n, return_documents: False}`，
 > 顶层 `expr` 会直接抛 `TypeError`。所以过滤必须挂到**两个** `AnnSearchRequest.expr` 上 ——
 > 两路都过滤，融合后的候选才都满足条件。这条已写进 Task 3/Task 8 的测试断言。
 
-- `query_faq` 新增**可选**参数 `category`：用户在话里明确点名品类时由模型传入；
-  未传则不过滤。
-- 评估脚本支持 `--category` 做单桶过滤验证。
+- `query_faq` 内部支持**可选** `category` 参数（`query_faq(keyword, category=...)`），
+  传了就按品类前置过滤；**但它不进工具 Schema** —— 实测模型会把型号题猜成
+  `category="商品参数"`，而语料里的品类是「商品型号手册 / 巡检仪」这种真实路径，
+  猜错就把检索过滤成空，用户收到的是一句误拒。过滤能力由评估脚本与集成测试调用，
+  不交给模型自由填字符串（这条在执行期按实测修正，见 dev-notes 阶段 6）。
+- 评估脚本支持 `--category` 做单桶过滤验证；真机过滤由
+  `tests/test_knowledge_milvus.py::test_per_request_expr_filters_both_paths` 钉住。
 - 表达式只允许等值：`category == "..."`，`content_type == "..."`。
   不做 `LIKE` / `in` —— 这一章要证明的是「先过滤再检索」这个结构，不是查询语言。
 
@@ -588,7 +592,7 @@ uv run python scripts/show_low_confidence.py    # 池子里应有这一行
 | 留痕 | `dev-notes/ch04.md`（逐阶段追记）+ `dev-notes/ch04-eval-report.md` |
 | 检索 | `app/knowledge/query.py`、`hybrid.py`、`rerank.py`、`citations.py`、`sufficiency.py` |
 | 编排 | `app/knowledge/pipeline.py`（`RagPipeline`：理解→检索→重排→两道闸→证据） |
-| 工具契约 | `app/tools/knowledge.py`、`registry.py`、`schemas.py`（`query_faq` 新增可选 `category`） |
+| 工具契约 | `app/tools/knowledge.py`、`registry.py`、`schemas.py`（`query_faq` 出参升级；`category` 只保留程序可达，不进 Schema） |
 | 数据 | `app/db/models.py`、`repositories.py`、`sql/ch04-ddl.sql`（含 `messages.citations`） |
 | 语料 | `knowledge/商品型号手册.md`（新增） |
 | 评估 | `evals/ch04_cases.jsonl`、`evals/run_ch04_evals.py`、`evals/reports/` |

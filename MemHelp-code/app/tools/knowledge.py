@@ -1,4 +1,4 @@
-"""``query_faq`` —— 混合检索（BM25 + 稠密）+ 重排后的「带编号证据」。
+﻿"""``query_faq`` —— 混合检索（BM25 + 稠密）+ 重排后的「带编号证据」。
 
 ## 契约只增不改
 
@@ -41,6 +41,14 @@ __all__ = ["AnswerContextLike", "query_faq"]
 #: 兜底取数（与 ``Settings.rag_top_k`` 的默认值一致，仅用于文档说明）。
 MAX_FAQ_ITEMS = 10
 
+#: 单条证据喂给模型的正文上限。
+#:
+#: 为什么必须截断：``executor`` 对工具结果有 ``MAX_TOOL_RESULT_CHARS = 4000`` 的硬上限，
+#: 10 条 × 完整答案（最长 600 字）再加元数据会直接超 —— 超了之后模型收到的是被切断的
+#: Python repr，而不是 JSON：它看不懂，引用编号也就不可能标对。
+#: 截断只影响**给模型看的**那一份；落库的引用快照由编排层按 chunk 回库取全文补全。
+MAX_TOOL_ANSWER_CHARS = 220
+
 
 class AnswerContextLike(Protocol):
     """工具层对「在线检索管线」的最小依赖。"""
@@ -51,19 +59,25 @@ class AnswerContextLike(Protocol):
 
 
 def _item(evidence: Evidence) -> dict:
-    return {
+    answer = evidence.quote or ""
+    truncated = len(answer) > MAX_TOOL_ANSWER_CHARS
+    item = {
         "n": evidence.n,
         "chunk_id": evidence.chunk_id,
         "section_path": evidence.section_path,
         "category": evidence.category,
-        # question/answer 是 ch02 以来的「问答对语义」；quote 是「证据快照语义」。
-        # 当前取值相同，保留两个键是因为两者未来可能分叉（比如 quote 截断）。
+        # question/answer 是 ch02 以来的「问答对语义」。
+        # 不再额外发一份 ``quote``（它与 answer 同源）—— 那是白白多一倍字节，
+        # 直接把 10 条证据顶过 executor 的 4000 字上限。
         "question": evidence.question or (
             evidence.section_path.split(" / ")[-1] if evidence.section_path else ""
         ),
-        "answer": evidence.quote,
-        "quote": evidence.quote,
+        "answer": answer[:MAX_TOOL_ANSWER_CHARS],
     }
+    if truncated:
+        # 让编排层知道「这条给模型的只是节选、落库前要回库取全文」。
+        item["truncated"] = True
+    return item
 
 
 async def query_faq(

@@ -631,6 +631,32 @@ async def _run(args: argparse.Namespace) -> int:
             "retrieval": aggregate(retrieval_rows, strategies),
             "generation": {},
             "warnings": warnings,
+            # 逐条明细：报告只看汇总的话，「bm25 的 B_model 到底漏了哪一条」无从定位。
+            "cases": retrieval_rows,
+            # 降级计数：重排没生效的轮次必须能在报告里数出来，而不是只出现在日志里。
+            "rerank_degraded": {
+                strategy: sum(
+                    1
+                    for row in retrieval_rows
+                    if row["strategy"] == strategy and row.get("rerank_degraded")
+                )
+                for strategy in strategies
+            },
+            "notes": {
+                "threshold": (
+                    "RAG_MIN_RERANK_SCORE 默认 0.3；评估集的拒答题在检索层实测最高重排分"
+                    " 0.036（见 low_confidence_questions.reason），正负样本分离明显。"
+                    "改阈值后请重跑本脚本并更新本节。"
+                ),
+                "generation_sampling": (
+                    f"生成段每桶取 {(args.limit - 1) if args.limit else '全部'} 条可答 + 1 条拒答；"
+                    "未抽到的条目在该桶聚合里不计入。"
+                ),
+                "gold": (
+                    "gold 由锚串解析为 chunk_id 并集：同一事实被多条块（含 mined 问答对）"
+                    "陈述时 gold 会变大，Recall 因此偏宽松，区分度看 MRR@10 与 Recall@1。"
+                ),
+            },
         }
 
         if args.generation:
@@ -682,6 +708,8 @@ async def _run(args: argparse.Namespace) -> int:
                     limit=args.limit,
                 )
             report["generation"] = _generation_report(generation_rows, generation_strategies)
+            # 生成段逐条（含答案与 claim 判定），复盘「哪句被判编造」时直接看这里。
+            report["generation_cases"] = generation_rows
 
         if args.json:
             Path(args.json).parent.mkdir(parents=True, exist_ok=True)
@@ -704,14 +732,31 @@ async def _run(args: argparse.Namespace) -> int:
 
 
 def _exit_code(report: dict, strategies: Sequence[str]) -> int:
-    """验收判定：hybrid_rerank 整体 Recall@5 ≥ vector，且 B_model ≥ bm25。"""
+    """验收判定。
+
+    两条，各自独立成立：
+
+    1. **验收 2**：``B_model`` 桶的 BM25 Recall@5 ≥ 0.8 —— 只要跑了 bm25 就判，
+       不管有没有跑别的策略（否则 `--only B_model --strategies bm25` 这条命令的
+       退出码不承载任何信息，等于没验收）。
+    2. **验收 1**：``hybrid_rerank`` 整体 Recall@5 ≥ ``vector``，且 ``B_model`` 桶
+       ≥ ``bm25``（两者都跑时才比较）。
+    """
     retrieval = report["retrieval"]
 
     def recall(strategy: str, bucket: str) -> float | None:
         return retrieval.get(strategy, {}).get(bucket, {}).get("recall@5")
 
+    model_bm25 = recall("bm25", "B_model")
+    if model_bm25 is not None and model_bm25 < 0.8:
+        print(
+            f"验收 2 未过：B_model 桶 bm25 Recall@5 {model_bm25:.3f} < 0.8",
+            file=sys.stderr,
+        )
+        return 1
+
     if "hybrid_rerank" not in strategies or "vector" not in strategies:
-        print("未同时运行 vector 与 hybrid_rerank，跳过验收判定", file=sys.stderr)
+        print("未同时运行 vector 与 hybrid_rerank，跳过验收 1 判定", file=sys.stderr)
         return 0
 
     overall_hybrid = recall("hybrid_rerank", "overall")

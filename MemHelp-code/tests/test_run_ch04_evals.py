@@ -162,3 +162,42 @@ def test_citation_validity_counts_valid_and_dropped(evals_module):
         {"valid": (1, 2), "dropped": ()},    # 2/2
     ]
     assert evals_module.citation_validity(parses) == pytest.approx(0.75)
+
+
+# ---------------------------------------------------------------------------
+# 退出码（验收判定）
+# ---------------------------------------------------------------------------
+
+
+def _report(strategy_rows: dict[str, dict]) -> dict:
+    return {"retrieval": strategy_rows}
+
+
+def test_exit_code_fails_when_bm25_model_recall_is_below_the_bar(evals_module):
+    """`--only B_model --strategies bm25` 这条命令必须能红。
+
+    初版只在「同时跑了 vector 与 hybrid_rerank」时才判定，于是验收 2 的这条命令
+    永远返回 0 —— 退出码不承载信息，等于没验收。
+    """
+    report = _report(
+        {"bm25": {"B_model": {"recall@5": 0.5}, "overall": {"recall@5": 0.5}}}
+    )
+    assert evals_module._exit_code(report, ["bm25"]) == 1
+
+
+def test_exit_code_passes_when_bm25_model_recall_meets_the_bar(evals_module):
+    report = _report(
+        {"bm25": {"B_model": {"recall@5": 0.9}, "overall": {"recall@5": 0.9}}}
+    )
+    assert evals_module._exit_code(report, ["bm25"]) == 0
+
+
+def test_exit_code_fails_when_hybrid_rerank_loses_to_vector(evals_module):
+    report = _report(
+        {
+            "vector": {"overall": {"recall@5": 1.0}, "B_model": {"recall@5": 1.0}},
+            "bm25": {"overall": {"recall@5": 1.0}, "B_model": {"recall@5": 1.0}},
+            "hybrid_rerank": {"overall": {"recall@5": 0.9}, "B_model": {"recall@5": 1.0}},
+        }
+    )
+    assert evals_module._exit_code(report, ["vector", "bm25", "hybrid_rerank"]) == 1

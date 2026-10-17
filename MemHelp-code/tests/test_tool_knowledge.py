@@ -123,7 +123,8 @@ async def test_query_faq_adds_citation_fields():
     assert item["n"] == 1
     assert item["chunk_id"] == 5
     assert item["section_path"] == "售后手册 / 第5节"
-    assert item["quote"] == "满 99 包邮"
+    # 出参里只有 answer：quote 与它同源，重复发一份会把 10 条证据顶过 executor 上限。
+    assert item["answer"] == "满 99 包邮"
 
 
 async def test_query_faq_does_not_leak_scores():
@@ -143,6 +144,33 @@ async def test_items_are_in_head_tail_order_but_numbers_stay_by_relevance():
     items = json.loads(await query_faq("q", retriever=retriever))["items"]
 
     assert [item["n"] for item in items] == [1, 3, 5, 7, 9, 10, 8, 6, 4, 2]
+
+
+async def test_payload_stays_within_the_executor_limit():
+    """10 条长证据必须塞得进 executor 的 4000 字上限。
+
+    超了之后 ``to_tool_message_content`` 会把整段 JSON 变成被切断的 Python repr ——
+    模型看不懂 repr，引用编号也就不可能标对（真机评审实测最坏 5757 字）。
+    """
+    long_answer = "满 99 元包邮。" * 60          # 单条约 420 字
+    chunks = [_chunk(index, long_answer) for index in range(1, 11)]
+    retriever = FakePipeline(_outcome(*chunks))
+
+    raw = await query_faq("q", retriever=retriever)
+
+    assert len(raw) < 4000, f"工具出参 {len(raw)} 字，超过 executor 的 4000 上限"
+    assert "quote" not in json.loads(raw)["items"][0]   # 不再重复发一份同源文本
+
+
+async def test_long_answers_are_marked_truncated():
+    """节选必须带标记：编排层据此回库取全文，用户点开看到的才是原文。"""
+    chunks = [_chunk(1, "满 99 元包邮。" * 60)]
+    retriever = FakePipeline(_outcome(*chunks))
+
+    item = json.loads(await query_faq("q", retriever=retriever))["items"][0]
+
+    assert item["truncated"] is True
+    assert len(item["answer"]) == 220
 
 
 async def test_query_faq_reports_zero_hits_as_success():

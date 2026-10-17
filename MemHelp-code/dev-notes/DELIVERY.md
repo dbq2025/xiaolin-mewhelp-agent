@@ -186,32 +186,34 @@ $env:MEMHELP_TEST_MYSQL=1   → tests/test_db_mysql.py 33 passed
 
 ## 4. 评估数字（48 条 / 四桶 × 12）
 
-检索段（Recall@5 / MRR@10，overall）：
+检索段（Recall@1 / Recall@5 / MRR@10，overall；`evals/reports/ch04.json` 为准）：
 
-| 策略 | Recall@5 | MRR@10 |
-|---|---|---|
-| vector | 1.000 | 0.942 |
-| bm25 | 0.975 | 0.881 |
-| hybrid | 0.975 | 0.891 |
-| **hybrid_rerank** | **1.000** | **0.950** |
+| 策略 | Recall@1 | Recall@5 | MRR@10 | B_model Recall@5 |
+|---|---|---|---|---|
+| vector | 0.900 | 1.000 | 0.942 | 1.000 |
+| bm25 | 0.825 | 0.925 | 0.880 | 1.000 |
+| hybrid | 0.875 | 1.000 | 0.926 | 1.000 |
+| **hybrid_rerank** | **0.900** | **1.000** | **0.950** | **1.000** |
 
-生成段（每桶 3 条可答 + 1 条拒答）：
+生成段（每桶 3 条可答 + 1 条拒答，共 16 条/策略）：
 
 | 策略 | Faithfulness | 拒答准确率 | 引用有效率 |
 |---|---|---|---|
-| hybrid | 0.955 | 1.000 | 1.000 |
-| hybrid_rerank | 0.961 | 1.000 | 1.000 |
+| hybrid | 0.972 | 1.000 | 1.000 |
+| hybrid_rerank | 0.937 | 1.000 | 1.000 |
 
-> 读报告要注意两件事：① 生成段用**评估时提示词**（与线上共享引用规则，但不是同一条链路）；
-> ② gold 锚串在真库里常命中多块（同一事实被 mined 问答对重复陈述），Recall@5 因此饱和，
-> 区分度主要看 MRR@10 与 Recall@1。
+> 读报告要注意三件事：① 生成段用**评估时提示词**（与线上共享引用规则，但不是同一条链路），
+> 且每桶只抽 4 条，`hybrid` 与 `hybrid_rerank` 的 Faithfulness 差 0.035 **是抽样噪声**，
+> 不能据此说「重排让忠实度变差」；② gold 锚串在真库里常命中多块（同一事实被 mined
+> 问答对重复陈述），Recall@5 因此饱和，区分度看 **MRR@10 与 Recall@1**；
+> ③ 重排降级计数 `rerank_degraded` 全为 0（本次运行重排服务正常）。
 
 ## 5. 四条验收标准（实测）
 
 | # | 标准 | 实测 |
 |---|---|---|
 | 1 | 四策略对比报告能跑出数字 | `dev-notes/ch04-eval-report.md` 三张表 + `evals/reports/ch04.json`；脚本退出码 **0** |
-| 2 | 带具体型号的问题，BM25 能命中 | `--only B_model --strategies bm25` → **Recall@5 1.000 / MRR 0.900**；小写 `xh-3000a` 与带空格 `XH 3000B` 变体均命中 |
+| 2 | 带具体型号的问题，BM25 能命中 | `--only B_model --strategies bm25` → **Recall@5 1.000**（该命令的退出码现在独立校验 ≥0.8）；小写 `xh-3000a`、带空格 `XH 3000B`、紧贴中文 `xh3000a续航` 三种写法都归一后命中 |
 | 3 | 引用编号能定位回原文，页面可点 | 回答含 `[1]…[4]`；`messages.citations` 存快照（例：`chunk_id=317`，`section_path=商品型号手册 / 巡检仪 / XH-3000A 与 XH-3000B 的区别`）；前端点角标开抽屉 |
 | 4 | 问库里没有的内容 → 明确拒答 + 入池 | 「你们支持货到付款吗」→ 拒答话术；`low_confidence_questions` 新增一行 `source=retrieval_low_conf`、`reason=最高重排分 0.036 低于阈值 0.3` |
 

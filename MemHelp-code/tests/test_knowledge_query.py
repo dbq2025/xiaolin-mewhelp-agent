@@ -86,6 +86,18 @@ async def test_rewriting_can_be_disabled():
     assert rewriter.calls == []
 
 
+async def test_model_queries_are_never_sent_to_the_rewriter():
+    """改写 prompt 没要求保留型号 —— 模型可能把 `XH-3000A` 改写成「这款巡检仪」。
+
+    型号一丢，BM25 直接全漏，所以带型号的问法一律不改写。
+    """
+    rewriter = _FakeRewriter("巡检仪续航时间")
+    out = await QueryUnderstander(rewriter=rewriter).understand("xh3000a续航咋样啊")
+
+    assert rewriter.calls == []
+    assert out.standard == "XH-3000A续航咋样啊"
+
+
 async def test_cache_avoids_a_second_llm_call():
     rewriter = _FakeRewriter("发票开具流程")
     understander = QueryUnderstander(rewriter=rewriter)
@@ -95,6 +107,27 @@ async def test_cache_avoids_a_second_llm_call():
 
     assert len(rewriter.calls) == 1
     assert first == second
+
+
+def test_the_api_reuses_one_understander_per_process():
+    """缓存挂在实例上 —— 每请求新建实例等于缓存永不命中（真机评审实测）。
+
+    spec §4 要的是「进程内 512 条缓存」，所以 API 层必须复用同一个理解器。
+    """
+    from app.api import _UNDERSTANDERS, _understander_for
+    from app.config import Settings
+
+    _UNDERSTANDERS.clear()
+    settings = Settings(
+        openai_base_url="https://x/v1", openai_api_key="k", openai_model="m"
+    )
+    model = object()
+
+    first = _understander_for(settings, model)
+    second = _understander_for(settings, model)
+
+    assert first is second
+    _UNDERSTANDERS.clear()
 
 
 async def test_cache_key_includes_the_enabled_flag():
@@ -135,6 +168,17 @@ def test_model_tokens_are_uppercased_and_hyphenated():
     assert normalise_model_tokens("xh-3000a 续航") == "XH-3000A 续航"
     assert normalise_model_tokens("XH 3000A 续航") == "XH-3000A 续航"
     assert normalise_model_tokens("XH3000A 续航") == "XH-3000A 续航"
+
+
+def test_model_tokens_adjacent_to_chinese_are_normalised():
+    """型号**紧贴中文**是最常见的写法，也是 `\\b` 版本的盲区。
+
+    中文也是 `\\w`，所以 `XH3000A续航` 里 `\\b` 根本不成立 —— 归一静默不发生，
+    而「未归一的变体 BM25 全漏」已被 Task 0 探针证实。这三条是那条洞的回归测试。
+    """
+    assert normalise_model_tokens("XH3000A续航多久") == "XH-3000A续航多久"
+    assert normalise_model_tokens("xh3000a的续航") == "XH-3000A的续航"
+    assert normalise_model_tokens("请问XH3000A续航多久") == "请问XH-3000A续航多久"
 
 
 def test_model_normalisation_leaves_plain_words_alone():
