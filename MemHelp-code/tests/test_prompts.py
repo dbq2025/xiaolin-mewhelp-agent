@@ -62,3 +62,54 @@ def test_extract_prompt_forbids_fabrication():
     body = "\n".join(str(m.content) for m in msgs)
     for keyword in ("不要推测", "null"):
         assert keyword in body
+
+
+# ---------------------------------------------------------------------------
+# ch04：引用规范 / 负面知识 / 拒答话术
+# ---------------------------------------------------------------------------
+
+
+def test_tool_prompt_has_eight_behavior_rules():
+    from app.prompts import BEHAVIOR_RULES_WITH_TOOLS, TOOL_SYSTEM_PROMPT_TEMPLATE
+
+    assert len(BEHAVIOR_RULES_WITH_TOOLS) == 8
+    for rule in BEHAVIOR_RULES_WITH_TOOLS:
+        assert rule in TOOL_SYSTEM_PROMPT_TEMPLATE
+
+
+def test_tool_prompt_forbids_promising_times():
+    from app.prompts import TOOL_SYSTEM_PROMPT_TEMPLATE
+
+    assert "不承诺到账时间与送达时点" in TOOL_SYSTEM_PROMPT_TEMPLATE
+
+
+def test_citation_rules_are_in_the_tool_prompt():
+    from app.prompts import CITATION_RULES, TOOL_SYSTEM_PROMPT_TEMPLATE
+
+    for rule in CITATION_RULES:
+        assert rule in TOOL_SYSTEM_PROMPT_TEMPLATE
+    assert "[n]" in TOOL_SYSTEM_PROMPT_TEMPLATE
+
+
+def test_negative_knowledge_lines_are_in_the_tool_prompt():
+    from app.prompts import NEGATIVE_KNOWLEDGE, TOOL_SYSTEM_PROMPT_TEMPLATE
+
+    for item in NEGATIVE_KNOWLEDGE:
+        assert item in TOOL_SYSTEM_PROMPT_TEMPLATE
+
+
+def test_tool_prompt_keeps_the_system_info_last():
+    """引用规范插在「系统信息」之前 —— session_id 那段必须仍在末尾。"""
+    from app.prompts import TOOL_SYSTEM_PROMPT_TEMPLATE
+
+    assert TOOL_SYSTEM_PROMPT_TEMPLATE.index("## 引用规范") < TOOL_SYSTEM_PROMPT_TEMPLATE.index(
+        "## 系统信息"
+    )
+
+
+def test_refusal_text_states_three_things_and_has_no_citation():
+    from app.prompts import REFUSAL_TEXT
+
+    assert "知识库" in REFUSAL_TEXT and "没有" in REFUSAL_TEXT
+    assert "转人工" in REFUSAL_TEXT
+    assert "[" not in REFUSAL_TEXT  # 没有证据可引，带角标会让用户以为下面有出处

@@ -99,12 +99,16 @@ class RagPipeline:
         sufficiency: _SufficiencyLike,
         min_score: float = 0.3,
         top_n: int = 10,
+        strategy: str = ONLINE_STRATEGY,
     ) -> None:
         self._understander = understander
         self._retriever = retriever
         self._sufficiency = sufficiency
         self._min_score = min_score
         self._top_n = top_n
+        # 线上永远是 hybrid_rerank；评估脚本要换策略才能做四策略对照，
+        # 所以这里留一个注入口，而不是让脚本自己绕开这一层。
+        self._strategy = strategy
 
     async def warmup(self) -> None:
         """启动预热：交给检索器（嵌入器 + 集合自检）。"""
@@ -118,7 +122,7 @@ class RagPipeline:
         """理解 → 检索 → 两道闸 → 证据。不抛业务异常（空结果是正常结果）。"""
         understood = await self._understander.understand(query)
         result = await self._retriever.retrieve(
-            ONLINE_STRATEGY, understood, category=category
+            self._strategy, understood, category=category
         )
         chunks: tuple[RetrievedChunk, ...] = tuple(result.chunks[: self._top_n])
 
