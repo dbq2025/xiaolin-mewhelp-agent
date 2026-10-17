@@ -276,8 +276,12 @@ body `{model, query, documents, top_n, return_documents: False}`，
 
 ## 7. 元数据过滤
 
-**前置过滤**：过滤表达式进 Milvus 请求（`filter` 参数），不是拿回结果再筛。
-后过滤会把 Top-50 先截断再丢掉一半，等于自残召回。
+**前置过滤**：过滤表达式在**发起检索之前**交给 Milvus（作为每个 `AnnSearchRequest` 的 `expr`），
+不是拿回结果再筛。后过滤会把 Top-50 先截断再丢掉一半，等于自残召回。
+
+> 实测坑（pymilvus 2.6.17）：`hybrid_search` 的顶层 `filter` 参数**被静默忽略**，
+> 顶层 `expr` 会直接抛 `TypeError`。所以过滤必须挂到**两个** `AnnSearchRequest.expr` 上 ——
+> 两路都过滤，融合后的候选才都满足条件。这条已写进 Task 3/Task 8 的测试断言。
 
 - `query_faq` 新增**可选**参数 `category`：用户在话里明确点名品类时由模型传入；
   未传则不过滤。

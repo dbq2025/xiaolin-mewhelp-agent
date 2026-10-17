@@ -250,11 +250,12 @@ def test_bm25_passes_raw_text_not_vector(fake_client_cls):
     assert call["anns_field"] == "sparse"
     assert call["search_params"]["metric_type"] == "BM25"
 
-def test_hybrid_builds_two_requests_and_filter(fake_client_cls):
+def test_hybrid_puts_expr_on_both_requests(fake_client_cls):
     store.hybrid_search([0.1]*1024, "包邮", 20, expr='category == "售后政策"')
     call = fake_client_cls.return_me.last_hybrid
     assert [r.anns_field for r in call["reqs"]] == ["dense", "sparse"]
-    assert call["filter"] == 'category == "售后政策"'
+    # 实测坑：顶层 filter 会被静默忽略、顶层 expr 直接崩 —— 必须挂在每个 request 上
+    assert [r.expr for r in call["reqs"]] == ['category == "售后政策"'] * 2
     assert call["ranker"].k == 60
 
 def test_hybrid_returns_merged_ids(fake_client_cls):
@@ -273,7 +274,8 @@ Expected: FAIL（方法不存在）
 
 `search_dense` = ch03 `_search` 的改造（加 `expr`，`consistency_level="Strong"` 不变）；
 `search_bm25` 的 `data=[text]`、`search_params={"metric_type": "BM25"}`；
-`hybrid_search` 用 `AnnSearchRequest`（参数名按 Task 0 探针结论）+ `RRFRanker(k=60)` + `filter=expr`。
+`hybrid_search` 用两个 `AnnSearchRequest`（`data/anns_field/limit/param`，**过滤表达式放每个 request 的 `expr`**）
++ `RRFRanker(k=60)`。顶层 `filter` 会被 pymilvus 2.6.17 静默忽略、顶层 `expr` 会崩 —— 两个都别用（Task 0 实测）。
 三者都在 `anyio.to_thread.run_sync` 里跑（沿用 ch03 的**同步客户端 + 线程**模式，不要改成异步客户端）。
 
 - [ ] **Step 4: 跑测试确认通过**
@@ -623,7 +625,7 @@ async def test_bm25_strategy_uses_bm25_text_with_synonyms(fake_store):
 
 async def test_hybrid_passes_both_and_filters(fake_store):
     await retriever.retrieve("hybrid", understood, category="售后政策")
-    assert fake_store.last_hybrid["filter"] == 'category == "售后政策"'
+    assert [r.expr for r in fake_store.last_hybrid["reqs"]] == ['category == "售后政策"'] * 2
 
 async def test_hybrid_rerank_orders_by_rerank_score(fake_store, fake_reranker):
     res = await retriever.retrieve("hybrid_rerank", understood)
