@@ -48,6 +48,8 @@ class _FakeEmbedder:
 class _FakeStore:
     def __init__(self) -> None:
         self.rows: dict[str, list[float]] = {}
+        #: ch04：最后写入的整条记录（含 BM25 原文与品类），供断言「副本写全了」。
+        self.records: dict[str, object] = {}
         self.upsert_calls = 0
         self.reset_calls = 0
         self.ensure_calls = 0
@@ -58,11 +60,12 @@ class _FakeStore:
     async def ensure_collection(self) -> None:
         self.ensure_calls += 1
 
-    async def upsert(self, ids, vectors) -> None:
+    async def upsert(self, records) -> None:
         self.upsert_calls += 1
         self.timeline.append("upsert")
-        for row_id, vector in zip(ids, vectors):
-            self.rows[row_id] = list(vector)  # 同主键覆盖，模拟 Milvus upsert
+        for record in records:
+            self.rows[record.id] = list(record.dense)  # 同主键覆盖，模拟 Milvus upsert
+            self.records[record.id] = record
 
     async def delete(self, ids) -> None:
         self.timeline.append("delete")
@@ -124,6 +127,24 @@ async def test_embed_text_uses_the_three_labelled_slots(sqlite_session, sample_d
     assert "分类：售后手册" in joined
     assert "问法：运费" in joined
     assert "答案：满 99 包邮。" in joined
+
+
+async def test_vector_records_carry_bm25_text_and_metadata(sqlite_session, sample_doc):
+    """ch04：写进 Milvus 的不只是向量，还有 BM25 原文与品类副本。
+
+    BM25 文本**不带**「分类/问法/答案」标签（与嵌入文本刻意不同）。
+    """
+    repo, store, embedder = _repo(sqlite_session), _FakeStore(), _FakeEmbedder()
+
+    await ingest_markdown([sample_doc], chunk_repo=repo, vector_store=store, embedder=embedder)
+
+    records = list(store.records.values())
+    assert records, "一块都没写"
+    first = records[0]
+    assert first.text and "分类：" not in first.text and "问法：" not in first.text
+    assert first.category
+    assert first.content_type == "manual"
+    assert len(first.id) == len(str(int(first.id)))  # 主键是 str(chunk.id)
 
 
 async def test_ingest_is_idempotent_on_rerun(sqlite_session, sample_doc):

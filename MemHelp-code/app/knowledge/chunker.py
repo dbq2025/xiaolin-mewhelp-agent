@@ -37,6 +37,7 @@ __all__ = [
     "SENTENCE_ENDINGS",
     "Chunk",
     "render_embed_text",
+    "render_bm25_text",
     "split_markdown",
 ]
 
@@ -372,3 +373,19 @@ def render_embed_text(chunk: object) -> str:
     questions = getattr(chunk, "questions", "")
     answer = getattr(chunk, "answer", "")
     return f"分类：{category}\n问法：{questions}\n答案：{answer}"
+
+
+def render_bm25_text(chunk: object) -> str:
+    """把一块拼成**BM25 原文**：只要问法与答案，不带三格标签。
+
+    为什么不复用 ``render_embed_text``：BM25 是词面匹配，而「分类：」「问法：」「答案：」
+    这三个词在**每一个** chunk 里都出现 —— 它们会抬高所有块的共同词权重、稀释
+    真正有区分度的词（型号、金额、时长）。向量不在乎这点（标签帮助区分语义），
+    BM25 在乎。
+
+    建库（写入 Milvus 的 ``text``）与重排（拼接 ``documents``）共用这个函数，
+    保证「被索引的文本」与「被重排的文本」是同一份。
+    """
+    questions = getattr(chunk, "questions", "")
+    answer = getattr(chunk, "answer", "")
+    return f"{questions}\n{answer}"

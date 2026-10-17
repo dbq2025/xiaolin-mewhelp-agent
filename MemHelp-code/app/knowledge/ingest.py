@@ -27,9 +27,9 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from app.db.repositories import FaqRepository, KnowledgeChunkRepository
-from app.knowledge.chunker import render_embed_text, split_markdown
+from app.knowledge.chunker import render_bm25_text, render_embed_text, split_markdown
 from app.knowledge.embedder import Embedder
-from app.knowledge.vector_store import VectorStore
+from app.knowledge.vector_store import VectorRecord, VectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +155,21 @@ async def vectorize_pending(
         ids = [str(row.id) for row in rows]
 
         # 先写向量，再回填状态。反了就永远补不上（见模块 docstring）。
-        await vector_store.upsert(ids, vectors)
+        #
+        # ch04 起写入的是 VectorRecord：除了稠密向量，还要把 BM25 原文与品类
+        # 一起落到 Milvus（Milvus 从此是「检索索引副本」，MySQL 仍是原文权威）。
+        await vector_store.upsert(
+            [
+                VectorRecord(
+                    id=row_id,
+                    dense=vector,
+                    text=render_bm25_text(row),
+                    category=row.category,
+                    content_type=row.content_type,
+                )
+                for row_id, vector, row in zip(ids, vectors, rows)
+            ]
+        )
         await chunk_repo.mark_done([(row.id, str(row.id)) for row in rows])
         written += len(rows)
         logger.info("已向量化 %d 块（本次累计 %d）", len(rows), written)

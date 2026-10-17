@@ -42,7 +42,7 @@ class _FakeStore:
         self.asked_top_k.append(top_k)
         return self.hits[:top_k]
 
-    async def upsert(self, ids, vectors):  # pragma: no cover - 检索不该写
+    async def upsert(self, records):  # pragma: no cover - 检索不该写
         raise AssertionError("检索路径不应写入向量库")
 
     async def count(self) -> int:  # pragma: no cover

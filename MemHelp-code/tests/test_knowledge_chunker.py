@@ -11,7 +11,12 @@
 
 from __future__ import annotations
 
-from app.knowledge.chunker import Chunk, render_embed_text, split_markdown
+from app.knowledge.chunker import (
+    Chunk,
+    render_bm25_text,
+    render_embed_text,
+    split_markdown,
+)
 
 DOC = """# 退货政策
 
@@ -228,3 +233,29 @@ def test_render_embed_text_works_for_repository_rows():
 
     row = SimpleNamespace(category="物流", questions="运费怎么算", answer="满 99 包邮")
     assert render_embed_text(row) == "分类：物流\n问法：运费怎么算\n答案：满 99 包邮"
+
+
+# ---------------------------------------------------------------------------
+# ch04：BM25 文本
+# ---------------------------------------------------------------------------
+
+
+def test_render_bm25_text_drops_the_three_labels():
+    """BM25 是词面匹配：「分类/问法/答案」每个块都有，会把区分度稀释掉。"""
+    chunk = Chunk(
+        category="售后 / 退货",
+        questions="能退吗",
+        answer="7 天无理由",
+        section_path="售后 / 退货 / 能退吗",
+        content_type="faq",
+        is_key_clause=False,
+        ordinal=0,
+    )
+    assert render_bm25_text(chunk) == "能退吗\n7 天无理由"
+
+
+def test_render_bm25_text_works_for_repository_rows():
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(category="物流", questions="运费怎么算", answer="满 99 包邮")
+    assert render_bm25_text(row) == "运费怎么算\n满 99 包邮"
