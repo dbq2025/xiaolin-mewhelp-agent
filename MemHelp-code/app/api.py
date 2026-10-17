@@ -289,7 +289,12 @@ def get_retriever(
     store = _vector_store_for(
         settings.milvus_uri, settings.milvus_collection, settings.embedding_dim
     )
-    return KnowledgeRetriever(get_embedder(settings), store, repositories.knowledge)
+    return KnowledgeRetriever(
+        get_embedder(settings),
+        store,
+        repositories.knowledge,
+        default_top_k=settings.rag_top_k,
+    )
 
 
 async def _ping_database(request: Request) -> bool:
@@ -540,16 +545,26 @@ async def _chat_stream_body(
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    """启动预热（ch03）：加载嵌入模型 + 确保 Milvus 集合存在。
+    """启动预热（ch03）：发一次真实嵌入请求 + 确保 Milvus 集合存在。
 
     **失败只告警不崩**：Milvus 没起时应用仍要能启动（聊天与另外四个工具不依赖它），
     查询时再由 executor 把异常分类成 ``ok=false``。启动即崩会把「向量库没起」
     升级成「客服系统整体不可用」，那是错误的严重度。
 
+    ``rag_warmup`` 为 ``None`` 时读配置（``RAG_WARMUP``）；显式传 ``True/False``
+    时以调用方为准 —— 测试靠这个参数把整套用例与网络隔离。
+
     被注入的检索器（测试/演示）若自带 ``warmup``，优先预热它 —— 否则会去按配置
     构造一个谁都不用的默认检索器。
     """
-    if getattr(app.state, "rag_warmup", False):
+    warmup_enabled = getattr(app.state, "rag_warmup", None)
+    if warmup_enabled is None:
+        try:
+            warmup_enabled = (app.state.settings or get_settings()).rag_warmup
+        except Exception:  # noqa: BLE001 - 配置缺失时不该在启动阶段崩
+            warmup_enabled = False
+
+    if warmup_enabled:
         try:
             injected = getattr(app.state, "retriever", None)
             if injected is not None and hasattr(injected, "warmup"):
@@ -562,8 +577,14 @@ async def _lifespan(app: FastAPI):
                 await warmup_rag(get_embedder(settings), store)
             logger.info("RAG 预热完成")
         except Exception:  # noqa: BLE001 - 预热失败不阻断启动
-            logger.warning("RAG 预热失败：检索将在首个查询时按需加载", exc_info=True)
+            logger.warning("RAG 预热失败：检索将在首个查询时按需初始化", exc_info=True)
     yield
+    # 关掉进程单例持有的 httpx 连接（CLI 自己会关；Web 进程在退出时关一次）。
+    try:
+        settings = app.state.settings or get_settings()
+        await get_embedder(settings).aclose()
+    except Exception:  # noqa: BLE001 - 退出路径不该再抛
+        logger.debug("关闭嵌入客户端失败（已忽略）", exc_info=True)
 
 
 def create_app(
@@ -573,7 +594,7 @@ def create_app(
     repositories: Repositories | None = None,
     db_ping: Any = None,
     retriever: RetrieverLike | None = None,
-    rag_warmup: bool = True,
+    rag_warmup: bool | None = None,
 ) -> FastAPI:
     """构造应用。
 
@@ -592,9 +613,10 @@ def create_app(
     ``retriever``：向量检索器，``query_faq`` 依赖它。``None`` 时按配置构造
     （进程级单例的嵌入器与 Milvus 客户端）。
 
-    ``rag_warmup``：启动时预热嵌入模型与 Milvus 集合。**生产默认开启**——
-    BGE-M3 首载 20-40s，不预热的话第一个问句必然打穿 3s 的工具超时。
-    测试必须传 ``False``（``conftest`` 已统一处理），否则整套测试每次都要加载 2.3GB 模型。
+    ``rag_warmup``：启动时预热嵌入服务与 Milvus 集合。``None`` 表示读配置
+    （``RAG_WARMUP``，生产默认开启）；显式 ``True/False`` 覆盖配置。
+    预热会**发一次真实嵌入请求**，所以密钥/模型名配错能在启动阶段就喊出来。
+    测试必须传 ``False``（``conftest`` 已统一处理），否则整套测试会去连外网。
     """
     app = FastAPI(title="MewHelp 智能客服 API", version="0.3.0", lifespan=_lifespan)
     app.state.chat_model = model

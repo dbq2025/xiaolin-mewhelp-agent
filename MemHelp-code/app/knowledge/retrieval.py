@@ -67,13 +67,17 @@ class KnowledgeHit:
 class RetrieverLike(Protocol):
     """工具层对检索器的最小依赖。"""
 
-    async def search(self, query: str, top_k: int = DEFAULT_TOP_K) -> list[KnowledgeHit]: ...
+    async def search(
+        self, query: str, top_k: int | None = None
+    ) -> list[KnowledgeHit]: ...
 
 
 class KnowledgeRetriever:
     """把嵌入器、向量库、原文仓库拼成一次检索。
 
     :param chunk_repo: 必须是**当请求**的仓库（它绑着该请求的 DB Session）。
+    :param default_top_k: 调用方不指定时的取数上限。来源是 ``RAG_TOP_K`` ——
+        让配置真的生效，而不是在工具里写一个和配置无关的常数。
     """
 
     def __init__(
@@ -81,10 +85,13 @@ class KnowledgeRetriever:
         embedder: Embedder,
         vector_store: VectorStore,
         chunk_repo: KnowledgeChunkRepository,
+        *,
+        default_top_k: int = DEFAULT_TOP_K,
     ) -> None:
         self._embedder = embedder
         self._vector_store = vector_store
         self._chunk_repo = chunk_repo
+        self._default_top_k = default_top_k
 
     async def warmup(self) -> None:
         """预热：发一次真实嵌入请求 + 确认集合存在。
@@ -94,21 +101,29 @@ class KnowledgeRetriever:
         """
         await warmup(self._embedder, self._vector_store)
 
-    async def search(self, query: str, top_k: int = DEFAULT_TOP_K) -> list[KnowledgeHit]:
-        """检索与 ``query`` 语义最接近的 ``top_k`` 块。"""
+    async def search(
+        self, query: str, top_k: int | None = None
+    ) -> list[KnowledgeHit]:
+        """检索与 ``query`` 语义最接近的前若干块。
+
+        :param top_k: ``None`` 表示用构造时给定的默认值（来自 ``RAG_TOP_K``）。
+        """
+        limit = self._default_top_k if top_k is None else top_k
         vectors = await self._embedder.embed([query])
         if not vectors:
             return []
 
-        hits = await self._vector_store.search(vectors[0], top_k)
+        hits = await self._vector_store.search(vectors[0], limit)
         if not hits:
             return []
 
         parsed: list[tuple[float, int]] = []
+        dropped = 0
         for hit in hits:
             try:
                 parsed.append((hit.score, int(hit.id)))
             except (TypeError, ValueError):
+                dropped += 1
                 logger.warning("向量 id %r 不是合法的 chunk 主键，已跳过", hit.id)
 
         rows = {row.id: row for row in await self._chunk_repo.get_many([i for _, i in parsed])}
@@ -117,6 +132,7 @@ class KnowledgeRetriever:
         for score, chunk_id in parsed:
             row = rows.get(chunk_id)
             if row is None:
+                dropped += 1
                 logger.warning("向量 id %s 在 MySQL 中不存在（原文已删？），已跳过", chunk_id)
                 continue
             results.append(
@@ -126,5 +142,14 @@ class KnowledgeRetriever:
                     category=row.category,
                     score=score,
                 )
+            )
+        if dropped:
+            # 汇总一行：单个孤儿 id 的 warning 容易淹没在日志里，这条给出比例。
+            logger.warning(
+                "本次检索丢弃 %d 个无效向量 id（Top-K 请求 %d，返回 %d）——"
+                "若持续出现，说明 Milvus 与 knowledge_chunks 不一致，考虑 --rebuild",
+                dropped,
+                limit,
+                len(results),
             )
         return results

@@ -367,6 +367,9 @@ EMBEDDING_MODEL=BAAI/bge-m3
 
 ## 3. 对话挖知识（定时任务）
 
+> 与验收 1 的先后**不影响结论**：评估脚本的关键词基线只跑文档语料
+> （排除 `content_type='mined'`），挖矿产物的问法里带的「邮费」不会污染对照。
+
 ```powershell
 # 先把演示历史会话灌进去（30 个 demo-ch03-* 会话，脚本幂等）
 & $uv run --directory MemHelp-code python scripts/seed_demo_history.py
@@ -393,6 +396,9 @@ schtasks /create /tn "MewHelpMineKnowledge" /sc daily /st 03:00 `
 输出三列对照：`kw-raw`（整句 LIKE）、`kw-noun`（ch02 时代模型截出的名词）、
 `vector`（本章检索）。**为什么分两列**：ch02 的 README 记录过模型会把「邮费」归一化成
 「运费」再传参，只报整句会夸大向量优势、只报名词会掩盖「关键词依赖先猜对词」。
+
+关键词基线**只跑文档语料**（排除挖矿产物）。若验收用例的关键词列命中，脚本直接
+返回 1 —— 那说明文档里混进了「邮费」这类换说法用词，对照已经失效。
 
 ## 5. 端到端
 

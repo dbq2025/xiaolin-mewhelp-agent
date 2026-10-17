@@ -268,11 +268,15 @@ async def mine_conversations(
     :param batch_prefix: 批次号前缀；默认按当前时间生成。
     """
     report = MiningReport()
-    sessions = await repositories.conversations.list_sessions(limit=limit)
+    sessions = await repositories.conversations.list_sessions()
     known = set() if force else await repositories.qa_staging.known_sources()
 
+    # **先过滤再截断**：反过来的话，`--limit 200` 在「前 200 个会话都挖过了」之后
+    # 每次都挑到同一批已知会话，然后一个都不剩 —— 定时任务从此永远不前进。
     pending_sessions = [s.session_id for s in sessions if s.session_id not in known]
     report.skipped_sessions = len(sessions) - len(pending_sessions)
+    if limit is not None:
+        pending_sessions = pending_sessions[:limit]
 
     digests = await _build_digests(repositories, pending_sessions)
     if not digests:
@@ -297,17 +301,23 @@ async def mine_conversations(
             logger.info("第 %d 批没有抽到可入库的问答对（%s）", index, batch_no)
             continue
 
-        await repositories.qa_staging.add_rows(
-            [
-                {
-                    "batch_no": batch_no,
-                    "source_ref": pair.session_id,
-                    "question": pair.question,
-                    "answer": pair.answer,
-                }
-                for pair in pairs
-            ]
-        )
+        try:
+            await repositories.qa_staging.add_rows(
+                [
+                    {
+                        "batch_no": batch_no,
+                        "source_ref": pair.session_id,
+                        "question": pair.question,
+                        "answer": pair.answer,
+                    }
+                    for pair in pairs
+                ]
+            )
+        except Exception as exc:  # noqa: BLE001 - 单批写库失败同样不该拖垮整条任务
+            logger.warning("第 %d 批写暂存表失败（%s）：%s", index, batch_no, exc)
+            report.failed_batches.append(batch_no)
+            continue
+
         report.pairs_written += len(pairs)
 
     return report
@@ -356,56 +366,72 @@ async def dedupe_and_ingest(
     两件事分开，各自可以单独重跑。
     """
     rows = await repositories.qa_staging.list_by_status("extracted")
-    if not rows:
-        return DedupeReport()
 
-    vectors = await embedder.embed([row.question for row in rows])
+    # 去重要同时对照**已有的 kept 行**：只在本批内比较的话，重复跑挖矿会一轮又一轮
+    # 地把同样的问题再入库一遍（upsert 的自然键相同会被覆盖，但问法会变、条数会涨）。
+    existing_kept = await repositories.qa_staging.list_by_status("kept")
+    existing_vectors = (
+        await embedder.embed([row.question for row in existing_kept]) if existing_kept else []
+    )
 
     kept_rows: list[StagingRow] = []
     kept_vectors: list[Sequence[float]] = []
     kept_questions: list[list[str]] = []
-    literal_keys: set[str] = set()
+    #: 已存在的 kept 向量 + 本轮新增的向量，语义比较都在这个池子里做。
+    semantic_pool: list[Sequence[float]] = list(existing_vectors)
+    existing_count = len(existing_kept)
+    literal_keys: set[str] = {
+        key for key in (normalise_question(row.question) for row in existing_kept) if key
+    }
     discarded_ids: list[int] = []
 
-    for row, vector in zip(rows, vectors):
-        key = normalise_question(row.question)
-        if not key:
-            discarded_ids.append(row.id)
-            continue
+    if rows:
+        vectors = await embedder.embed([row.question for row in rows])
 
-        if key in literal_keys:
-            discarded_ids.append(row.id)
-            continue
+        for row, vector in zip(rows, vectors):
+            key = normalise_question(row.question)
+            if not key:
+                discarded_ids.append(row.id)
+                continue
 
-        duplicate_index = next(
-            (
-                index
-                for index, other in enumerate(kept_vectors)
-                if _cosine(vector, other) >= threshold
-            ),
-            None,
-        )
-        if duplicate_index is not None:
-            # 同义问法：并入保留行的 questions（有上限，防止无限膨胀）。
-            if len(kept_questions[duplicate_index]) < max_questions:
-                kept_questions[duplicate_index].append(row.question.strip())
-            discarded_ids.append(row.id)
-            continue
+            if key in literal_keys:
+                discarded_ids.append(row.id)
+                continue
 
-        literal_keys.add(key)
-        kept_rows.append(row)
-        kept_vectors.append(vector)
-        kept_questions.append([row.question.strip()])
+            duplicate_index = next(
+                (
+                    index
+                    for index, other in enumerate(semantic_pool)
+                    if _cosine(vector, other) >= threshold
+                ),
+                None,
+            )
+            if duplicate_index is not None:
+                # 同义问法：并入保留行的 questions（有上限，防止无限膨胀）。
+                # 命中的若是**已有** kept 行，就不改写它的问法（它已经入库了）。
+                local_index = duplicate_index - existing_count
+                if 0 <= local_index < len(kept_questions):
+                    if len(kept_questions[local_index]) < max_questions:
+                        kept_questions[local_index].append(row.question.strip())
+                discarded_ids.append(row.id)
+                continue
+
+            literal_keys.add(key)
+            kept_rows.append(row)
+            kept_vectors.append(vector)
+            kept_questions.append([row.question.strip()])
+            semantic_pool.append(vector)
 
     if discarded_ids:
         await repositories.qa_staging.mark(discarded_ids, "discarded")
-    if kept_rows:
-        await repositories.qa_staging.mark([row.id for row in kept_rows], "kept")
 
+    # **先入库、再标 kept**：反过来的话，入库循环里任何一次失败（或进程被杀）
+    # 都会留下「状态说 kept、知识库里却没有」的行，而普通重跑只读 extracted，
+    # 这些行永远不会被重试（只有 --force 重挖才能救）。
+    # upsert_chunk 按自然键幂等，所以先入库允许重跑。
     ingested = 0
     for row, questions in zip(kept_rows, kept_questions):
         merged = "\n".join(questions)
-        await repositories.qa_staging.update_questions(row.id, merged)
         await repositories.knowledge.upsert_chunk(
             _MinedChunk(
                 questions=merged,
@@ -414,8 +440,31 @@ async def dedupe_and_ingest(
                 ordinal=ingested,
             )
         )
+        await repositories.qa_staging.update_questions(row.id, merged)
         ingested += 1
 
+    if kept_rows:
+        await repositories.qa_staging.mark([row.id for row in kept_rows], "kept")
+
+    # 把**已保留**的行也重放一遍（upsert 按自然键幂等）。
+    # 为什么需要：`build_knowledge.py --rebuild` 会清空 knowledge_chunks，
+    # 而挖矿产物的「来源」是暂存表而不是文档。没有这一步，重建之后挖来的知识
+    # 只能靠 `--force` 重新调 LLM 才能回来 —— 既费钱又不保证抽得一样。
+    replayed = 0
+    for row in await repositories.qa_staging.list_by_status("kept"):
+        questions = row.question
+        await repositories.knowledge.upsert_chunk(
+            _MinedChunk(
+                questions=questions,
+                answer=row.answer,
+                section_path=f"{MINED_CATEGORY} / {row.source_ref or 'unknown'}",
+                ordinal=ingested + replayed,
+            )
+        )
+        replayed += 1
+
     return DedupeReport(
-        kept=len(kept_rows), discarded=len(discarded_ids), ingested=ingested
+        kept=len(kept_rows),
+        discarded=len(discarded_ids),
+        ingested=ingested + replayed,
     )

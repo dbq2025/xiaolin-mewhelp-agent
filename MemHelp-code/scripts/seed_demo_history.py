@@ -32,16 +32,20 @@ DEFAULT_SQL = Path(__file__).resolve().parents[2] / "sql" / "ch03-seed-history.s
 
 
 def _statements(sql: str) -> list[str]:
-    """按 ``;`` 切成单条语句，跳过注释与空段。
+    """按 ``;`` 切成单条语句，**按行**去掉注释后再判断空段。
 
-    这批 SQL 的字符串字面量里没有分号，所以直接切就够；换更复杂的脚本时
-    要换成真正的 SQL 解析器 —— 这里刻意保持简单可读。
+    不能「整段以 ``--`` 开头的就丢掉」：文件开头是两行注释 + 紧跟
+    ``SET NAMES utf8mb4;``，整段丢弃会让这条语句永远不执行（现在靠连接串的
+    charset 顶着，下一个真实语句就没这么幸运了）。
     """
-    return [
-        chunk.strip()
-        for chunk in sql.split(";")
-        if chunk.strip() and not chunk.strip().startswith("--")
-    ]
+    statements: list[str] = []
+    for chunk in sql.split(";"):
+        body = "\n".join(
+            line for line in chunk.splitlines() if not line.strip().startswith("--")
+        ).strip()
+        if body:
+            statements.append(body)
+    return statements
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -41,6 +41,40 @@ def test_healthz_does_not_leak_api_key(test_settings):
     assert "sk-" not in str(body)
 
 
+def test_lifespan_honours_rag_warmup_from_settings_when_not_given(test_settings):
+    """``create_app(rag_warmup=None)`` 必须读配置里的 ``RAG_WARMUP``。
+
+    否则 ``.env`` 里的 ``RAG_WARMUP=false`` 是个死开关：运维关掉预热后
+    启动时仍然会去连一次嵌入服务。
+    """
+    calls: list[str] = []
+
+    class _Retriever:
+        async def search(self, query, top_k=None):
+            return []
+
+        async def warmup(self) -> None:
+            calls.append("warmup")
+
+    off = test_settings.model_copy(update={"rag_warmup": False})
+    with TestClient(
+        app_main.create_app(
+            model=FakeChatModel(reply="好"), settings=off, retriever=_Retriever(), rag_warmup=None
+        )
+    ) as client:
+        client.get("/healthz")
+    assert calls == []
+
+    on = test_settings.model_copy(update={"rag_warmup": True})
+    with TestClient(
+        app_main.create_app(
+            model=FakeChatModel(reply="好"), settings=on, retriever=_Retriever(), rag_warmup=None
+        )
+    ) as client:
+        client.get("/healthz")
+    assert calls == ["warmup"]
+
+
 def test_lifespan_warms_up_the_retriever_only_when_enabled(test_settings):
     """``rag_warmup`` 是生产与测试的分界线。
 

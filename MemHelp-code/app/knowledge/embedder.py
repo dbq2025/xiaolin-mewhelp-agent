@@ -122,7 +122,16 @@ class SiliconFlowEmbedder:
                     f"嵌入请求失败（HTTP {response.status_code}）：{response.text[:300]}"
                 )
 
-            return self._parse(response.json(), expected=len(texts))
+            try:
+                body = response.json()
+            except ValueError as exc:
+                # 200 但不是 JSON（网关返回 HTML 错误页之类）——给可读信息，
+                # 别让 JSONDecodeError 裸奔到调用方。
+                raise RuntimeError(
+                    f"嵌入响应不是合法 JSON（HTTP {response.status_code}）："
+                    f"{response.text[:200]}"
+                ) from exc
+            return self._parse(body, expected=len(texts))
 
         # 循环正常结束只可能在「最后一次仍可重试」时发生
         raise RuntimeError(f"嵌入请求失败：{last_error or '未知错误'}")
@@ -138,8 +147,16 @@ class SiliconFlowEmbedder:
         # **按 index 排序**：服务端不保证返回顺序等于输入顺序。
         try:
             ordered = sorted(data, key=lambda item: int(item["index"]))
+            indices = [int(item["index"]) for item in ordered]
         except (KeyError, TypeError, ValueError) as exc:
             raise RuntimeError(f"嵌入响应缺少可用的 index 字段：{body}") from exc
+
+        if indices != list(range(expected)):
+            # 重复或越界的 index 会让「第 3 条文本拿到第 1 条的向量」，
+            # 而错误内容看起来完全正常 —— 必须在写库前拦住。
+            raise RuntimeError(
+                f"嵌入响应的 index 不是 0..{expected - 1} 的排列：{indices}"
+            )
 
         vectors: list[list[float]] = []
         for item in ordered:

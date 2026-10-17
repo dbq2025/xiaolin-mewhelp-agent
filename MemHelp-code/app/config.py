@@ -72,8 +72,8 @@ class Settings(BaseSettings):
 
     # -- ch03：RAG（向量语义检索）----------------------------------------
     #
-    # 嵌入模型跑在本机（上游 DeepSeek 没有 /embeddings 端点，实测 404），
-    # 所以这里只有「模型在哪、向量几维」，没有 API key 之类的凭据。
+    # 嵌入走云端（OpenAI 兼容 /embeddings）。上游 DeepSeek 没有这个端点，
+    # 所以这里需要**独立**的 base_url / api_key / model 三项。
     milvus_uri: str = Field(
         default="http://127.0.0.1:19530",
         min_length=1,
@@ -120,7 +120,7 @@ class Settings(BaseSettings):
     )
     rag_warmup: bool = Field(
         default=True,
-        description="启动时预热嵌入模型与 Milvus 集合。关闭后首次查询要等模型加载（约 20-40s）。",
+        description="启动时预热嵌入服务与 Milvus 集合。见 create_app 的 rag_warmup 参数。",
     )
     chunk_max_chars: int = Field(
         default=600, ge=1, description="单个切分块的最大字符数（表格按行切时可不遵守）。"

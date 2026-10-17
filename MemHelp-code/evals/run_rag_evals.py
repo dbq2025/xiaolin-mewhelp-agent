@@ -125,11 +125,19 @@ def hit(case: dict, hits: Iterable[Any]) -> bool:
 
 
 def _keyword_hits(session, term: str, limit: int = TOP_K) -> list[SimpleNamespace]:
+    """关键词基线只在**文档语料**上跑（排除 ``content_type='mined'``）。
+
+    为什么要排除：挖矿语料是 ch03 才有的，而它的问答对来自历史对话 ——
+    那些对话里就写着「邮费」这类词。把它算进基线，关键词检索会在验收用例上
+    命中，于是「向量解决了换说法召回」这句话就被自己的数据推翻了。
+    基线要对照的是**同一批文档知识**，所以两侧看的是同一段历史。
+    """
     pattern = f"%{term}%"
     rows = session.execute(
         text(
             "SELECT category, questions, answer FROM knowledge_chunks "
-            "WHERE questions LIKE :p OR answer LIKE :p OR category LIKE :p "
+            "WHERE (questions LIKE :p OR answer LIKE :p OR category LIKE :p) "
+            "AND (content_type IS NULL OR content_type <> 'mined') "
             "ORDER BY id LIMIT :n"
         ),
         {"p": pattern, "n": limit},
@@ -301,6 +309,18 @@ async def _run(args: argparse.Namespace) -> int:
     if required is None:
         print(f"评估集缺少验收用例 {REQUIRED_VECTOR_CASE}", file=sys.stderr)
         return 1
+
+    # 关键词基线**命中**了验收用例，说明语料里出现了「邮费」这类换说法用词 ——
+    # 此时对照已经失效（不是「向量赢了」，而是「基线也做得到」），必须失败而不是报绿。
+    if required.keyword_raw_hit or required.keyword_noun_hit:
+        print(
+            f"验收用例 {REQUIRED_VECTOR_CASE} 的关键词基线命中了："
+            "说明文档语料里出现了「邮费」等换说法用词，对照失效。"
+            "检查 knowledge/*.md（tests/test_knowledge_corpus.py 会先拦一道）。",
+            file=sys.stderr,
+        )
+        return 1
+
     if required.vector_hit is None:
         # 只跑关键词基线属于诊断模式：没有向量结果就无从判定验收，但不该算失败。
         print(

@@ -53,6 +53,10 @@ KNOWN_SCHEMA_DIVERGENCES: dict[str, dict[str, object]] = {
         "extra_enum_values": {"退款"},
         "note": "真库的 ticket_type 比本章多一个『退款』；本章的工具只会产出三个值",
     },
+    "qa_extraction_staging": {
+        "extra_enum_values": {"approved", "rejected"},
+        "note": "后续章节加的人工审核状态；ORM 的 SAEnum 必须包含它们，否则读到即 LookupError",
+    },
 }
 
 
@@ -402,3 +406,106 @@ def test_existing_conversations_all_have_a_session_key(engine):
             text("SELECT COUNT(*) FROM conversations WHERE session_id IS NULL OR session_id = ''")
         ).scalar()
     assert blanks == 0, f"有 {blanks} 行会话没有 session_id，历史将无法通过接口回读"
+
+
+# ---------------------------------------------------------------------------
+# ch03：两张新表在真库上的列对齐、ENUM 超集与自引用外键删除
+# ---------------------------------------------------------------------------
+
+
+def test_ch03_tables_match_the_orm_columns(engine):
+    """真库的列集合必须与 ORM 一致 —— 差一列在单测里毫无症状。"""
+    from sqlalchemy import inspect
+
+    from app.db.models import KnowledgeChunk, QaStaging
+
+    inspector = inspect(engine)
+    for model in (KnowledgeChunk, QaStaging):
+        actual = {column["name"] for column in inspector.get_columns(model.__tablename__)}
+        expected = {column.name for column in model.__table__.columns}
+        assert actual == expected, model.__tablename__
+
+
+async def test_staging_status_round_trips_all_five_values(engine):
+    """真库 ENUM 是 5 值超集，ORM 必须能读能写。
+
+    只写 3 值的话，读到后续章节写入的 ``approved`` 会抛 ``LookupError`` ——
+    症状是「暂存表偶尔读不出来」，极难查。
+    """
+    from sqlalchemy import text
+    from sqlalchemy.orm import Session
+
+    from app.db.models import STAGING_STATUSES, QaStaging
+
+    marker = "ch03-it-staging"
+    with Session(engine) as session:
+        try:
+            for status in STAGING_STATUSES:
+                session.add(
+                    QaStaging(
+                        batch_no=marker,
+                        source_ref=marker,
+                        question=f"问法-{status}",
+                        answer="答案",
+                        status=status,
+                    )
+                )
+            session.commit()
+
+            # 直接从库里读回来：SAEnum 不认的值会在这里抛 LookupError
+            values = session.execute(
+                text(
+                    "SELECT DISTINCT status FROM qa_extraction_staging WHERE batch_no = :b"
+                ),
+                {"b": marker},
+            ).scalars().all()
+            assert set(values) == set(STAGING_STATUSES)
+        finally:
+            session.execute(
+                text("DELETE FROM qa_extraction_staging WHERE batch_no = :b"),
+                {"b": marker},
+            )
+            session.commit()
+
+
+async def test_deleting_linked_chunks_works_against_self_referencing_foreign_keys(engine):
+    """删掉互相引用的两块，在真库上必须成立。
+
+    `knowledge_chunks` 有两个指向自己的外键（`ON DELETE SET NULL`）；SQLite 默认
+    不强制外键，所以「单测绿、真库炸」的风险正好落在这里 —— 这正是
+    ``--rebuild``（整表 DELETE）会走到的路径。
+
+    **刻意不调 ``truncate()``**：那会清空这台共享库上的真实知识库。这里用
+    同一张表、同一类互相引用的行、同一个删除路径（``delete_ids``）来验证，
+    既能证明外键行为，又不动别人的数据。
+    """
+    from sqlalchemy.orm import Session
+
+    from app.db.models import KnowledgeChunk
+    from app.db.repositories import KnowledgeChunkRepository
+
+    marker = "ch03-it-delete"
+    with Session(engine) as session:
+        repo = KnowledgeChunkRepository(session)
+        first = KnowledgeChunk(
+            category=marker, questions=f"{marker}-1", answer="甲", section_path=marker,
+            content_type="manual", is_key_clause=False,
+        )
+        second = KnowledgeChunk(
+            category=marker, questions=f"{marker}-2", answer="乙", section_path=marker,
+            content_type="manual", is_key_clause=False,
+        )
+        session.add_all([first, second])
+        session.commit()
+        first.next_chunk_id = second.id
+        second.prev_chunk_id = first.id
+        session.commit()
+
+        try:
+            deleted = await repo.delete_ids([first.id, second.id])
+            assert deleted == 2
+            assert session.query(KnowledgeChunk).filter(
+                KnowledgeChunk.category == marker
+            ).count() == 0
+        finally:
+            session.rollback()

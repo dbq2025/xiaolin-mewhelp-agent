@@ -50,6 +50,41 @@ def _stream(client: TestClient, payload: dict[str, Any]) -> list[tuple[str, dict
     return _events(text)
 
 
+def test_injected_retriever_actually_reaches_query_faq(test_settings):
+    """HTTP 层注入的 retriever 必须真的传到工具里 —— 只断言 state 上的属性不算数。
+
+    这条堵的是「依赖链在某处悄悄换成默认检索器」：那样接口照样 200，
+    但检索用的是另一套配置，而测试全绿。
+    """
+    from app.knowledge.retrieval import KnowledgeHit
+
+    calls: list[tuple[str, int | None]] = []
+
+    class _Retriever:
+        async def search(self, query, top_k=None):
+            calls.append((query, top_k))
+            return [KnowledgeHit("运费怎么算", "满 99 元包邮", "物流", 0.9)]
+
+        async def warmup(self) -> None:
+            return None
+
+    model = FakeChatModel(
+        tool_calls_then_stream=[_tool_call("query_faq", {"keyword": "邮费是多少"})],
+        chunks=["满 99 元包邮。"],
+    )
+    client = TestClient(
+        main.create_app(model=model, settings=test_settings, retriever=_Retriever())
+    )
+
+    resp = client.post(
+        "/api/chat/completions",
+        json={"session_id": "rag-wire", "message": "邮费是多少", "stream": False},
+    )
+
+    assert resp.status_code == 200
+    assert calls == [("邮费是多少", None)]  # 整句原话 + 由检索器决定 top_k
+
+
 def _events(text: str) -> list[tuple[str, dict | None]]:
     events: list[tuple[str, dict | None]] = []
     for block in text.strip().split("\n\n"):

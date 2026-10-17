@@ -63,6 +63,7 @@ class IngestReport:
     chunks_created: int = 0
     chunks_updated: int = 0
     chunks_skipped: int = 0
+    chunks_pruned: int = 0
     vectors_written: int = 0
 
 
@@ -144,6 +145,13 @@ async def vectorize_pending(
             break
 
         vectors = await embedder.embed([render_embed_text(row) for row in rows])
+        if len(vectors) != len(rows):
+            # 嵌入器返回条数不对时**必须停**：继续下去会让 upsert 与 mark_done 用
+            # 不同的长度，结果是「MySQL 说 done、Milvus 里少几条」——正是续跑机制
+            # 应该消灭的那种半对齐状态。
+            raise RuntimeError(
+                f"嵌入返回条数不符：期望 {len(rows)}，实际 {len(vectors)}"
+            )
         ids = [str(row.id) for row in rows]
 
         # 先写向量，再回填状态。反了就永远补不上（见模块 docstring）。
@@ -177,8 +185,9 @@ async def _ingest_chunks(
             report.chunks_updated += 1
         else:
             report.chunks_skipped += 1
-    if len(ids) > 1:
-        await chunk_repo.link_neighbours(ids)
+    # **总是**回填指针（哪怕只有一块）：单块文档也要把上一轮的 next/prev 清掉，
+    # 否则改完文档后尾块还指着已被删除的旧块。
+    await chunk_repo.link_neighbours(ids)
     return ids
 
 
@@ -222,11 +231,17 @@ async def ingest_markdown(
         ]
         ids = await _ingest_chunks(chunks=rows, chunk_repo=chunk_repo, report=report)
 
-        # 原文改了但答案没变的块不会被计数；真正的「更新」在 upsert 内部发生，
-        # 这里用「原有块数 - 新建块数」间接统计，够用且不必再查一遍库。
         report.chunks_total += len(ids)
         report.docs += 1
         logger.info("%s：%d 块（%s）", path.name, len(ids), content_type)
+
+        # 增量重建：这篇文档里**已经不存在**的旧块要清掉，连同它们的向量。
+        # 不清理的话，改过的章节会留下旧答案并继续被检索到 —— 那是面向客户的错答，
+        # 而且没有任何报错。
+        pruned = await _prune_stale_sections(
+            rows=rows, keep_ids=ids, chunk_repo=chunk_repo, vector_store=vector_store
+        )
+        report.chunks_pruned += pruned
 
     report.vectors_written = await vectorize_pending(
         chunk_repo=chunk_repo,
@@ -235,6 +250,30 @@ async def ingest_markdown(
         limit=vector_limit,
     )
     return report
+
+
+async def _prune_stale_sections(
+    *,
+    rows: Sequence[_Row],
+    keep_ids: Sequence[int],
+    chunk_repo: KnowledgeChunkRepository,
+    vector_store: VectorStore,
+) -> int:
+    """删掉同篇文档里本次没有生成的旧块（先删向量、再删行）。"""
+    if not rows:
+        return 0
+
+    root = rows[0].section_path.split(" / ")[0]
+    keep = set(keep_ids)
+    stale = [chunk.id for chunk in await chunk_repo.list_by_scope(root) if chunk.id not in keep]
+    if not stale:
+        return 0
+
+    # 先删向量：反了的话，中断会留下指向已删原文的孤儿向量。
+    await vector_store.delete([str(chunk_id) for chunk_id in stale])
+    deleted = await chunk_repo.delete_ids(stale)
+    logger.info("清理已不存在的旧块 %d 条（%s）", deleted, root)
+    return deleted
 
 
 async def ingest_faq_table(

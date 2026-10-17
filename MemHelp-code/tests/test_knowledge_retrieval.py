@@ -111,6 +111,16 @@ async def test_search_passes_top_k_through(sqlite_session):
     assert store.asked_top_k == [3]
 
 
+async def test_search_falls_back_to_the_configured_default_top_k(sqlite_session):
+    """``RAG_TOP_K`` 必须真的生效：不传 top_k 时用构造时给的默认值。"""
+    repo, _ = await _seed_chunks(sqlite_session, [("运费怎么算", "满 99 包邮", "物流")])
+    store = _FakeStore([])
+
+    await KnowledgeRetriever(_FakeEmbedder(), store, repo, default_top_k=9).search("q")
+
+    assert store.asked_top_k == [9]
+
+
 async def test_search_returns_empty_when_store_is_empty(sqlite_session):
     repo, _ = await _seed_chunks(sqlite_session, [])
     assert await KnowledgeRetriever(_FakeEmbedder(), _FakeStore([]), repo).search("q") == []

@@ -57,6 +57,7 @@ class VectorStore(Protocol):
 
     async def ensure_collection(self) -> None: ...
     async def upsert(self, ids: Sequence[str], vectors: Sequence[Sequence[float]]) -> None: ...
+    async def delete(self, ids: Sequence[str]) -> None: ...
     async def search(self, vector: Sequence[float], top_k: int) -> list[VectorHit]: ...
     async def count(self) -> int: ...
     async def reset(self) -> None: ...
@@ -116,9 +117,25 @@ class MilvusVectorStore:
 
     def _ensure_collection(self) -> None:
         client = self._get_client()
-        if client.has_collection(self._collection):
+        if not client.has_collection(self._collection):
+            self._create_schema_and_collection()
             return
-        self._create_schema_and_collection()
+
+        # 集合已存在时**校验维度**：换过 EMBEDDING_MODEL / EMBEDDING_DIM 之后，
+        # 第一次写入会收到一条 Milvus 原生的维度错误，对使用者毫无操作性。
+        # 这里提前给出「该重建了」的可执行提示。
+        described = client.describe_collection(self._collection)
+        for field in described.get("fields", []):
+            if field.get("name") != VECTOR_FIELD:
+                continue
+            params = field.get("params") or {}
+            existing_dim = params.get("dim")
+            if existing_dim is not None and int(existing_dim) != self._dim:
+                raise RuntimeError(
+                    f"Milvus 集合 {self._collection!r} 的向量维度是 {existing_dim}，"
+                    f"而当前配置是 {self._dim}。改了嵌入模型/维度后需要重建索引："
+                    "运行 scripts/build_knowledge.py --docs knowledge --faq-table --rebuild"
+                )
 
     async def ensure_collection(self) -> None:
         """集合不存在就建（含索引与 load）。幂等。"""
@@ -136,6 +153,17 @@ class MilvusVectorStore:
     async def upsert(self, ids: Sequence[str], vectors: Sequence[Sequence[float]]) -> None:
         """按主键 upsert：同 id 覆盖，不产生第二行。"""
         await anyio.to_thread.run_sync(self._upsert, [str(i) for i in ids], list(vectors))
+
+    # -- 删除 ---------------------------------------------------------
+
+    def _delete(self, ids: list[str]) -> None:
+        if not ids:
+            return
+        self._get_client().delete(self._collection, ids=ids)
+
+    async def delete(self, ids: Sequence[str]) -> None:
+        """按主键删除向量（增量重建时清理已不存在的旧块）。"""
+        await anyio.to_thread.run_sync(self._delete, [str(i) for i in ids])
 
     # -- 检索 ---------------------------------------------------------
 

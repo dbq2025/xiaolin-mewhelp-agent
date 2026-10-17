@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.config import get_settings  # noqa: E402
 from app.db.repositories import Repositories  # noqa: E402
 from app.db.session import create_engine_from, session_factory  # noqa: E402
+from app.errors import redact  # noqa: E402
 from app.knowledge.embedder import get_embedder  # noqa: E402
 from app.knowledge.ingest import (  # noqa: E402
     IngestReport,
@@ -110,6 +111,10 @@ async def _run(args: argparse.Namespace) -> int:
     engine = create_engine_from(settings)
     factory = session_factory(engine)
 
+    # 先确认密钥（--status 除外）：别等连完 Milvus、切完文档，才因为 401 白跑一遍。
+    if not args.status:
+        settings.require_embedding_key()
+
     vector_store = MilvusVectorStore(
         settings.milvus_uri, settings.milvus_collection, settings.embedding_dim
     )
@@ -121,8 +126,6 @@ async def _run(args: argparse.Namespace) -> int:
         print(summarise(counts, await vector_store.count()))
         return 0
 
-    # 要真正发嵌入请求了，先确认密钥 —— 别等切分完几百块才因 401 白跑。
-    settings.require_embedding_key()
     embedder = get_embedder(settings)
 
     with factory() as session:
@@ -152,7 +155,8 @@ async def _run(args: argparse.Namespace) -> int:
             print(
                 f"文档建库：docs={report.docs} total={report.chunks_total} "
                 f"created={report.chunks_created} updated={report.chunks_updated} "
-                f"skipped={report.chunks_skipped} vectors={report.vectors_written}"
+                f"skipped={report.chunks_skipped} pruned={report.chunks_pruned} "
+                f"vectors={report.vectors_written}"
             )
 
         if args.faq_table:
@@ -196,7 +200,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return asyncio.run(_run(args))
     except Exception as exc:  # noqa: BLE001 - CLI 要把原因打给人看
-        print(f"建库失败：{exc}", file=sys.stderr)
+        # 过一遍 redact：嵌入服务的报错可能回显请求头片段（含密钥）。
+        print(f"建库失败：{redact(str(exc))}", file=sys.stderr)
         return 1
 
 

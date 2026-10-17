@@ -26,32 +26,26 @@
 """
 
 import json
-from typing import Protocol
 
-from app.knowledge.retrieval import DEFAULT_TOP_K, KnowledgeHit
+from app.knowledge.retrieval import DEFAULT_TOP_K, KnowledgeHit, RetrieverLike
 
 __all__ = ["MAX_FAQ_ITEMS", "RetrieverLike", "query_faq"]
 
-#: 单次返回的最大条数（与 ``Settings.rag_top_k`` 默认值一致）。
-#: 命中太多会把上下文预算一次吃光，而且模型也不需要 20 条规则来回答一个问题。
+#: 兜底取数（与 ``Settings.rag_top_k`` 的默认值一致）。
+#: 真正生效的值来自配置：``KnowledgeRetriever`` 构造时用 ``RAG_TOP_K``，
+#: ``query_faq`` 不传 ``top_k`` 时由检索器决定。
 MAX_FAQ_ITEMS = DEFAULT_TOP_K
 
 
-class RetrieverLike(Protocol):
-    """本工具对检索器的最小依赖。只要求这一个方法。"""
-
-    async def search(self, query: str, top_k: int = DEFAULT_TOP_K) -> list[KnowledgeHit]: ...
-
-
 async def query_faq(
-    keyword: str, *, retriever: RetrieverLike, top_k: int = MAX_FAQ_ITEMS
+    keyword: str, *, retriever: RetrieverLike, top_k: int | None = None
 ) -> str:
     """按语义检索平台规则库，返回最相关的问答对。
 
     :param keyword: **用户问题的完整原话**（如「邮费是多少」）。不要截成名词 ——
         向量检索靠整句语义，截词反而丢信息。空白串直接返回空结果。
     :param retriever: 检索器。生产用 ``KnowledgeRetriever``，测试用假实现。
-    :param top_k: 最多返回几条。
+    :param top_k: 最多返回几条；``None`` 表示用检索器配置的默认值（``RAG_TOP_K``）。
     :return: JSON 字符串，含 ``ok`` / ``keyword`` / ``count`` / ``items``
         （每项含 ``question`` / ``answer`` / ``category``）。
 

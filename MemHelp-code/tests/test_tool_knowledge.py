@@ -18,7 +18,7 @@ import json
 import pytest
 
 from app.knowledge.retrieval import KnowledgeHit
-from app.tools.knowledge import MAX_FAQ_ITEMS, query_faq
+from app.tools.knowledge import query_faq
 from app.tools.ticketing import create_ticket
 
 
@@ -34,9 +34,9 @@ class FakeRetriever:
         self.hits = list(hits)
         self.calls: list[tuple[str, int]] = []
 
-    async def search(self, query, top_k=5):
+    async def search(self, query, top_k=None):
         self.calls.append((query, top_k))
-        return self.hits[:top_k]
+        return self.hits if top_k is None else self.hits[:top_k]
 
 
 class FakeTicketRepo:
@@ -105,7 +105,8 @@ async def test_query_faq_passes_the_whole_question_through():
     retriever = FakeRetriever()
     await query_faq("买了七天还能退吗", retriever=retriever)
 
-    assert retriever.calls == [("买了七天还能退吗", MAX_FAQ_ITEMS)]
+    # top_k 传 None：取数上限由检索器配置（RAG_TOP_K）决定。
+    assert retriever.calls == [("买了七天还能退吗", None)]
 
 
 async def test_query_faq_strips_surrounding_whitespace():
@@ -127,13 +128,16 @@ async def test_query_faq_skips_the_retriever_for_blank_keywords():
 
 
 async def test_query_faq_uses_a_bounded_limit():
-    """结果条数必须有上限：命中 50 条会把上下文预算一次吃光。"""
+    """结果条数必须有上限：命中 50 条会把上下文预算一次吃光。
+
+    上限由检索器（配置项 ``RAG_TOP_K``）决定，工具只负责原样返回。
+    """
     retriever = FakeRetriever([KnowledgeHit(f"q{i}", "答案", "售后", 1.0) for i in range(50)])
 
-    out = json.loads(await query_faq("退货", retriever=retriever))
+    out = json.loads(await query_faq("退货", retriever=retriever, top_k=3))
 
-    assert out["count"] == MAX_FAQ_ITEMS
-    assert retriever.calls[0][1] == MAX_FAQ_ITEMS
+    assert out["count"] == 3
+    assert retriever.calls[0][1] == 3
 
 
 async def test_query_faq_lets_retriever_failure_propagate():

@@ -67,6 +67,15 @@ class _FakeClient:
         self.collections.add(name)
         self.created.append(name)
 
+    def describe_collection(self, name):
+        # 只有 id + vector 两列；维度取自最近一次 create_schema
+        fields = []
+        if self.schemas:
+            for field_name, _dtype, kwargs in self.schemas[-1].fields:
+                params = {"dim": kwargs["dim"]} if "dim" in kwargs else {}
+                fields.append({"name": field_name, "params": params})
+        return {"collection_name": name, "fields": fields}
+
     def load_collection(self, name):
         self.loaded.append(name)
 
@@ -125,6 +134,21 @@ async def test_ensure_collection_is_noop_when_already_present(client):
     await store.ensure_collection()
 
     assert client.created == []
+
+
+async def test_existing_collection_with_wrong_dim_fails_with_an_actionable_error(client):
+    """换过嵌入模型/维度后，第一次写入会收到 Milvus 原生维度错误 —— 太难查。
+
+    这里提前校验并给出「该重建了」的可执行提示。
+    """
+    client.collections.add("knowledge")
+    client.schemas.append(_Schema())
+    client.schemas[-1].fields.append(("id", object, {"max_length": 64}))
+    client.schemas[-1].fields.append(("vector", object, {"dim": 4}))
+    store = MilvusVectorStore("http://x", "knowledge", 1024, client_factory=lambda: client)
+
+    with pytest.raises(RuntimeError, match="--rebuild"):
+        await store.ensure_collection()
 
 
 # ---------------------------------------------------------------------------

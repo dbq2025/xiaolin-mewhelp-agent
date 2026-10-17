@@ -189,6 +189,32 @@ async def test_missing_index_field_is_reported():
         await _embedder(handler).embed(["a"])
 
 
+async def test_duplicate_indices_are_rejected():
+    """index 重复会让两条文本拿到同一个向量 —— 内容看起来完全正常，必须拦。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"index": 0, "embedding": [0.1] * 4},
+                    {"index": 0, "embedding": [0.2] * 4},
+                ]
+            },
+        )
+
+    with pytest.raises(RuntimeError, match="排列"):
+        await _embedder(handler).embed(["a", "b"])
+
+
+async def test_non_json_200_is_reported_readably():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>gateway error</html>")
+
+    with pytest.raises(RuntimeError, match="不是合法 JSON"):
+        await _embedder(handler).embed(["a"])
+
+
 async def test_short_response_is_reported():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"data": [{"index": 0, "embedding": [0.1] * 4}]})

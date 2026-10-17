@@ -36,7 +36,7 @@ from typing import Any, TypeVar
 
 import anyio
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -472,13 +472,15 @@ class KnowledgeChunkRepository:
             self._session.commit()
             return int(row.id), "created"
 
-        if existing.answer != answer:
+        if existing.answer != answer or existing.category != _field(chunk, "category"):
+            # 原文**或分类**变了 → 旧向量作废。category 也进向量化文本
+            # （`render_embed_text` 的第一格），只盯 answer 会留下「答案没变、
+            # 分类变了」的陈旧向量，状态却还是 done。
             existing.answer = answer
-            # 原文变了 → 旧向量作废。不重置的话，检索会继续命中旧答案。
-            existing.vectorize_status = "pending"
-            existing.vector_id = None
             existing.category = _field(chunk, "category")
             existing.is_key_clause = bool(_field(chunk, "is_key_clause"))
+            existing.vectorize_status = "pending"
+            existing.vector_id = None
             self._session.commit()
             return int(existing.id), "updated"
         return int(existing.id), "unchanged"
@@ -495,12 +497,25 @@ class KnowledgeChunkRepository:
         return await _run(self._upsert_chunk, chunk)
 
     def _link_neighbours(self, ids: list[int]) -> None:
+        if not ids:
+            return
+        # **先把这批块的指针清空**：否则上次的尾块（现在不再是尾块）会留着
+        # 一个指向已删除块的 next_chunk_id，顺着链走会走到不存在的原文。
+        self._session.execute(
+            update(KnowledgeChunk)
+            .where(KnowledgeChunk.id.in_(ids))
+            .values(prev_chunk_id=None, next_chunk_id=None)
+        )
         for left, right in zip(ids, ids[1:]):
-            self._session.query(KnowledgeChunk).filter(KnowledgeChunk.id == left).update(
-                {KnowledgeChunk.next_chunk_id: right}
+            self._session.execute(
+                update(KnowledgeChunk)
+                .where(KnowledgeChunk.id == left)
+                .values(next_chunk_id=right)
             )
-            self._session.query(KnowledgeChunk).filter(KnowledgeChunk.id == right).update(
-                {KnowledgeChunk.prev_chunk_id: left}
+            self._session.execute(
+                update(KnowledgeChunk)
+                .where(KnowledgeChunk.id == right)
+                .values(prev_chunk_id=left)
             )
         self._session.commit()
 
@@ -529,11 +544,10 @@ class KnowledgeChunkRepository:
 
     def _mark_done(self, pairs: list[tuple[int, str]]) -> None:
         for chunk_id, vector_id in pairs:
-            self._session.query(KnowledgeChunk).filter(KnowledgeChunk.id == chunk_id).update(
-                {
-                    KnowledgeChunk.vector_id: vector_id,
-                    KnowledgeChunk.vectorize_status: "done",
-                }
+            self._session.execute(
+                update(KnowledgeChunk)
+                .where(KnowledgeChunk.id == chunk_id)
+                .values(vector_id=vector_id, vectorize_status="done")
             )
         self._session.commit()
 
@@ -569,11 +583,42 @@ class KnowledgeChunkRepository:
 
     def _truncate(self) -> None:
         # 用 DELETE 而不是 TRUNCATE：MySQL 的 TRUNCATE 会被自引用外键拒绝。
-        self._session.query(KnowledgeChunk).delete()
+        self._session.execute(delete(KnowledgeChunk))
         self._session.commit()
 
     async def truncate(self) -> None:
         await _run(self._truncate)
+
+    def _list_by_scope(self, root: str) -> list[ChunkRow]:
+        """取某篇文档派生出的全部块（``section_path`` 以该标题为根）。
+
+        一篇文档的块共享同一个一级标题，所以「根 + 分隔符」能圈定它们；
+        同节多块带 `` #n`` 后缀，也在这个范围里。
+        """
+        conditions = [KnowledgeChunk.section_path == root]
+        for separator in (" /", " #"):
+            conditions.append(
+                KnowledgeChunk.section_path.like(f"{root}{separator}%", escape="\\")
+            )
+        rows = self._session.scalars(select(KnowledgeChunk).where(or_(*conditions))).all()
+        return [_to_chunk_row(r) for r in rows]
+
+    async def list_by_scope(self, root: str) -> list[ChunkRow]:
+        """按文档根标题取块 —— 增量重建时用来找出「本次已不存在的旧块」。"""
+        return await _run(self._list_by_scope, root)
+
+    def _delete_ids(self, ids: list[int]) -> int:
+        if not ids:
+            return 0
+        result = self._session.execute(
+            delete(KnowledgeChunk).where(KnowledgeChunk.id.in_(ids))
+        )
+        self._session.commit()
+        return int(result.rowcount or 0)
+
+    async def delete_ids(self, ids: Sequence[int]) -> int:
+        """删掉指定块（调用方**必须先删掉 Milvus 里对应的向量**）。"""
+        return await _run(self._delete_ids, list(ids))
 
 
 def _to_chunk_row(row: KnowledgeChunk) -> ChunkRow:
@@ -645,8 +690,8 @@ class QaStagingRepository:
     def _mark(self, ids: list[int], status: str) -> None:
         if not ids:
             return
-        self._session.query(QaStaging).filter(QaStaging.id.in_(ids)).update(
-            {QaStaging.status: status}, synchronize_session=False
+        self._session.execute(
+            update(QaStaging).where(QaStaging.id.in_(ids)).values(status=status)
         )
         self._session.commit()
 
@@ -676,8 +721,8 @@ class QaStagingRepository:
     def _update_questions(self, row_id: int, questions: str) -> None:
         # 暂存表的列叫 question（单数）；合并后的多行问法直接写进这一列，
         # 入 knowledge_chunks 时再原样搬到那边的 questions（复数）。
-        self._session.query(QaStaging).filter(QaStaging.id == row_id).update(
-            {QaStaging.question: questions}
+        self._session.execute(
+            update(QaStaging).where(QaStaging.id == row_id).values(question=questions)
         )
         self._session.commit()
 

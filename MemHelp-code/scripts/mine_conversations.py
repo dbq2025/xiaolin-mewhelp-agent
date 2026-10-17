@@ -46,6 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.config import get_settings  # noqa: E402
 from app.db.repositories import Repositories  # noqa: E402
 from app.db.session import create_engine_from, session_factory  # noqa: E402
+from app.errors import redact  # noqa: E402
 from app.knowledge.embedder import get_embedder  # noqa: E402
 from app.knowledge.ingest import vectorize_pending  # noqa: E402
 from app.knowledge.mining import dedupe_and_ingest, mine_conversations  # noqa: E402
@@ -90,9 +91,12 @@ async def _run(args: argparse.Namespace) -> int:
     vector_store = MilvusVectorStore(
         settings.milvus_uri, settings.milvus_collection, settings.embedding_dim
     )
+    # 新机器上可能还没建过库：挖矿写向量前先确保集合存在，否则 upsert 直接报错。
+    await vector_store.ensure_collection()
 
     with factory() as session:
         repositories = Repositories.from_session(session)
+        report = None
 
         if not args.dedupe_only:
             report = await mine_conversations(
@@ -124,7 +128,7 @@ async def _run(args: argparse.Namespace) -> int:
         )
         print(f"补向量：vectors={written}")
 
-        failed = bool(locals().get("report") and report.failed_batches)
+        failed = bool(report and report.failed_batches)
 
     await embedder.aclose()
     engine.dispose()
@@ -137,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return asyncio.run(_run(args))
     except Exception as exc:  # noqa: BLE001 - CLI 要把原因打给人看
-        print(f"挖矿失败：{exc}", file=sys.stderr)
+        print(f"挖矿失败：{redact(str(exc))}", file=sys.stderr)
         return 1
 
 
