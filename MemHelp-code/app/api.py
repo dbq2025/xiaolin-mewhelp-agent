@@ -955,7 +955,6 @@ def create_app(
         req: CreateTicketRequest,
         settings_: Settings = Depends(get_app_settings),
         repositories_: Repositories = Depends(get_repositories),
-        retriever_: AnswerContextLike = Depends(get_retriever),
     ) -> JSONResponse:
         """用户在前端点「建工单」时调用；复用第 2 章的 `create_ticket` 工具。"""
         description = (req.description or "").strip()
@@ -972,7 +971,8 @@ def create_app(
                 "conversation_id": req.session_id,
             },
             repositories=repositories_,
-            retriever=retriever_,
+            # 建单不需要检索器；传 None 避免为了一个 tickets 写入去构造 Milvus 客户端。
+            retriever=None,
             timeout=settings_.tool_timeout_seconds,
             max_retries=settings_.tool_max_retries,
         )

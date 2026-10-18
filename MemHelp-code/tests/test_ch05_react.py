@@ -215,6 +215,8 @@ async def test_empty_response_gets_a_fixed_fallback():
     assert outcome.stop_reason == "empty_response"
     assert outcome.answer == AGENT_EMPTY_TEXT
     assert outcome.suggested_actions == ["transfer_human"]
+    # 空 assistant 不应进入历史：只留一条固定兜底 AI 消息。
+    assert [message.type for message in outcome.pending_messages] == ["ai"]
 
 
 async def test_reasoning_content_is_preserved_on_the_tool_call_message():

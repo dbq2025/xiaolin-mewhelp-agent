@@ -359,6 +359,7 @@ async def test_query_faq_hydrates_chunk_text_from_the_real_database(engine):
     from app.knowledge.retrieval import KnowledgeRetriever
     from app.knowledge.vector_store import VectorHit
     from app.tools.knowledge import query_faq
+    from tests.fakes import SearchAsAnswerContext
 
     marker = "ch03-it-邮费-mark"
     with Session(engine) as session:
@@ -386,10 +387,15 @@ async def test_query_faq_hydrates_chunk_text_from_the_real_database(engine):
                 return [VectorHit(str(chunk_id), 0.93)]
 
         try:
-            retriever = KnowledgeRetriever(
+            inner = KnowledgeRetriever(
                 _Embedder(), _Store(), KnowledgeChunkRepository(session)
             )
-            payload = json.loads(await query_faq("邮费是多少", retriever=retriever))
+
+            class _Retriever(SearchAsAnswerContext):
+                async def search(self, query, top_k=None):
+                    return await inner.search(query, top_k or 5)
+
+            payload = json.loads(await query_faq("邮费是多少", retriever=_Retriever()))
         finally:
             session.query(KnowledgeChunk).filter(KnowledgeChunk.id == chunk_id).delete()
             session.commit()

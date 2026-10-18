@@ -315,7 +315,9 @@ async def _log_turn(state: AgentState, config: RunnableConfig) -> dict[str, Any]
             tool_records=state.get("tool_records") or [],
         )
 
-    record = build_turn_log(state, latency_ms)
+    record = build_turn_log(
+        {**state, "trace": _trace(state, "log_turn")}, latency_ms
+    )
     TurnLogger(getattr(settings, "turn_log_path", "")).write(record)
 
     payload: dict[str, Any] = {

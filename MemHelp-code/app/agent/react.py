@@ -123,11 +123,16 @@ def _emit(emit: Callable[[dict[str, Any]], None] | None, payload: dict[str, Any]
 
 
 def _status_payload(name: str, args: dict[str, Any]) -> dict[str, Any]:
+    label = (
+        "正在记录建议…"
+        if name == "suggest_actions"
+        else TOOL_LABELS.get(name, f"正在调用 {name}…")
+    )
     return {
         "type": "status",
         "tool": name,
         "args": args,
-        "label": TOOL_LABELS.get(name, f"正在调用 {name}…"),
+        "label": label,
     }
 
 
@@ -196,8 +201,13 @@ async def run_react_agent(
         calls = list(assistant.tool_calls or [])
 
         if not calls:
-            pending_messages.append(assistant)
-            stop_reason = "final" if "".join(answer_parts).strip() else "empty_response"
+            if "".join(answer_parts).strip():
+                pending_messages.append(assistant)
+                stop_reason = "final"
+            else:
+                # 不要把「空 assistant」提交进历史：回读时它会渲染成一个多余的
+                # 「（客服没有返回内容）」气泡，而下面已经会补固定兜底。
+                stop_reason = "empty_response"
             break
 
         if len(calls) > 1:
