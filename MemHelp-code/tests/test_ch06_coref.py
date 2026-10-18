@@ -34,6 +34,11 @@ def test_colloquial_needs_coref():
     assert needs_coref("钱啥时候回来", []) is True
 
 
+def test_ellipsis_with_na_needs_coref():
+    history = [HumanMessage(content="订单 20240115001 的物流到哪了")]
+    assert needs_coref("那现在到哪了", history) is True
+
+
 def test_explicit_id_makes_question_self_contained():
     assert needs_coref("XH-3000A 续航多久", []) is False
     assert needs_coref("订单 20240115001 多少钱", []) is False

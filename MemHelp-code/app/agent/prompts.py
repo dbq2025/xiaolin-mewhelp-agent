@@ -39,6 +39,8 @@ INTENT_PROMPT: str = """你是电商客服系统的意图分类器。把用户�
 输出：{"intent": "complaint", "confidence": 0.95}
 用户：你好呀
 输出：{"intent": "chitchat", "confidence": 0.98}
+用户：今天天气怎么样
+输出：{"intent": "chitchat", "confidence": 0.9}
 用户：你们公司股票能买吗
 输出：{"intent": "other", "confidence": 0.9}
 用户：帮我看看那个
