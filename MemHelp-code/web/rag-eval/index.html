@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAG 评估 · MewHelp</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%232563eb'/%3E%3Ctext x='16' y='22' font-size='15' text-anchor='middle' fill='white'%3E%E7%BE%8E%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/rag-eval/style.css">
+</head>
+<body>
+
+<div class="app">
+  <header class="topbar">
+    <a class="brand" href="/chat/" title="回到对话页">
+      <div class="avatar-bot" aria-hidden="true">美</div>
+      <div class="brand-text">
+        <div class="brand-name">MewHelp · RAG 评估</div>
+        <div class="brand-sub" id="report-time">正在读取最新报告…</div>
+      </div>
+    </a>
+
+    <nav class="nav" aria-label="主导航">
+      <a href="/chat/">对话</a>
+      <a href="/rag-eval/" class="active" aria-current="page">评估</a>
+    </nav>
+
+    <div class="topbar-actions">
+      <span class="run-status" id="run-status">
+        <span class="dot"></span><span id="run-status-text">读取中…</span>
+      </span>
+      <button class="btn-ghost" id="btn-refresh" type="button" title="重新读取最新报告">刷新</button>
+      <button class="btn-primary" id="btn-rerun" type="button">重跑评估</button>
+    </div>
+  </header>
+
+  <main class="page">
+    <section class="run-banner" id="run-banner" hidden aria-live="polite">
+      <div class="run-banner-head">
+        <span class="spinner" aria-hidden="true"></span>
+        <strong id="run-banner-text">正在重跑评估…</strong>
+        <button class="btn-link" id="btn-toggle-log" type="button">查看日志</button>
+      </div>
+      <pre class="run-log" id="run-log" hidden></pre>
+    </section>
+
+    <section class="state-panel" id="loading" aria-live="polite">
+      <div class="skeleton hero-skeleton"></div>
+      <div class="skeleton-grid">
+        <div class="skeleton"></div>
+        <div class="skeleton"></div>
+        <div class="skeleton"></div>
+        <div class="skeleton"></div>
+      </div>
+      <div class="skeleton chart-skeleton"></div>
+    </section>
+
+    <section class="state-panel" id="error-panel" hidden>
+      <div class="state-icon bad" aria-hidden="true">!</div>
+      <h1>评估数据没能加载</h1>
+      <p class="state-message" id="error-message"></p>
+      <p class="state-hint" id="error-hint"></p>
+      <div class="state-actions">
+        <button class="btn-primary" id="btn-retry" type="button">重试</button>
+        <a class="btn-ghost" href="/chat/">回到对话</a>
+      </div>
+    </section>
+
+    <section class="state-panel" id="empty-panel" hidden>
+      <div class="state-icon" aria-hidden="true">∅</div>
+      <h1>还没有评估报告</h1>
+      <p class="state-message">
+        看板读取 <code id="empty-report-path">evals/reports/ch04.json</code>。
+        先跑一次四策略评估，页面会自动出现数据。
+      </p>
+      <pre class="state-command"><code>uv run --directory MemHelp-code python evals/run_ch04_evals.py \
+  --strategies vector,bm25,hybrid,hybrid_rerank \
+  --generation hybrid,hybrid_rerank --limit 4 \
+  --json evals/reports/ch04.json --markdown dev-notes/ch04-eval-report.md</code></pre>
+      <div class="state-actions">
+        <button class="btn-primary" id="btn-empty-run" type="button">在页面里重跑</button>
+        <button class="btn-ghost" id="btn-empty-refresh" type="button">再刷新一次</button>
+      </div>
+      <p class="state-hint">重跑需要本机能连 MySQL / Milvus 与嵌入、重排服务，通常需要几分钟。</p>
+    </section>
+
+    <div id="dashboard" hidden>
+      <section class="hero">
+        <div class="hero-copy">
+          <div class="eyebrow">第四章 · 混合检索与评估体系</div>
+          <h1>RAG 评估</h1>
+          <p>
+            同一份索引、同一套 Query 理解，只切检索策略：比较排序质量、证据覆盖与
+            端到端答案覆盖。没跑的策略显示 <b>—</b>，不拿 0 冒充。
+          </p>
+        </div>
+        <div class="hero-badge">
+          <span class="hero-badge-label">当前最佳检索策略</span>
+          <strong id="best-strategy">—</strong>
+          <span class="hero-badge-meta" id="acceptance-badge">—</span>
+        </div>
+      </section>
+
+      <section class="meta-grid" id="meta-grid" aria-label="评估元信息"></section>
+
+      <section class="kpi-grid" id="kpi-grid" aria-label="关键指标"></section>
+
+      <section class="panel chart-panel">
+        <header class="panel-head">
+          <div class="panel-title">
+            <h2 id="chart-title">检索排序 · MRR@10</h2>
+            <p id="chart-sub">越大越好。MRR 只看第一个正确证据排在第几位。</p>
+          </div>
+          <div class="tabs" role="tablist" aria-label="切换指标">
+            <button class="tab active" role="tab" aria-selected="true" data-tab="mrr" type="button">MRR@10</button>
+            <button class="tab" role="tab" aria-selected="false" data-tab="recall" type="button">Recall@5</button>
+            <button class="tab" role="tab" aria-selected="false" data-tab="evidence" type="button">证据覆盖</button>
+          </div>
+        </header>
+
+        <div class="legend" id="legend" aria-label="策略图例"></div>
+
+        <div class="chart-scroll">
+          <div class="chart-stage">
+            <div class="chart-y" id="y-axis" aria-hidden="true"></div>
+            <div class="chart-main">
+              <div class="chart-grid" id="gridlines" aria-hidden="true"></div>
+              <div class="chart-groups" id="groups" role="img" aria-label="四策略分桶指标柱状图"></div>
+              <div class="chart-x" id="x-axis"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="chart-empty" id="chart-empty" hidden>
+          <p id="chart-empty-text">这份报告没有该指标的数据。</p>
+        </div>
+        <p class="chart-foot" id="chart-foot"></p>
+      </section>
+
+      <section class="panel table-panel">
+        <header class="panel-head">
+          <div class="panel-title">
+            <h2>四策略明细</h2>
+            <p>检索段四策略全跑；生成段只跑 hybrid 与 hybrid_rerank，未跑的格子是 <b>—</b>。</p>
+          </div>
+          <span class="pill" id="acceptance-pill">—</span>
+        </header>
+        <div class="table-scroll">
+          <table class="metric-table">
+            <thead>
+              <tr>
+                <th scope="col">策略</th>
+                <th scope="col">Recall@1</th>
+                <th scope="col">Recall@5</th>
+                <th scope="col">MRR@10</th>
+                <th scope="col">证据覆盖</th>
+                <th scope="col">答案覆盖</th>
+                <th scope="col">引用覆盖率</th>
+                <th scope="col">拒答准确率</th>
+                <th scope="col">重排降级</th>
+              </tr>
+            </thead>
+            <tbody id="metric-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel warnings-panel" id="warnings-panel" hidden>
+        <header class="panel-head">
+          <div class="panel-title">
+            <h2>锚串警告</h2>
+            <p>同一根锚串命中超过 3 块，说明标注偏宽 —— 点一下可跳到对应题目。</p>
+          </div>
+          <span class="pill warn" id="warnings-count">0 条</span>
+        </header>
+        <div class="warnings-list" id="warnings-list"></div>
+        <button class="btn-link warnings-toggle" id="warnings-toggle" type="button" hidden>展开全部</button>
+      </section>
+
+      <section class="panel cases-panel">
+        <header class="panel-head cases-head">
+          <div class="panel-title">
+            <h2>逐条明细</h2>
+            <p>点一行看完整答案、claim 判定与引用编号。</p>
+          </div>
+          <div class="case-tabs" role="tablist" aria-label="明细类型">
+            <button class="tab active" role="tab" aria-selected="true" data-case-tab="retrieval" type="button">检索</button>
+            <button class="tab" role="tab" aria-selected="false" data-case-tab="generation" type="button">生成</button>
+          </div>
+        </header>
+
+        <div class="filters">
+          <label>策略
+            <select id="filter-strategy"></select>
+          </label>
+          <label>分桶
+            <select id="filter-bucket"></select>
+          </label>
+          <label>行为
+            <select id="filter-behavior">
+              <option value="">全部</option>
+              <option value="answer">应作答</option>
+              <option value="refuse">应拒答</option>
+            </select>
+          </label>
+          <span class="filters-count" id="cases-count"></span>
+        </div>
+
+        <div class="table-scroll cases-scroll">
+          <table class="cases-table">
+            <thead id="cases-head"></thead>
+            <tbody id="cases-body"></tbody>
+          </table>
+        </div>
+        <div class="cases-empty" id="cases-empty" hidden>没有符合筛选条件的记录。</div>
+      </section>
+
+      <section class="panel notes-panel" id="notes-panel" hidden>
+        <header class="panel-head">
+          <div class="panel-title">
+            <h2>阅读口径</h2>
+            <p>数字会随语料与模型变化；先看策略之间的相对差距，再抠小数点。</p>
+          </div>
+        </header>
+        <div class="notes-list" id="notes-list"></div>
+      </section>
+
+      <footer class="page-foot">
+        <span>报告文件：<code id="report-path">evals/reports/ch04.json</code></span>
+        <span>·</span>
+        <a href="/chat/">回到对话页</a>
+      </footer>
+    </div>
+  </main>
+</div>
+
+<div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+<aside class="case-drawer" id="case-drawer" hidden aria-label="单条明细">
+  <header class="drawer-head">
+    <div>
+      <div class="drawer-eyebrow" id="drawer-eyebrow">检索明细</div>
+      <h2 id="drawer-title">—</h2>
+    </div>
+    <button class="drawer-close" id="drawer-close" type="button" aria-label="关闭">×</button>
+  </header>
+  <div class="drawer-body" id="drawer-body"></div>
+</aside>
+
+<div class="toast" id="toast" hidden role="status"></div>
+
+<script src="/rag-eval/app.js"></script>
+</body>
+</html>

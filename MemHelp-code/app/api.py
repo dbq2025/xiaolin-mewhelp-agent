@@ -57,6 +57,14 @@ from app.knowledge.retrieval import warmup as warmup_rag
 from app.knowledge.vector_store import MilvusVectorStore
 from app.llm import get_chat_model
 from app.memory import InMemorySessionStore, get_session_store, new_session_id
+from app.rag_eval import (
+    EvalAlreadyRunning,
+    EvalRunner,
+    EvalStartError,
+    ReportInvalid,
+    ReportNotFound,
+    load_dashboard,
+)
 from app.schemas import (
     ChatRequest,
     ChatResponse,
@@ -654,6 +662,13 @@ async def _lifespan(app: FastAPI):
         except Exception:  # noqa: BLE001 - 预热失败不阻断启动
             logger.warning("RAG 预热失败：检索将在首个查询时按需初始化", exc_info=True)
     yield
+    # 评估重跑是子进程；应用退出时先收掉它，避免留下孤儿进程。
+    try:
+        runner = getattr(app.state, "rag_eval_runner", None)
+        if runner is not None and hasattr(runner, "aclose"):
+            await runner.aclose()
+    except Exception:  # noqa: BLE001 - 退出路径不该再抛
+        logger.debug("关闭评估重跑任务失败（已忽略）", exc_info=True)
     # 关掉进程单例持有的 httpx 连接（CLI 自己会关；Web 进程在退出时关一次）。
     try:
         settings = app.state.settings or get_settings()
@@ -670,6 +685,7 @@ def create_app(
     db_ping: Any = None,
     retriever: AnswerContextLike | None = None,
     rag_warmup: bool | None = None,
+    rag_eval_runner: Any = None,
 ) -> FastAPI:
     """构造应用。
 
@@ -692,6 +708,9 @@ def create_app(
     （``RAG_WARMUP``，生产默认开启）；显式 ``True/False`` 覆盖配置。
     预热会**发一次真实嵌入请求**，所以密钥/模型名配错能在启动阶段就喊出来。
     测试必须传 ``False``（``conftest`` 已统一处理），否则整套测试会去连外网。
+
+    ``rag_eval_runner``：评估看板的后台重跑器。默认是 ``EvalRunner``；测试可注入
+    一个假 runner，避免真的拉起评估子进程。
     """
     app = FastAPI(title="MewHelp 智能客服 API", version="0.3.0", lifespan=_lifespan)
     app.state.chat_model = model
@@ -702,6 +721,8 @@ def create_app(
     app.state.db_ping = db_ping
     app.state.retriever = retriever
     app.state.rag_warmup = rag_warmup
+    # 评估重跑是进程内长任务；注入点让测试不用真的拉起评估子进程。
+    app.state.rag_eval_runner = rag_eval_runner or EvalRunner()
 
     # -- 异常处理 ---------------------------------------------------------
 
@@ -917,12 +938,68 @@ def create_app(
             raise _as_upstream_error(exc) from exc
         return JSONResponse(status_code=200, content=result.model_dump())
 
+    # -- ch04：RAG 评估看板 -------------------------------------------------
+    #
+    # 页面只消费这里归一过的契约，不直接读 evals/reports/ch04.json：
+    # 报告是脚本产物，字段会随评估口径演进；归一放在后端，前端才能稳定。
+
+    @app.get("/api/rag-eval")
+    async def rag_eval_dashboard() -> JSONResponse:
+        """最新一次评估的结构化看板数据。
+
+        没有报告时返回 **404** 而不是空对象：前端据此展示「先跑一次评估」的
+        空状态，而不是把一份全 ``—`` 的看板伪装成「已评估」。
+        """
+        try:
+            payload = load_dashboard()
+        except ReportNotFound as exc:
+            return _error(404, "report_not_found", redact(str(exc)))
+        except ReportInvalid as exc:
+            return _error(500, "report_invalid", redact(str(exc)))
+        payload["run"] = app.state.rag_eval_runner.status()
+        return JSONResponse(status_code=200, content=payload)
+
+    @app.post("/api/rag-eval/rerun")
+    async def rag_eval_rerun() -> JSONResponse:
+        """启动一次后台评估。
+
+        返回 **202**：任务已接受，结果要靠 ``GET /api/rag-eval/run`` 轮询。
+        并发重跑返回 **409** —— 两个任务会同时写同一份 JSON 报告。
+        """
+        try:
+            state = await app.state.rag_eval_runner.start()
+        except EvalAlreadyRunning as exc:
+            return _error(409, "eval_running", redact(str(exc)))
+        except EvalStartError as exc:
+            return _error(500, "eval_start_failed", redact(str(exc)))
+        return JSONResponse(status_code=202, content={"run": state})
+
+    @app.get("/api/rag-eval/run")
+    async def rag_eval_run_status() -> JSONResponse:
+        """重跑任务状态（供页面轮询）。"""
+        return JSONResponse(status_code=200, content={"run": app.state.rag_eval_runner.status()})
+
     # -- 聊天页面（静态资源，无构建步骤）----------------------------------
 
     web_dir = PROJECT_ROOT / "web"
     if web_dir.is_dir():
         # html=True 让 /chat/ 直接返回 index.html
         app.mount("/chat", StaticFiles(directory=web_dir, html=True), name="chat")
+
+        # 评估页单独挂载，避免把 evals/reports 这类运行时产物暴露成静态目录。
+        rag_eval_dir = web_dir / "rag-eval"
+        if rag_eval_dir.is_dir():
+
+            @app.get("/rag-eval", include_in_schema=False)
+            async def rag_eval_redirect() -> RedirectResponse:
+                """不带斜杠也能进；与课程里的 ``/rag-eval`` 地址对齐。"""
+                return RedirectResponse(url="/rag-eval/")
+
+            app.mount(
+                "/rag-eval",
+                StaticFiles(directory=rag_eval_dir, html=True),
+                name="rag-eval",
+            )
 
         @app.get("/", include_in_schema=False)
         async def root_redirect() -> RedirectResponse:

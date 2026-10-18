@@ -517,7 +517,30 @@ ch03 的集合只有 `id + vector`，**BM25 的 `text`/`sparse` 字段只能在�
 #   FROM low_confidence_questions ORDER BY id DESC LIMIT 5;
 ```
 
-## 6. 本章留痕
+## 6. 评估看板 `/rag-eval`
+
+起服务后打开 <http://localhost:8000/rag-eval/>（不带斜杠会 307 到带斜杠）。
+页面**只读** `evals/reports/ch04.json`，不在浏览器里重算指标；展示：
+
+- 顶部元信息：评估集题数、知识库块数、重排模型与阈值、生成段策略、报告生成时间；
+- 四张 KPI：最佳整体 MRR、口语桶 MRR 提升（混合+重排 vs 纯 BM25）、端到端答案覆盖、意外问题拒答；
+- 柱状图三个口径：**MRR@10 / Recall@5 / 证据覆盖（Faithfulness）**，按四桶 + 整体分组；
+- 四策略明细表、锚串警告、逐条明细（检索 / 生成）；点一行打开抽屉，能看完整答案、
+  claim 是否被证据支持、引用编号与 Top-10 命中；
+- 没跑的策略显示 `—` 而不是 0；报告缺失显示「先跑一次评估」的空状态，报告损坏显示错误态。
+
+右上「重跑评估」会调后台任务（子进程），页面每 2 秒轮询状态，跑完自动刷新报告：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/rag-eval` | 归一后的看板数据；没有报告返回 404 `report_not_found` |
+| POST | `/api/rag-eval/rerun` | 启动后台评估，202；已有任务在跑返回 409 |
+| GET | `/api/rag-eval/run` | 重跑状态与日志尾部（供页面轮询） |
+
+> 重跑会覆盖 `evals/reports/ch04.json` 与 `dev-notes/ch04-eval-report.md`，需要
+> `.env`、MySQL / Milvus、嵌入与重排服务都可用；通常几分钟。
+
+## 7. 本章留痕
 
 - 设计文档：`docs/superpowers/specs/2026-10-17-ch04-hybrid-retrieval-design.md`
 - 实施计划：`docs/superpowers/plans/2026-10-17-ch04-hybrid-retrieval-plan.md`

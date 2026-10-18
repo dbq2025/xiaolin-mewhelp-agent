@@ -140,7 +140,8 @@ sse.py       SSE 帧编码
 | 数据 | `sql/ch04-ddl.sql`、`app/db/{models,repositories}.py` |
 | 评估 | `evals/ch04_cases.jsonl`（48 条）、`evals/run_ch04_evals.py` |
 | 语料 | `knowledge/商品型号手册.md`（新增） |
-| 前端 | `web/{app.js,style.css}`（引用抽屉 + 👍/👎） |
+| 前端 | `web/{app.js,style.css}`（引用抽屉 + 👍/👎）、`web/rag-eval/`（评估看板） |
+| 评估接口 | `app/rag_eval.py`；`GET /api/rag-eval`、`POST /api/rag-eval/rerun`、`GET /api/rag-eval/run` |
 
 ## 2. 演示命令
 
@@ -168,13 +169,16 @@ $env:UV_CACHE_DIR = "F:\DeepSeek-Harness\memhelp-code-myself\.uv-cache"; $uv = "
 & $uv run --directory MemHelp-code uvicorn app.main:app --port 8000
 #   问「XH-3000A 的续航多久」→ 点角标看原文；问「你们支持货到付款吗」→ 拒答
 & $uv run --directory MemHelp-code python scripts/show_low_confidence.py
+
+# 5) 评估看板：四策略对照 / 证据覆盖 / 逐条明细，页面可重跑
+#   浏览器打开 http://localhost:8000/rag-eval/
 ```
 
 ## 3. 测试结果
 
 ```
 uv run --directory MemHelp-code python -m pytest -q
-674 passed, 39 skipped
+694 passed, 39 skipped
 ```
 
 真机集成（默认 skip，需显式开启）：
