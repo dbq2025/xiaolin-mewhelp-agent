@@ -244,6 +244,10 @@
       // 引用与反馈都挂在最终答案上：流式过程中 cites 还没到，先不管。
       decorateCitations(ctx.bot.bubble, data.citations);
       attachFeedback(ctx.bot);
+      attachActions(ctx.bot, data.actions, {
+        route: data.route,
+        sourceText: ctx.userText,
+      });
       if (els.stats.checked) {
         const s = el('div', 'stats');
         s.innerHTML = `上下文：保留 <code>${data.kept}</code> 条，`
@@ -342,7 +346,11 @@
   const FEEDBACK_PREFIX = 'mewhelp.feedback.';
 
   function botIndexOf(row) {
-    const rows = Array.from(document.querySelectorAll('.row.bot'));
+    // 转人工模拟出来的「客服小猫」气泡不参与序号：它不落库，刷新后会消失；
+    // 若把它算进去，刷新后后续消息的 action/feedback 锁会整体错位。
+    const rows = Array.from(
+      document.querySelectorAll('.row.bot:not([data-simulated])')
+    );
     return rows.indexOf(row);
   }
 
@@ -394,6 +402,133 @@
     if (saved === 'up' || saved === 'down') applyFeedbackLock(box, saved);
   }
 
+  // ---------------------------------------------------------- 建议动作按钮
+  //
+  // 转人工与建工单是**两件独立的事**：
+  // - 转人工：纯前端模拟，不发请求；
+  // - 建工单：只有用户点按钮才 POST /api/actions/create-ticket 写 tickets。
+  //
+  // 两个按钮互不绑定：点一个不会禁用另一个；都不点就继续正常聊天。
+  // 点击状态用 localStorage 一次性锁定，刷新后从 messages.actions 还原按钮。
+
+  const ACTION_LABELS = {
+    transfer_human: '转人工',
+    create_ticket: '建工单',
+  };
+  const ACTION_STORAGE_PREFIX = 'mewhelp.action.';
+
+  function actionKey(index, action) {
+    return `${ACTION_STORAGE_PREFIX}${sessionId || 'anon'}.${index}.${action}`;
+  }
+
+  function readActionState(index, action) {
+    try {
+      return localStorage.getItem(actionKey(index, action));
+    } catch {
+      return null;
+    }
+  }
+
+  function writeActionState(index, action, value) {
+    try {
+      localStorage.setItem(actionKey(index, action), value);
+    } catch { /* 隐私模式写不进去也别挡住聊天 */ }
+  }
+
+  function applyActionLock(button, action, value) {
+    button.disabled = true;
+    button.classList.add('done');
+    button.textContent = action === 'transfer_human' ? '已转接' : `已建单 ${value}`;
+  }
+
+  function normaliseAction(item, route) {
+    if (typeof item === 'string') {
+      return { action: item, ticket_type: route === 'complaint' ? '投诉' : '售后' };
+    }
+    return {
+      action: item && item.action,
+      ticket_type: (item && item.ticket_type) || (route === 'complaint' ? '投诉' : '售后'),
+    };
+  }
+
+  function simulateTransfer(target, button, index) {
+    // 需求明确：本章不接真人系统，只在前端模拟效果。
+    writeActionState(index, 'transfer_human', '1');
+    applyActionLock(button, 'transfer_human');
+
+    addNotice('已转接人工客服');
+    const greeting = addRow('bot');
+    greeting.row.dataset.simulated = '1';   // 不计入 bot 序号，避免刷新后按钮锁串位
+    greeting.bubble.textContent = '您好，我是客服小猫，请问有什么可以帮您的？';
+    scrollToBottom(true);
+  }
+
+  async function createTicketAction(target, button, index, ticketType, sourceText) {
+    if (!sessionId) {
+      addNotice('还没有会话，先发一句话再建工单。', true);
+      return;
+    }
+    button.disabled = true;
+    const originalLabel = button.textContent;
+    button.textContent = '建单中…';
+    try {
+      const resp = await fetch('/api/actions/create-ticket', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: sessionId,
+          description: sourceText || '',
+          ticket_type: ticketType || '售后',
+        }),
+      });
+      const payload = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        const err = (payload && payload.error) || {};
+        throw new Error(err.message || `HTTP ${resp.status}`);
+      }
+      writeActionState(index, 'create_ticket', payload.ticket_no);
+      applyActionLock(button, 'create_ticket', payload.ticket_no);
+      addNotice(`已创建工单 ${payload.ticket_no}（${payload.ticket_type}）`);
+    } catch (err) {
+      button.disabled = false;
+      button.textContent = originalLabel;
+      addNotice(`建工单失败：${err && err.message ? err.message : err}`, true);
+    }
+  }
+
+  function attachActions(target, actions, { route = null, sourceText = '' } = {}) {
+    if (!actions || !actions.length) return;
+    const existing = target.wrap.querySelector('.chat-actions');
+    if (existing) existing.remove();
+
+    const index = botIndexOf(target.row);
+    const box = el('div', 'chat-actions');
+    actions.forEach((raw) => {
+      const { action, ticket_type: ticketType } = normaliseAction(raw, route);
+      if (!action) return;
+
+      const button = el('button', 'action-btn', ACTION_LABELS[action] || action);
+      button.type = 'button';
+      button.dataset.action = action;
+      button.addEventListener('click', () => {
+        if (button.disabled) return;
+        if (action === 'transfer_human') {
+          simulateTransfer(target, button, index);
+        } else if (action === 'create_ticket') {
+          createTicketAction(target, button, index, ticketType, sourceText);
+        }
+      });
+      box.appendChild(button);
+
+      const saved = readActionState(index, action);
+      if (saved) applyActionLock(button, action, saved);
+    });
+
+    if (!box.children.length) return;
+    target.wrap.appendChild(box);
+    scrollToBottom();
+  }
+
   // ------------------------------------------------------------------ 历史回读
 
   /* 后端把角色叫 human / ai / tool，前端气泡只分「我」和「客服」两类。
@@ -419,10 +554,12 @@
       if (!messages.length) return;
 
       clearWelcome();
+      let lastUserText = '';
       messages.forEach((m) => {
         const role = roleToRow(m.role);
         const row = addRow(role);
         if (role === 'user') {
+          lastUserText = m.content || '';
           row.bubble.textContent = m.content || '';
         } else {
           row.bubble.innerHTML = m.content
@@ -433,6 +570,8 @@
           // 引用与反馈同理：刷新后角标仍可点、已反馈仍是已反馈
           decorateCitations(row.bubble, m.citations);
           attachFeedback(row);
+          // ch05：建议动作也随历史还原；建单描述回退到上一条用户消息。
+          attachActions(row, m.actions, { sourceText: lastUserText });
         }
       });
       scrollToBottom(true);
@@ -462,6 +601,7 @@
 
     const ctx = {
       bot,
+      userText: text,
       get acc() { return acc; },
       set acc(v) { acc = v; },
       showStatus(text) {

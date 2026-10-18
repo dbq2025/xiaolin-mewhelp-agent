@@ -145,11 +145,11 @@ class SessionMessagesResponse(BaseModel):
     """某会话已保存的历史消息。
 
     ``messages`` 每项形如
-    ``{"role": "human"|"ai"|"tool", "content": "...", "tools": [...]}``。
+    ``{"role": "human"|"ai"|"tool", "content": "...", "tools": [...],
+      "citations": [...], "actions": [...]}``。
 
-    ``tools`` **只在那一轮真的调过工具时才出现**（见 ``api.py`` 的构造逻辑）：
-    省略而不是填 ``null``，是为了让「没调工具」与「字段没实现」在前端不可区分 ——
-    前端只需 ``if (msg.tools)`` 一处判断，不必区分 ``null`` / ``[]`` / 缺字段三种形态。
+    ``tools`` / ``citations`` / ``actions`` **只在那一轮确实有内容时才出现**：
+    省略而不是填 ``null``，是为了让前端只需一处 truthiness 判断。
     """
 
     session_id: str = Field(description="会话 ID。")
@@ -157,9 +157,48 @@ class SessionMessagesResponse(BaseModel):
         default_factory=list,
         description=(
             "历史消息。``tools`` 字段（可缺省）是本轮的工具轨迹，"
-            "每项含 name / args / ok / duration_ms / attempts。"
+            "每项含 name / args / ok / duration_ms / attempts；"
+            "``actions`` 是本轮建议动作（转人工 / 建工单）。"
         ),
     )
+
+
+# --------------------------------------------------------------------------
+# ch05：建议动作（建工单端点）
+# --------------------------------------------------------------------------
+
+
+class CreateTicketRequest(BaseModel):
+    """用户点「建工单」时的请求。
+
+    ``description`` 可缺省：后端回退到该会话最后一条用户消息。前端只传
+    ``session_id`` 也能建单，避免把整段聊天历史回传。
+    """
+
+    session_id: str = Field(
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_-]+$",
+        description="会话 ID，与聊天接口同一个值。",
+    )
+    description: str | None = Field(
+        default=None,
+        max_length=2000,
+        description="问题描述；缺省时用该会话最后一条用户消息。",
+    )
+    ticket_type: Literal["售后", "投诉", "咨询"] = Field(
+        default="售后",
+        description="工单类型，取自 DDL 的三个 ENUM 取值。",
+    )
+
+
+class CreateTicketResponse(BaseModel):
+    """建单结果。"""
+
+    ok: bool = True
+    ticket_no: str = Field(description="工单号，形如 T20261018001。")
+    ticket_type: str = Field(description="工单类型。")
+    status: str = Field(description="工单状态。")
+    message: str = Field(description="给用户看的一句话。")
 
 
 # --------------------------------------------------------------------------

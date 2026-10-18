@@ -73,12 +73,15 @@ from app.schemas import (
     ChatRequest,
     ChatResponse,
     ContextStats,
+    CreateTicketRequest,
+    CreateTicketResponse,
     ErrorResponse,
     ExtractRequest,
     FaithCaseUpdateRequest,
     SessionMessagesResponse,
 )
 from app.sse import SSE_MEDIA_TYPE, sse_frame
+from app.tools.executor import execute_tool
 from app.tools.knowledge import AnswerContextLike
 
 logger = logging.getLogger(__name__)
@@ -950,6 +953,68 @@ def create_app(
         而且重启服务后历史不会凭空消失。
         """
         return await _db_session_messages_payload(session_id, repositories_)
+
+    # -- ch05：用户点「建工单」才走这里 ---------------------------------
+    #
+    # 转人工是纯前端模拟，不经过后端；建工单是唯一会写 tickets 表的用户动作。
+    # Agent 的工具集里没有 create_ticket，所以不存在「模型替你建单」。
+
+    @app.post(
+        "/api/actions/create-ticket",
+        response_model=CreateTicketResponse,
+        responses={422: {"model": ErrorResponse}, 502: {"model": ErrorResponse}},
+    )
+    async def create_ticket_action(
+        req: CreateTicketRequest,
+        settings_: Settings = Depends(get_app_settings),
+        repositories_: Repositories = Depends(get_repositories),
+        retriever_: AnswerContextLike = Depends(get_retriever),
+    ) -> JSONResponse:
+        """用户在前端点「建工单」时调用；复用第 2 章的 `create_ticket` 工具。"""
+        description = (req.description or "").strip()
+        if not description:
+            description = (await repositories_.messages.last_user_content(req.session_id) or "").strip()
+        if not description:
+            return _error(422, "validation_error", "工单描述为空：请补一句话说明你的诉求。")
+
+        result = await execute_tool(
+            "create_ticket",
+            {
+                "description": description,
+                "ticket_type": req.ticket_type,
+                "conversation_id": req.session_id,
+            },
+            repositories=repositories_,
+            retriever=retriever_,
+            timeout=settings_.tool_timeout_seconds,
+            max_retries=settings_.tool_max_retries,
+        )
+        if not result.ok:
+            return _error(
+                502,
+                "tool_error",
+                redact(f"建工单失败：{result.error or '工具返回失败'}"),
+            )
+
+        data = result.data
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except (ValueError, TypeError):
+                return _error(502, "tool_error", "建工单失败：工具返回了无法解析的结果。")
+        if not isinstance(data, dict) or not data.get("ticket_no"):
+            return _error(502, "tool_error", "建工单失败：工具没有返回工单号。")
+
+        return JSONResponse(
+            status_code=200,
+            content=CreateTicketResponse(
+                ok=True,
+                ticket_no=str(data["ticket_no"]),
+                ticket_type=str(data.get("ticket_type") or req.ticket_type),
+                status=str(data.get("status") or "待处理"),
+                message=str(data.get("message") or f"已为你创建工单 {data['ticket_no']}。"),
+            ).model_dump(),
+        )
 
     # -- ch04：编造个案台账（最小查询 / 处置面，不做页面）------------------
 

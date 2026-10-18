@@ -483,6 +483,38 @@ body {
 
 .feedback-note { color: #16a34a; font-size: 11px; }
 
+/* ---------- ch05：建议动作（转人工 / 建工单）---------- */
+
+.chat-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 7px;
+}
+
+.action-btn {
+  border: 1px solid #c7d2fe;
+  background: #eef2ff;
+  color: #3730a3;
+  border-radius: 8px;
+  padding: 5px 12px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background .15s ease, border-color .15s ease, color .15s ease;
+}
+
+.action-btn:hover:not(:disabled) { background: #e0e7ff; border-color: #a5b4fc; }
+
+.action-btn:disabled {
+  cursor: default;
+  color: #64748b;
+  background: #f1f5f9;
+  border-color: #e2e8f0;
+}
+
+.action-btn.done { color: #15803d; background: #f0fdf4; border-color: #bbf7d0; }
+
 /* ---------- 窄屏 ---------- */
 
 @media (max-width: 720px) {
