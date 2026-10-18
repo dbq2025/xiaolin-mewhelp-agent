@@ -41,6 +41,8 @@ def test_settings() -> Settings:
         openai_api_key="sk-test",
         openai_model="fake-model",
         context_token_budget=2000,
+        # ch05：测试不往仓库写 JSONL；需要日志的用例显式传路径。
+        turn_log_path="",
     )
 
 

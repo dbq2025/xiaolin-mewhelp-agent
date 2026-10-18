@@ -194,6 +194,34 @@ class Settings(BaseSettings):
         default=3.0, gt=0, description="单次 Query 改写请求超时（秒）。"
     )
 
+    # -- ch05：Workflow 编排 + 主 Agent -------------------------------------
+    checkpoint_db_path: str = Field(
+        default="data/checkpoints.sqlite",
+        min_length=1,
+        description=(
+            "LangGraph checkpointer 的 SQLite 文件路径。相对路径按项目根解析；"
+            "测试会注入 InMemorySaver，不落盘。"
+        ),
+    )
+    agent_max_steps: int = Field(
+        default=6,
+        ge=1,
+        le=12,
+        description="ReAct 最多执行几轮工具调用（不含最终收敛的那次模型调用）。",
+    )
+    agent_token_budget: int = Field(
+        default=6000,
+        ge=500,
+        description="单轮 Agent 累计 token 预算（按 usage_metadata.total_tokens 求和）。",
+    )
+    turn_log_path: str = Field(
+        default="logs/ch05-turns.jsonl",
+        description=(
+            "每轮结构化日志的 JSONL 路径。**允许为空**：空串表示只打 logger，"
+            "不写文件（测试默认如此）。"
+        ),
+    )
+
     def require_embedding_key(self) -> str:
         """返回嵌入服务密钥；没配就抛可读错误。
 
