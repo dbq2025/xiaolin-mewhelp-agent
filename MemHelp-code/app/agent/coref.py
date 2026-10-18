@@ -41,17 +41,7 @@ __all__ = [
     "format_history",
     "needs_coref",
     "parse_coref_reply",
-    "resolve_coref",
 ]
-
-
-def resolve_coref(message: str) -> tuple[str, bool]:
-    """ch05 的同步兼容入口，**只做原样透传**。
-
-    ch06 的正式实现是 :class:`CorefResolver`（需要模型与历史）。图在 Task 8 之前
-    仍调用这个兼容函数，避免 coref 模块与图的接线分两次改；Task 8 会删掉这个入口。
-    """
-    return message, False
 
 #: 指代/省略标记。命中任意一个才值得叫模型。
 _ANAPHORA_MARKERS: tuple[str, ...] = (
@@ -62,13 +52,6 @@ _ANAPHORA_MARKERS: tuple[str, ...] = (
 #: 口语标记。
 _COLLOQUIAL_MARKERS: tuple[str, ...] = (
     "啥", "咋", "多久", "多少", "怎么", "能不能", "可以不可以", "要不要",
-)
-
-#: 首轮短句里出现这些词，说明它本身已经是个可独立理解的业务问题。
-_BUSINESS_TERMS: tuple[str, ...] = (
-    "订单", "退货", "退款", "物流", "快递", "发票", "售后", "换货",
-    "维修", "商品", "价格", "库存", "发货", "签收", "投诉", "赔付",
-    "质保", "型号", "保修", "补发",
 )
 
 _MAX_RESOLVED_CHARS = 512
@@ -96,9 +79,11 @@ def needs_coref(message: str, history: Sequence[BaseMessage]) -> bool:
         return False
     if any(marker in text for marker in _ANAPHORA_MARKERS):
         return True
+    # 带明确订单号/型号的问题已经足够自包含；不要因为句子里有「多久/多少」
+    # 这种疑问词就多付一次改写调用，也避免把完整问句改坏。
+    if _ORDER_TOKEN.search(text) or _MODEL_TOKEN.search(text):
+        return False
     if any(marker in text for marker in _COLLOQUIAL_MARKERS):
-        return True
-    if not history and len(text) <= 12 and not any(term in text for term in _BUSINESS_TERMS):
         return True
     return False
 

@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import json
+
 INTENT_PROMPT: str = """你是电商客服系统的意图分类器。把用户这一句话分到八个选项中的**恰好一类**：
 七类业务意图 + `other` 兜底。
 
@@ -195,10 +197,56 @@ def render_evidence(evidence: list[dict] | tuple[dict, ...]) -> str:
 
 
 def build_agent_system_prompt(
-    session_id: str, evidence: list[dict] | tuple[dict, ...] = ()
+    session_id: str,
+    evidence: list[dict] | tuple[dict, ...] = (),
+    *,
+    resolved_question: str = "",
+    refund_order: dict | None = None,
+    refund_mode: bool = False,
+    other_intent: bool = False,
 ) -> str:
-    """Agent 的 System Prompt；知识类把本轮证据附在后面。"""
+    """Agent 的 System Prompt；按本轮出口追加退款/澄清/证据段落。"""
     prompt = AGENT_SYSTEM_PROMPT.format(session_id=session_id)
+
+    if other_intent:
+        prompt += (
+            "\n\n## 本轮意图未确定\n"
+            "先用一句话澄清用户要办什么；不要猜订单/政策，不要硬套售后流程。"
+        )
+
+    if refund_mode:
+        prompt += (
+            "\n\n## 本轮是退款/售后资格判断\n"
+            "系统已经查过订单与政策，不要再调用 query_order；不要重复检索政策。"
+            "只判断「这一单能不能退/能不能售后」，说明依据与下一步。"
+        )
+        if refund_order:
+            prompt += (
+                "\n\n## 订单数据（系统已查，直接使用）\n"
+                + json.dumps(refund_order, ensure_ascii=False, indent=2)
+            )
+        else:
+            prompt += (
+                "\n\n## 订单数据\n"
+                "本轮没有取到订单数据。先说明「订单信息没取到」，给重试/转人工建议，"
+                "不要编造订单号，也不要假装查到了。"
+            )
+        if evidence:
+            prompt += (
+                "\n\n## 政策证据（按相关度编号）\n"
+                "回答只能基于这些证据；引用时用对应编号，例如 [1]。"
+            )
+        else:
+            prompt += (
+                "\n\n## 政策证据\n"
+                "本轮没有检索到可用的政策条款。只能基于订单数据说明已知事实，"
+                "明确告诉用户「这项政策我暂时无法确认」，不要编造退货窗口、"
+                "运费承担或到账时间；可以建议转人工或建工单。"
+            )
+
+    if resolved_question:
+        prompt += f"\n\n## 当前问题（已补全指代）\n{resolved_question}"
+
     if evidence:
         prompt += (
             "\n\n## 本轮检索证据（按相关度编号）\n"
