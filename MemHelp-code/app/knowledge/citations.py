@@ -162,7 +162,9 @@ def evidence_from_payload(items: Sequence[dict]) -> tuple[Evidence, ...]:
             chunk_id=int(item["chunk_id"]),
             section_path=item.get("section_path") or "",
             category=item.get("category") or "",
-            quote=item.get("quote") or "",
+            # 真实 `query_faq` 出参为了省字节只给 `answer`、不给 `quote`；
+            # 库里快照则相反。两者都接受，否则用户点开引用会看到空白来源。
+            quote=item.get("quote") or item.get("answer") or "",
             question=item.get("question") or "",
             score=float(item.get("score") or 0.0),
             source=item.get("source") or "",
