@@ -1,0 +1,38 @@
+ch05 验收输出
+============================================================
+PASS  1 政策问题走强制检索  route=knowledge trace=['load_history', 'begin_turn', 'resolve_coref', 'classify_intent', 'route_intent', 'knowledge_retrieve', 'confidence_gate', 'agent']
+PASS  2 订单物流由 Agent 调工具  tools=['query_logistics']
+PASS  3 投诉两个动作 + 建单才写 tickets  T20261018002
+PASS  4 闲聊固定话术  intent_source=rule
+PASS  5 复杂问题 ReAct 多步  steps=2 tools=['query_order', 'query_logistics']
+
+[1] session=ch05-acc-policy-20261018144902 intent=refund_return route=knowledge agent_steps=0 citations=8
+    log.trace=['load_history', 'begin_turn', 'resolve_coref', 'classify_intent', 'route_intent', 'knowledge_retrieve', 'confidence_gate', 'agent'] retrieval_score=0.9292067289352417
+[2] session=ch05-acc-logistics-20261018144902 route=business agent_steps=1 tools=['query_logistics']
+    content=您的订单 1001 已由中通快递揽收（运单号 SF168606344937），目前物流状态是「已揽收」，最新一条记录为 10 月 12 日「商品已出库，等待快递揽收」，预计到达时间 10 月 18 日。
+
+物流暂时还没有新的节点。如果到预计到达时间仍没有更新，您回来找我，我帮您催查～
+[3] session=ch05-acc-complaint-20261018144902 actions=['transfer_human', 'create_ticket'] ticket=T20261018002 db={'description': '我要投诉', 'ticket_type': '投诉', 'status': '待处理'}
+    history.actions=[{'action': 'transfer_human', 'ticket_type': '投诉'}, {'action': 'create_ticket', 'ticket_type': '投诉'}]
+[4] session=ch05-acc-chitchat-20261018144902 content=你好呀，我是 MewHelp 商城客服小美～ 退换货、退款、物流、发票、商品质量都可以问我，直接说你的问题就好。 log.intent_source=rule
+[5] session=ch05-acc-complex-20261018144902 agent_steps=2 tools=['query_order', 'query_logistics']
+    content=订单 1001 的状态是**已付款**，商品 P7993，金额 158.94 元，下单时间 2026-08-26。
+
+物流已发出：承运商是**中通快递**，运单号 SF168606344937，当前状态为**已揽收**。最新轨迹只有一条：2026-10-12 商品已出库，等待快递揽收。系统预计到达时间为 2026-10-18。
+
+需要我帮你催一下揽收进度，或者有其他售后问题吗？
+
+注：转人工是纯前端模拟，需在浏览器点按钮验收；本脚本校验后端没有自动动作。
+
+前端 CDP 验收（headless Edge 155.0.4283.62，真实点击 DOM）
+============================================================
+PASS  投诉后出现两个独立按钮：['转人工', '建工单']，tickets 数量不变（2 → 2）
+PASS  不点按钮继续发消息：正常收到物流回答，tickets 数量不变
+PASS  点「转人工」：出现「已转接人工客服」+「您好，我是客服小猫，请问有什么可以帮您的？」；
+      转人工按钮变为「已转接」，建工单按钮仍可点（互不绑定）；tickets 数量不变（2 → 2）
+PASS  点「建工单」：改走 POST /api/actions/create-ticket，tickets 数量 2 → 3，
+      按钮显示「已建单 T20261018003」
+PASS  刷新页面：两个按钮仍在，状态仍为「已转接」/「已建单 T20261018003」
+PASS  控制台错误：0
+截图：dev-notes/ch05-ui.png
+
