@@ -38,9 +38,10 @@ Intent = Literal[
     "after_sales",
     "complaint",
     "chitchat",
+    "other",
 ]
 
-Route = Literal["knowledge", "business", "complaint", "chitchat"]
+Route = Literal["knowledge", "business", "refund", "complaint", "chitchat"]
 
 SuggestedAction = Literal["transfer_human", "create_ticket"]
 
@@ -53,17 +54,22 @@ ALL_INTENTS: tuple[Intent, ...] = (
     "after_sales",
     "complaint",
     "chitchat",
+    "other",
 )
 
 #: 写死的分流表。改它必须同时改 spec §4.1 与测试。
+#:
+#: ch06：退款退货与售后统一走 `refund` 确定性子流程；`other` 走 business，
+#: 由主力 Agent 做需求澄清，不硬塞业务意图。
 INTENT_TO_ROUTE: dict[Intent, Route] = {
     "logistics": "business",
     "order": "business",
     "product_consult": "knowledge",
-    "refund_return": "knowledge",
-    "after_sales": "business",
+    "refund_return": "refund",
+    "after_sales": "refund",
     "complaint": "complaint",
     "chitchat": "chitchat",
+    "other": "business",
 }
 
 #: 未知意图的兜底出口。宁可多走一次 Agent，也不要被当成闲聊糊弄掉。
@@ -94,12 +100,27 @@ class AgentState(TypedDict, total=False):
     # -- 指代消解 / 意图 -------------------------------------------------
     resolved_message: str
     coref_changed: bool
+    coref_raw: str
+    coref_source: Literal["llm", "passthrough", "fallback"]
+    coref_reason: str
+    coref_llm_calls: int
     intent: Intent
     intent_confidence: float
     intent_raw: str
-    intent_source: Literal["llm", "heuristic", "rule"]
+    intent_source: Literal["llm", "llm_cheap", "llm_escalated", "heuristic", "rule"]
     intent_llm_calls: int
     route: Route
+
+    # -- 退款/售后确定性子流程 --------------------------------------------
+    refund_order_id: str
+    refund_order_candidates: list[dict[str, Any]]
+    refund_order: dict[str, Any]
+    refund_order_error: str
+    expanded_queries: list[str]
+    query_expansion_raw: str
+    query_expansion_degraded: bool
+    query_expansion_llm_calls: int
+    refund_form: dict[str, Any]
 
     # -- 知识类 -----------------------------------------------------------
     retrieval_attempted: bool

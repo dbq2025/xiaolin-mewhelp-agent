@@ -98,13 +98,13 @@ async def test_policy_question_goes_through_retrieval_then_gate(
 ):
     graph = _graph()
     model = ScriptedChatModel(
-        script=[_intent_turn("refund_return"), text_turn("按政策可以 7 天无理由退货 [1]。")]
+        script=[_intent_turn("product_consult"), text_turn("续航约 12 小时 [1]。")]
     )
     retriever = _Retriever(evidence=_evidence())
 
     values, _, _ = await _run(
         graph,
-        message="退货政策是什么",
+        message="XH-3000A 续航多久",
         model=model,
         repositories=fake_repositories,
         retriever=retriever,
@@ -118,7 +118,7 @@ async def test_policy_question_goes_through_retrieval_then_gate(
     assert values["gate_passed"] is True
     assert values["agent_steps"] == 0
     assert values["llm_calls"] == 2  # 意图 1 次 + Agent 收敛 1 次
-    assert "7 天无理由" in values["answer"]
+    assert "12 小时" in values["answer"]
     assert values["citations"][0]["n"] == 1
 
 
@@ -201,11 +201,11 @@ async def test_greeting_plus_real_question_is_not_swallowed(
 ):
     graph = _graph()
     model = ScriptedChatModel(
-        script=[_intent_turn("refund_return"), text_turn("退货政策如下 [1]。")]
+        script=[_intent_turn("product_consult"), text_turn("续航约 12 小时 [1]。")]
     )
     values, _, _ = await _run(
         graph,
-        message="在吗，退货政策是什么",
+        message="在吗，XH-3000A 续航多久",
         model=model,
         repositories=fake_repositories,
         retriever=_Retriever(evidence=_evidence()),
@@ -215,7 +215,7 @@ async def test_greeting_plus_real_question_is_not_swallowed(
 
     assert values["route"] == "knowledge"
     assert values["retrieval_attempted"] is True
-    assert values["answer"] == "退货政策如下 [1]。"
+    assert values["answer"] == "续航约 12 小时 [1]。"
 
 
 async def test_business_question_agent_calls_tool(test_settings, fake_repositories):
@@ -351,11 +351,11 @@ async def test_same_turn_replay_uses_last_human_not_previous_ai(
 async def test_trace_resets_per_turn(test_settings, fake_repositories):
     graph = _graph()
     first_model = ScriptedChatModel(
-        script=[_intent_turn("refund_return"), text_turn("退货政策 [1]。")]
+        script=[_intent_turn("product_consult"), text_turn("续航约 12 小时 [1]。")]
     )
     first_values, _, _ = await _run(
         graph,
-        message="退货政策是什么",
+        message="XH-3000A 续航多久",
         model=first_model,
         repositories=fake_repositories,
         retriever=_Retriever(evidence=_evidence()),
@@ -434,12 +434,12 @@ async def test_turn_log_written_with_retrieval_trace(fake_repositories):
 
     graph = _graph()
     model = ScriptedChatModel(
-        script=[_intent_turn("refund_return"), text_turn("退货政策 [1]。")]
+        script=[_intent_turn("product_consult"), text_turn("续航约 12 小时 [1]。")]
     )
     try:
         await _run(
             graph,
-            message="退货政策是什么",
+            message="XH-3000A 续航多久",
             model=model,
             repositories=fake_repositories,
             retriever=_Retriever(evidence=_evidence()),

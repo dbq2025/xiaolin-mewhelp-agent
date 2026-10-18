@@ -261,7 +261,9 @@ async def _agent(
         messages=ctx.messages,
         repositories=repositories,
         retriever=retriever,
-        include_faq=state.get("route") == "business",
+        # Task 8 之前 refund 暂时直接进 agent；先让它保留 query_faq，
+        # 避免旧业务测试悬空。Task 8 会改成显式 refund_mode 的 false。
+        include_faq=state.get("route") in ("business", "refund"),
         evidence=evidence,
         max_steps=int(getattr(settings, "agent_max_steps", 6)),
         token_budget=int(getattr(settings, "agent_token_budget", 6000)),
@@ -391,6 +393,9 @@ def build_agent_graph(*, checkpointer: BaseCheckpointSaver | None = None):
         {
             "knowledge": "knowledge_retrieve",
             "business": "agent",
+            # ch06 契约迁移的临时落点：Task 8 会把 refund 换成确定性子流程。
+            # 先保住「State 改成五出口」这一步的绿色基线，不让旧测试悬空。
+            "refund": "agent",
             "complaint": "complaint",
             "chitchat": "chitchat",
         },
