@@ -551,4 +551,177 @@ ch03 的集合只有 `id + vector`，**BM25 的 `text`/`sparse` 字段只能在�
 **本章不做（用户指定）**：指代消解、多轮改写；LangGraph / Langfuse；
 `faith_cases` 管理页面；👎 的后端落库。
 
+---
+
+# 第五章「Workflow 确定性编排 + 主力 Agent」
+
+> 一句话：把「模型自己决定一切」拆成**代码可判定的骨架**——指代消解 → 意图识别 →
+> 七类意图写死分流 → 知识类强制检索+置信度闸 → 主力 Agent 在自己的节点里做 ReAct →
+> 日志记录。投诉不进 Agent，转人工/建工单交用户在前端自己点。
+
+## 1. 本章新增
+
+| 能力 | 落点 |
+|---|---|
+| 手写 Agent 循环（祛魅热身） | `scripts/bare_agent_loop.py`（不进线上） |
+| LangGraph 图 + State + SQLite checkpointer | `app/agent/graph.py`、`app/agent/checkpoint.py` |
+| 意图识别（七类 JSON + 启发式 + 寒暄快速通道） | `app/agent/intent.py` |
+| 置信度闸（检索后、Agent 前） | `app/agent/gate.py`、`RagPipeline.retrieve_only()` |
+| ReAct Agent（流式、单工具步、步数/token 刹车） | `app/agent/react.py` |
+| 投诉/闲聊固定出口 | `app/agent/prompts.py` |
+| 建议动作控制面工具 | `app/agent/tools.py::suggest_actions` |
+| 建议动作落库 + 前端双按钮 | `messages.actions`、`web/app.js` |
+| 建工单端点（用户点按钮才写 tickets） | `POST /api/actions/create-ticket` |
+| 每轮结构化日志 | `logs/ch05-turns.jsonl` |
+| 意图标注集 + 评估 | `evals/ch05_intent_cases.jsonl`、`evals/run_ch05_intent_evals.py` |
+
+## 2. 配置（`.env` 新增）
+
+```dotenv
+# LangGraph checkpointer（相对路径按 MemHelp-code/ 解析）
+CHECKPOINT_DB_PATH=data/checkpoints.sqlite
+# ReAct 最多几轮工具 / 单轮累计 token 预算
+AGENT_MAX_STEPS=6
+AGENT_TOKEN_BUDGET=6000
+# 每轮 JSONL 日志；留空只打 logger
+TURN_LOG_PATH=logs/ch05-turns.jsonl
+```
+
+`data/` 与 `logs/` 已在 `.gitignore`，不会入库。
+
+## 3. 真库迁移（只加一列）
+
+`messages` 表新增 `actions JSON NULL`（刷新后按钮还在靠它）。幂等脚本：
+
+```powershell
+& $uv run --directory MemHelp-code python scripts/apply_ch05_migration.py
+```
+
+等价的 SQL 在 `sql/ch05-ddl.sql`（带 `SET NAMES utf8mb4` 与
+`information_schema` 幂等判断）。
+
+## 4. 起服务
+
+```powershell
+& $uv run --directory MemHelp-code uvicorn app.main:app --port 8010
+```
+
+浏览器打开 <http://127.0.0.1:8010/chat/>。
+
+启动日志里能看到 `ch05 Agent 图已编译`；checkpointer 文件默认在
+`MemHelp-code/data/checkpoints.sqlite`。**测试**注入 `InMemorySaver`，不落盘。
+
+## 5. 祛魅热身（先看裸循环）
+
+```powershell
+# 不联网，看「调模型 → 有工具调用就执行并回灌 → 没有就收敛」
+& $uv run --directory MemHelp-code python scripts/bare_agent_loop.py --fake
+
+# 真实模型（需要 .env）
+& $uv run --directory MemHelp-code python scripts/bare_agent_loop.py --message "订单 1001 到哪了"
+```
+
+输出形如：
+
+```
+[step 1] -> query_order({"order_id": "1001"})
+=== 最终答案 ===
+订单 1001 已发货，正在派送…
+工具调用：['query_order']；步数：1
+```
+
+## 6. 图与分流（写死在代码里）
+
+| 意图 | 出口 | 行为 |
+|---|---|---|
+| 商品咨询 / 退款退货 | knowledge | 强制检索 → 置信度闸 → Agent；不预检索业务数据 |
+| 物流 / 订单 / 售后 | business | 直接 Agent，自己调工具 |
+| 投诉 | complaint | 不进 Agent；固定安抚 + 两个建议动作 |
+| 闲聊 | chitchat | 固定话术；明显寒暄走零模型调用快速通道 |
+
+七类 → 四出口的映射只有一处：`app/agent/state.py::INTENT_TO_ROUTE`。
+置信度闸失败会回 `REFUSAL_TEXT` 并写入 ch04 已有的
+`low_confidence_questions`（不建新飞轮表）。
+
+## 7. 意图评估（纯 Prompt 任务的验证）
+
+```powershell
+# 离线验证聚合逻辑
+& $uv run --directory MemHelp-code python evals/run_ch05_intent_evals.py --self-test
+# 真实模型跑 56 条标注样例
+& $uv run --directory MemHelp-code python evals/run_ch05_intent_evals.py `
+    --json dev-notes/ch05-intent-evals.json `
+    --markdown dev-notes/ch05-intent-eval-report.md
+```
+
+退出码 0 = 整体 ≥0.85、route ≥0.85、每类 ≥0.60。不达标先改 Prompt/示例，
+**不改标签**。
+
+## 8. 五条验收演示
+
+先起服务（8000 被占用就用 8010）：
+
+```powershell
+& $uv run --directory MemHelp-code python scripts/demo-ch05.py `
+    --base-url http://127.0.0.1:8010 `
+    --out dev-notes/ch05-acceptance-output.txt
+```
+
+脚本会逐条打印 PASS/FAIL，并写入 `dev-notes/ch05-acceptance-output.txt`。
+它覆盖：政策问题强制检索、订单物流工具调用、投诉两动作+建单写库、闲聊固定话术、
+复杂问题 `agent_steps>=2`。
+
+**前端按钮（必须浏览器验）**：打开聊天页问「我要投诉」，会出现两个独立按钮：
+
+- 点「转人工」：页面显示「已转接人工客服」，并出现「您好，我是客服小猫，请问有什么
+  可以帮您的？」；**不发任何后端请求**；
+- 点「建工单」：才调 `POST /api/actions/create-ticket` 写 `tickets` 表；
+- 两个按钮互不绑定；都不点就继续发消息，正常走下一轮；
+- 刷新后按钮仍在（`messages.actions`），点击状态用 localStorage 一次性锁定。
+
+本章已用 headless Edge 真实点击验证，证据：`dev-notes/ch05-acceptance-output.txt`
+的「前端 CDP 验收」段 + `dev-notes/ch05-ui.png`。
+
+## 9. 接口变化
+
+| 方法 | 路径 | 变化 |
+|---|---|---|
+| POST | `/api/chat/completions` | 聊天入口切图；`done` 新增 `intent` / `route` / `actions` / `agent_steps` / `stop_reason` / `gate` |
+| POST | `/api/actions/create-ticket` | 新增；用户点「建工单」才调用，走第 2 章 `create_ticket` 工具 |
+| POST | `/api/chat/sessions/{id}/messages` | assistant 行新增 `actions`（仅非空时出现） |
+
+SSE 既有事件名不变；`tools` / `citations` 事件仍在有内容时发。`done.actions` 形状：
+
+```json
+[{"action": "transfer_human", "ticket_type": "投诉"},
+ {"action": "create_ticket", "ticket_type": "投诉"}]
+```
+
+## 10. 日志
+
+每轮一行 JSONL（`TURN_LOG_PATH`），关键字段：
+
+```json
+{"session_id":"…","intent":"refund_return","route":"knowledge",
+ "trace":["load_history","begin_turn","resolve_coref","classify_intent",
+          "route_intent","knowledge_retrieve","confidence_gate","agent"],
+ "retrieval_attempted":true,"retrieval_score":0.929,"gate_passed":true,
+ "agent_steps":0,"llm_calls":1,"tools":[],"token_usage":{...},
+ "suggested_actions":[],"stop_reason":"final","latency_ms":…}
+```
+
+验收 1 直接看 `trace` 是否含 `knowledge_retrieve`。日志写入失败只告警，不影响回答。
+
+## 11. 本章留痕
+
+- 设计文档：`docs/superpowers/specs/2026-10-18-ch05-workflow-agent-design.md`
+- 实施计划：`docs/superpowers/plans/2026-10-18-ch05-workflow-agent-plan.md`
+- 开发过程追记：`dev-notes/ch05.md`
+- 意图评估：`dev-notes/ch05-intent-eval-report.md`、`dev-notes/ch05-intent-evals.json`
+- 验收输出：`dev-notes/ch05-acceptance-output.txt`、`dev-notes/ch05-ui.png`
+- 建表迁移：`sql/ch05-ddl.sql`、`scripts/apply_ch05_migration.py`
+
+**本章不做（用户指定）**：指代消解/意图识别的正式版、上下文管理策略升级、MCP、
+飞轮入库；正式的置信度检查留给可观测章节。
+
 

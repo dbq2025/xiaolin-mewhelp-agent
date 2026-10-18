@@ -39,8 +39,6 @@ from app.agent.checkpoint import open_checkpointer
 from app.agent.graph import build_agent_graph
 from app.agent.persist import persist_user_only
 from app.agent.runner import astream_turn, complete_turn
-from app.chat import astream_chat, complete_chat
-from app.chat_tools import astream_chat_with_tools, complete_chat_with_tools
 from app.config import PROJECT_ROOT, Settings, get_settings
 from app.db.repositories import Repositories
 from app.db.session import create_engine_from, ping, session_factory
@@ -183,17 +181,6 @@ def _as_upstream_error(exc: Exception) -> UpstreamFault:
         logger.exception("数据库故障", exc_info=exc)
         return UpstreamError("数据库暂时不可用，请稍后重试。", type_="database_error")
     return _classify_upstream_error(exc)
-
-
-def _context_stats(context) -> ContextStats:
-    """把 ``ContextResult`` 映射成对外的精简统计。"""
-    return ContextStats(
-        kept_messages=context.kept_messages,
-        trimmed_messages=context.trimmed_messages,
-        budget_tokens=context.budget_tokens,
-        used_tokens=context.used_tokens,
-        system_prompt_tokens=context.system_prompt_tokens,
-    )
 
 
 # ---------------------------------------------------------------------------

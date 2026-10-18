@@ -19,7 +19,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
 from app.db.repositories import Repositories
 

@@ -7,7 +7,6 @@ import uuid
 from pathlib import Path
 
 from langchain_core.messages import HumanMessage
-from langgraph.checkpoint.memory import InMemorySaver
 
 from app.agent.checkpoint import memory_checkpointer
 from app.agent.graph import build_agent_graph
