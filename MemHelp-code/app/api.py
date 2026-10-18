@@ -22,8 +22,8 @@ import inspect
 import json
 import logging
 from collections.abc import AsyncIterable
+from contextlib import AsyncExitStack, asynccontextmanager
 from functools import lru_cache
-from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Depends, FastAPI, Request
@@ -35,6 +35,10 @@ from langchain_core.messages import AIMessage, HumanMessage
 from sqlalchemy import Engine
 from sqlalchemy.exc import InterfaceError, OperationalError, PendingRollbackError
 
+from app.agent.checkpoint import open_checkpointer
+from app.agent.graph import build_agent_graph
+from app.agent.persist import persist_user_only
+from app.agent.runner import astream_turn, complete_turn
 from app.chat import astream_chat, complete_chat
 from app.chat_tools import astream_chat_with_tools, complete_chat_with_tools
 from app.config import PROJECT_ROOT, Settings, get_settings
@@ -346,6 +350,21 @@ def get_retriever(
     )
 
 
+def get_agent_graph(request: Request):
+    """取进程内编译好的 LangGraph 图。
+
+    图在 lifespan 里编译（生产用 SQLite saver，测试注入 InMemorySaver）。
+    没有图时返回 503 而不是 500：这是「实例还没准备好」，不是代码缺陷。
+    """
+    graph = getattr(request.app.state, "agent_graph", None)
+    if graph is None:
+        raise UpstreamError(
+            "Agent 图尚未初始化：请检查 CHECKPOINT_DB_PATH 与启动日志。",
+            type_="configuration_error",
+        )
+    return graph
+
+
 async def _ping_database(request: Request) -> bool:
     """探一次数据库。**永不抛异常**（``ping()`` 自己也吞掉一切）。
 
@@ -493,14 +512,22 @@ async def _db_session_messages_payload(
             # 优先用 ``tool_traces``（我们自己写的展示用数据，含耗时与成败）。
             # 它是 ch02 迁移新增的列，老行可能没有 —— 那样退化成从 ``tool_calls``
             # 与紧随其后的 ``tool`` 行推断，至少能还原 name/args/ok。
+            #
+            # ch05：`tool_traces == []` 是**有意义**的（只有 suggest_actions 的控制面
+            # 调用，不该显示徽章），不能再用 truthiness 回退去猜。
             traces = getattr(row, "tool_traces", None)
-            item["tools"] = traces or _tool_traces(row.tool_calls, rows, index)
+            item["tools"] = traces if traces is not None else _tool_traces(row.tool_calls, rows, index)
 
         # ch04：引用快照。与 ``tools`` 同理 —— 只在有引用时出现，
         # 前端 `if (msg.citations)` 一处判断就够。
         citations = getattr(row, "citations", None)
         if row.role == "assistant" and citations:
             item["citations"] = citations
+
+        # ch05：建议动作快照。刷新后按钮还能渲染，就靠它。
+        actions = getattr(row, "actions", None)
+        if row.role == "assistant" and actions:
+            item["actions"] = actions
 
         payload.append(item)
 
@@ -564,61 +591,48 @@ async def _chat_stream_body(
     store: InMemorySessionStore,
     repositories: Repositories,
     session_id: str,
+    graph: Any,
     retriever: AnswerContextLike | None = None,
 ) -> AsyncIterable[str]:
-    """SSE 响应体：``meta`` → ``status``? → ``token``* → ``tools`` → ``done``。
+    """SSE 响应体：``meta`` → ``status``? → ``token``* → ``tools``? →
+    ``citations``? → ``done``。
 
-    中途失败补 ``error`` 再收尾（沿用 ch01）。
-
-    ``status`` 帧只在调了工具时出现；``tools`` 帧是徽章的权威来源
-    （含成败与耗时），随后 ``done`` 把它一并带出去，前端只读 ``done.tools`` 即可。
+    中途失败补 ``error`` 再收尾（沿用 ch01/ch02）。失败时只落用户轮 ——
+    不能让半截回答进历史，否则下一轮模型会以为它已经答过了。
     """
-    meta_out: dict = {}
     yield sse_frame("meta", {"session_id": session_id, "model": settings.openai_model})
 
-    tool_summaries: list[dict[str, Any]] = []
-    citations: list[dict[str, Any]] = []
     try:
-        async for event in astream_chat_with_tools(
+        async for event in astream_turn(
+            graph,
             session_id=session_id,
             message=req.message,
             model=model,
             repositories=repositories,
             retriever=retriever,
-            budget_tokens=settings.context_token_budget,
-            model_name=settings.openai_model,
-            timeout=settings.tool_timeout_seconds,
-            max_retries=settings.tool_max_retries,
-            meta_out=meta_out,
+            settings=settings,
         ):
-            if event.kind == "status":
-                yield sse_frame("status", event.payload)
-            elif event.kind == "token":
-                yield sse_frame("token", event.payload)
-            elif event.kind == "tools":
-                tool_summaries = list(event.payload.get("tools") or [])
-            elif event.kind == "citations":
-                citations = list(event.payload.get("citations") or [])
+            kind = event.get("type")
+            if kind == "status":
+                yield sse_frame("status", event)
+            elif kind == "token":
+                yield sse_frame("token", {"delta": event.get("delta") or ""})
+            elif kind == "tools":
+                yield sse_frame("tools", {"tools": event.get("tools") or []})
+            elif kind == "citations":
+                yield sse_frame("citations", {"citations": event.get("citations") or []})
+            elif kind == "done":
+                yield sse_frame("done", event.get("payload") or {})
     except Exception as exc:  # noqa: BLE001 - 必须转成事件，不能让连接裸断
         err = _as_upstream_error(exc)
+        try:
+            await persist_user_only(repositories, session_id, req.message)
+        except Exception:  # noqa: BLE001 - 落库失败不该盖住原始故障
+            logger.exception("上游失败后落库用户轮次也失败了（已忽略，保留原始异常）")
         yield sse_frame(
             "error", {"type": err.type, "message": redact(str(err)), "session_id": session_id}
         )
         return
-
-    meta = meta_out.get("meta")
-    yield sse_frame(
-        "done",
-        {
-            "finish_reason": "stop",
-            "session_id": session_id,
-            "trimmed": meta.context.trimmed_messages if meta else 0,
-            "kept": meta.context.kept_messages if meta else 0,
-            "tools": tool_summaries,
-            # ch04：引用证据快照。前端靠它把正文里的 [n] 变成可点角标。
-            "citations": citations,
-        },
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -640,41 +654,72 @@ async def _lifespan(app: FastAPI):
     被注入的检索器（测试/演示）若自带 ``warmup``，优先预热它 —— 否则会去按配置
     构造一个谁都不用的默认检索器。
     """
-    warmup_enabled = getattr(app.state, "rag_warmup", None)
-    if warmup_enabled is None:
-        try:
-            warmup_enabled = (app.state.settings or get_settings()).rag_warmup
-        except Exception:  # noqa: BLE001 - 配置缺失时不该在启动阶段崩
-            warmup_enabled = False
+    stack = AsyncExitStack()
+    try:
+        # ch05：编译图。生产开 SQLite checkpointer；测试注入 InMemorySaver。
+        if getattr(app.state, "agent_graph", None) is None:
+            try:
+                current = app.state.settings or get_settings()
+            except Exception:  # noqa: BLE001 - 配置缺失时聊天会返回 503，不该启动即崩
+                current = None
+                logger.warning("配置缺失：Agent 图未初始化，聊天接口将返回 503")
+            if current is not None:
+                try:
+                    if getattr(app.state, "checkpointer", None) is not None:
+                        app.state.agent_graph = build_agent_graph(
+                            checkpointer=app.state.checkpointer
+                        )
+                    else:
+                        saver = await stack.enter_async_context(
+                            open_checkpointer(current.checkpoint_db_path)
+                        )
+                        app.state.agent_graph = build_agent_graph(checkpointer=saver)
+                    logger.info("ch05 Agent 图已编译（checkpointer=%s）", current.checkpoint_db_path)
+                except Exception:  # noqa: BLE001 - 图起不来时聊天 503，其它接口仍可用
+                    logger.warning("ch05 Agent 图初始化失败，聊天接口将返回 503", exc_info=True)
 
-    if warmup_enabled:
+        warmup_enabled = getattr(app.state, "rag_warmup", None)
+        if warmup_enabled is None:
+            try:
+                warmup_enabled = (app.state.settings or get_settings()).rag_warmup
+            except Exception:  # noqa: BLE001 - 配置缺失时不该在启动阶段崩
+                warmup_enabled = False
+
+        if warmup_enabled:
+            try:
+                injected = getattr(app.state, "retriever", None)
+                if injected is not None and hasattr(injected, "warmup"):
+                    await injected.warmup()
+                else:
+                    settings = app.state.settings or get_settings()
+                    store = _vector_store_for(
+                        settings.milvus_uri, settings.milvus_collection, settings.embedding_dim
+                    )
+                    await warmup_rag(get_embedder(settings), store)
+                logger.info("RAG 预热完成")
+            except Exception:  # noqa: BLE001 - 预热失败不阻断启动
+                logger.warning("RAG 预热失败：检索将在首个查询时按需初始化", exc_info=True)
+
+        yield
+    finally:
+        # 评估重跑是子进程；应用退出时先收掉它，避免留下孤儿进程。
         try:
-            injected = getattr(app.state, "retriever", None)
-            if injected is not None and hasattr(injected, "warmup"):
-                await injected.warmup()
-            else:
-                settings = app.state.settings or get_settings()
-                store = _vector_store_for(
-                    settings.milvus_uri, settings.milvus_collection, settings.embedding_dim
-                )
-                await warmup_rag(get_embedder(settings), store)
-            logger.info("RAG 预热完成")
-        except Exception:  # noqa: BLE001 - 预热失败不阻断启动
-            logger.warning("RAG 预热失败：检索将在首个查询时按需初始化", exc_info=True)
-    yield
-    # 评估重跑是子进程；应用退出时先收掉它，避免留下孤儿进程。
-    try:
-        runner = getattr(app.state, "rag_eval_runner", None)
-        if runner is not None and hasattr(runner, "aclose"):
-            await runner.aclose()
-    except Exception:  # noqa: BLE001 - 退出路径不该再抛
-        logger.debug("关闭评估重跑任务失败（已忽略）", exc_info=True)
-    # 关掉进程单例持有的 httpx 连接（CLI 自己会关；Web 进程在退出时关一次）。
-    try:
-        settings = app.state.settings or get_settings()
-        await get_embedder(settings).aclose()
-    except Exception:  # noqa: BLE001 - 退出路径不该再抛
-        logger.debug("关闭嵌入客户端失败（已忽略）", exc_info=True)
+            runner = getattr(app.state, "rag_eval_runner", None)
+            if runner is not None and hasattr(runner, "aclose"):
+                await runner.aclose()
+        except Exception:  # noqa: BLE001 - 退出路径不该再抛
+            logger.debug("关闭评估重跑任务失败（已忽略）", exc_info=True)
+        # 关掉进程单例持有的 httpx 连接（CLI 自己会关；Web 进程在退出时关一次）。
+        try:
+            settings = app.state.settings or get_settings()
+            await get_embedder(settings).aclose()
+        except Exception:  # noqa: BLE001 - 退出路径不该再抛
+            logger.debug("关闭嵌入客户端失败（已忽略）", exc_info=True)
+        # 关闭 SQLite checkpointer（AsyncSqliteSaver 的上下文退出）。
+        try:
+            await stack.aclose()
+        except Exception:  # noqa: BLE001 - 退出路径不该再抛
+            logger.debug("关闭 Agent checkpointer 失败（已忽略）", exc_info=True)
 
 
 def create_app(
@@ -686,6 +731,8 @@ def create_app(
     retriever: AnswerContextLike | None = None,
     rag_warmup: bool | None = None,
     rag_eval_runner: Any = None,
+    checkpointer: Any = None,
+    agent_graph: Any = None,
 ) -> FastAPI:
     """构造应用。
 
@@ -723,6 +770,14 @@ def create_app(
     app.state.rag_warmup = rag_warmup
     # 评估重跑是进程内长任务；注入点让测试不用真的拉起评估子进程。
     app.state.rag_eval_runner = rag_eval_runner or EvalRunner()
+    # ch05：图与 checkpointer。测试注入 InMemorySaver；生产在 lifespan 里开 SQLite。
+    app.state.checkpointer = checkpointer
+    app.state.agent_graph = agent_graph
+    # 注入 checkpointer 时**立即编译**：TestClient 不进入 context manager 也不会跑
+    # lifespan，而测试仍然要能聊天。生产路径（checkpointer=None）仍由 lifespan 管
+    # AsyncSqliteSaver 的开关。
+    if app.state.agent_graph is None and checkpointer is not None:
+        app.state.agent_graph = build_agent_graph(checkpointer=checkpointer)
 
     # -- 异常处理 ---------------------------------------------------------
 
@@ -815,6 +870,7 @@ def create_app(
         store_: InMemorySessionStore = Depends(get_store),
         repositories_: Repositories = Depends(get_repositories),
         retriever_: AnswerContextLike = Depends(get_retriever),
+        graph_: Any = Depends(get_agent_graph),
     ):
         """一个路径两种响应形态。
 
@@ -828,24 +884,33 @@ def create_app(
         if req.stream:
             return StreamingResponse(
                 _chat_stream_body(
-                    req, settings_, model_, store_, repositories_, session_id, retriever_
+                    req,
+                    settings_,
+                    model_,
+                    store_,
+                    repositories_,
+                    session_id,
+                    graph_,
+                    retriever_,
                 ),
                 media_type=SSE_MEDIA_TYPE,
             )
 
         try:
-            text, meta = await complete_chat_with_tools(
+            text, done = await complete_turn(
+                graph_,
                 session_id=session_id,
                 message=req.message,
                 model=model_,
                 repositories=repositories_,
                 retriever=retriever_,
-                budget_tokens=settings_.context_token_budget,
-                model_name=settings_.openai_model,
-                timeout=settings_.tool_timeout_seconds,
-                max_retries=settings_.tool_max_retries,
+                settings=settings_,
             )
         except Exception as exc:  # noqa: BLE001
+            try:
+                await persist_user_only(repositories_, session_id, req.message)
+            except Exception:  # noqa: BLE001 - 落库失败不该盖住原始故障
+                logger.exception("上游失败后落库用户轮次也失败了（已忽略）")
             raise _as_upstream_error(exc) from exc
 
         return JSONResponse(
@@ -853,7 +918,18 @@ def create_app(
             content=ChatResponse(
                 session_id=session_id,
                 content=text,
-                context=_context_stats(meta.context),
+                context=ContextStats(
+                    kept_messages=int(done.get("kept") or 0),
+                    trimmed_messages=int(done.get("trimmed") or 0),
+                    budget_tokens=settings_.context_token_budget,
+                ),
+                tools=list(done.get("tools") or []),
+                citations=list(done.get("citations") or []),
+                actions=list(done.get("actions") or []),
+                intent=done.get("intent"),
+                route=done.get("route"),
+                agent_steps=int(done.get("agent_steps") or 0),
+                stop_reason=done.get("stop_reason"),
             ).model_dump(),
         )
 

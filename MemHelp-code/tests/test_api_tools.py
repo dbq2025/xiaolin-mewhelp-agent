@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.exc import OperationalError
 
 from app import main
+from app.agent.prompts import AGENT_EMPTY_TEXT
 from tests.fakes import FakeChatModel
 
 
@@ -270,7 +271,7 @@ def test_non_streaming_chat_still_works(test_settings, fake_repositories):
     client = _client(test_settings, fake_repositories, FakeChatModel(chunks=["你好"]))
     resp = client.post(
         "/api/chat/completions",
-        json={"session_id": "s1", "message": "在吗", "stream": False},
+        json={"session_id": "s1", "message": "订单 1001 的物流到哪了", "stream": False},
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -278,14 +279,15 @@ def test_non_streaming_chat_still_works(test_settings, fake_repositories):
     assert body["context"]["budget_tokens"] == 2000
 
 
-def test_non_streaming_empty_response_is_still_an_error(test_settings, fake_repositories):
+def test_non_streaming_empty_response_gets_fixed_fallback(test_settings, fake_repositories):
     client = _client(test_settings, fake_repositories, FakeChatModel(chunks=[], reply=""))
     resp = client.post(
         "/api/chat/completions",
-        json={"session_id": "s1", "message": "在吗", "stream": False},
+        json={"session_id": "s1", "message": "订单 1001 的物流到哪了", "stream": False},
     )
-    assert resp.status_code == 502
-    assert resp.json()["error"]["type"] == "upstream_empty_response"
+    assert resp.status_code == 200
+    assert resp.json()["content"] == AGENT_EMPTY_TEXT
+    assert resp.json()["stop_reason"] == "empty_response"
 
 
 def test_non_streaming_turn_is_also_persisted(test_settings, fake_repositories):
@@ -298,11 +300,11 @@ def test_non_streaming_turn_is_also_persisted(test_settings, fake_repositories):
     client = _client(test_settings, fake_repositories, FakeChatModel(reply="好的"))
     client.post(
         "/api/chat/completions",
-        json={"session_id": "s1", "message": "在吗", "stream": False},
+        json={"session_id": "s1", "message": "订单 1001 的物流到哪了", "stream": False},
     )
 
     rows = client.post("/api/chat/sessions/s1/messages").json()["messages"]
-    assert [r["content"] for r in rows] == ["在吗", "好的"]
+    assert [r["content"] for r in rows] == ["订单 1001 的物流到哪了", "好的"]
 
 
 def test_streaming_and_non_streaming_share_the_same_history(test_settings, fake_repositories):

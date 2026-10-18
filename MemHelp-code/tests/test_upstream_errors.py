@@ -85,7 +85,7 @@ def test_chat_maps_infrastructure_errors_to_upstream_types(
 ):
     client = TestClient(app_main.create_app(model=FailingChatModel(error=error), settings=test_settings))
     resp = client.post(
-        "/api/chat/completions", json={"message": "在吗", "stream": False}
+        "/api/chat/completions", json={"message": "订单 1001 的物流到哪了", "stream": False}
     )
     assert resp.status_code == 502
     assert resp.json()["error"]["type"] == expected_type
@@ -97,7 +97,7 @@ def test_streaming_reports_infrastructure_error_as_sse_error_event(test_settings
         app_main.create_app(model=FailingChatModel(error=_connection_error()), settings=test_settings)
     )
     with client.stream(
-        "POST", "/api/chat/completions", json={"session_id": "s1", "message": "在吗"}
+        "POST", "/api/chat/completions", json={"session_id": "s1", "message": "订单 1001 的物流到哪了"}
     ) as resp:
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("text/event-stream")
@@ -157,7 +157,7 @@ def test_sse_error_event_uses_the_same_shape_as_json_errors(test_settings):
         app_main.create_app(model=FailingChatModel(error=_connection_error()), settings=test_settings)
     )
     with client.stream(
-        "POST", "/api/chat/completions", json={"session_id": "s1", "message": "在吗"}
+        "POST", "/api/chat/completions", json={"session_id": "s1", "message": "订单 1001 的物流到哪了"}
     ) as resp:
         text = "".join(resp.iter_text())
 
@@ -180,7 +180,7 @@ def test_secrets_are_redacted_in_sse_error_events(test_settings):
     leaky = RuntimeError("boom with key sk-abcdef1234567890 in it")
     client = TestClient(app_main.create_app(model=FailingChatModel(error=leaky), settings=test_settings))
     with client.stream(
-        "POST", "/api/chat/completions", json={"session_id": "s1", "message": "在吗"}
+        "POST", "/api/chat/completions", json={"session_id": "s1", "message": "订单 1001 的物流到哪了"}
     ) as resp:
         text = "".join(resp.iter_text())
     assert "sk-abcdef1234567890" not in text
@@ -202,7 +202,7 @@ def test_configuration_error_message_is_redacted(monkeypatch):
     get_settings.cache_clear()
 
     resp = TestClient(app_main.create_app()).post(
-        "/api/chat/completions", json={"message": "在吗", "stream": False}
+        "/api/chat/completions", json={"message": "订单 1001 的物流到哪了", "stream": False}
     )
     assert resp.status_code == 503
     assert "sk-super-secret" not in resp.text
@@ -229,7 +229,7 @@ def test_missing_config_yields_503_not_an_unhandled_exception():
 
     for stream in (False, True):
         resp = client.post(
-            "/api/chat/completions", json={"message": "在吗", "stream": stream}
+            "/api/chat/completions", json={"message": "订单 1001 的物流到哪了", "stream": stream}
         )
         assert resp.status_code == 503, f"stream={stream} 没有得到 503"
         assert "Exception in ASGI application" not in resp.text

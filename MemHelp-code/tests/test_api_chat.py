@@ -194,7 +194,7 @@ def test_chat_returns_503_configuration_error_when_env_missing(monkeypatch):
 def test_non_streaming_chat_returns_full_json(test_settings):
     resp = _client(test_settings, FakeChatModel(reply="您好，我帮您查一下")).post(
         "/api/chat/completions",
-        json={"session_id": "s1", "message": "在吗", "stream": False},
+        json={"session_id": "s1", "message": "订单 1001 的物流到哪了", "stream": False},
     )
     assert resp.status_code == 200
     body = resp.json()

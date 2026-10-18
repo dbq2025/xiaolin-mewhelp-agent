@@ -116,6 +116,10 @@ def _offline_database(monkeypatch, sqlite_session):
         # ch03：测试**绝不**加载 2.3GB 的嵌入模型，也不连 Milvus。
         kwargs.setdefault("retriever", EmptyRetriever())
         kwargs.setdefault("rag_warmup", False)
+        # ch05：默认内存 checkpointer，不往仓库写 data/checkpoints.sqlite。
+        from app.agent.checkpoint import memory_checkpointer
+
+        kwargs.setdefault("checkpointer", memory_checkpointer())
         return _real_create_app(*args, **kwargs)
 
     # monkeypatch 会在测试结束后自动还原（按属性名记录原值）。
@@ -155,6 +159,15 @@ class EmptyRetriever:
         """
         from tests.fakes import retrieval_outcome
 
+        self.context_calls.append((query, category))
+        return retrieval_outcome(query, (), refused=False)
+
+    async def retrieve_only(self, query: str, *, category: str | None = None):
+        """ch05 的知识类预检索协议：返回空证据、不拒答。
+
+        这样这些用例走「知识类 → 闸失败 → 兜底」而不是「Agent 被调用」；
+        需要真实证据的用例自己注入带 `retrieve_only` 的假检索器。
+        """
         self.context_calls.append((query, category))
         return retrieval_outcome(query, (), refused=False)
 

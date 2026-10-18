@@ -128,6 +128,17 @@ class ChatResponse(BaseModel):
     session_id: str = Field(description="会话 ID。")
     content: str = Field(description="模型完整回复。")
     context: ContextStats = Field(default_factory=ContextStats, description="本轮上下文裁剪统计。")
+    #: ch05：与 SSE `done` 同形的编排摘要。默认值让旧调用方（ch01/ch02 测试）
+    #: 不需要改构造参数。
+    tools: list[dict[str, Any]] = Field(default_factory=list, description="本轮工具轨迹。")
+    citations: list[dict[str, Any]] = Field(default_factory=list, description="本轮引用快照。")
+    actions: list[dict[str, Any]] = Field(
+        default_factory=list, description="本轮建议动作（转人工/建工单）。"
+    )
+    intent: str | None = Field(default=None, description="本轮意图。")
+    route: str | None = Field(default=None, description="本轮出口。")
+    agent_steps: int = Field(default=0, description="ReAct 执行了几轮工具。")
+    stop_reason: str | None = Field(default=None, description="本轮停止原因。")
 
 
 class SessionMessagesResponse(BaseModel):

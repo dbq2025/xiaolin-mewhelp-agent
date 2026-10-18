@@ -32,6 +32,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from app import main as app_main
+from app.agent.prompts import AGENT_EMPTY_TEXT
 from tests.fakes import FakeChatModel
 
 #: 带工具调用的假模型要用到的 tool_call（第 1 次调用返回它）。
@@ -89,7 +90,7 @@ def test_content_type_is_event_stream(test_settings):
 def test_sse_event_sequence_and_payloads(test_settings):
     text, _ = _stream(
         _client(test_settings, FakeChatModel(chunks=["您", "好"])),
-        {"session_id": "s1", "message": "在吗"},
+        {"session_id": "s1", "message": "订单 1001 的物流到哪了"},
     )
     events = _events(text)
     names = [n for n, _ in events]
@@ -172,7 +173,7 @@ def test_sse_sends_error_event_when_upstream_fails_midstream(test_settings):
                 tool_calls_then_stream=[_TOOL_CALL],
             ),
         ),
-        {"session_id": "s1", "message": "在吗"},
+        {"session_id": "s1", "message": "订单 1001 的物流到哪了"},
     )
     events = _events(text)
     names = [n for n, _ in events]
@@ -190,7 +191,7 @@ def test_sse_sends_error_event_when_the_first_call_fails(test_settings):
     """上游在第 1 次调用就挂（``fail_after=0``）：只剩 error 帧。"""
     text, _ = _stream(
         _client(test_settings, FakeChatModel(chunks=["好"], fail_after=0)),
-        {"session_id": "s1", "message": "在吗"},
+        {"session_id": "s1", "message": "订单 1001 的物流到哪了"},
     )
     names = [n for n, _ in _events(text)]
 
@@ -209,38 +210,40 @@ def test_sse_error_stream_persists_only_the_question(test_settings):
             tool_calls_then_stream=[_TOOL_CALL],
         ),
     )
-    _stream(client, {"session_id": "s1", "message": "在吗"})
+    _stream(client, {"session_id": "s1", "message": "订单 1001 的物流到哪了"})
     msgs = client.post("/api/chat/sessions/s1/messages").json()["messages"]
-    assert [m["content"] for m in msgs] == ["在吗"]
+    assert [m["content"] for m in msgs] == ["订单 1001 的物流到哪了"]
 
 
-def test_sse_emits_error_event_when_upstream_sends_only_empty_chunks(test_settings):
-    """上游只吐空块：客户端要收到 error 事件，而不是「成功但回答是空的」。
+def test_sse_emits_fixed_fallback_when_upstream_sends_only_empty_chunks(test_settings):
+    """上游只吐空块：编排层给一句固定兜底，而不是「成功但回答是空的」。
 
-    真实上游会这样：推理模型只给 reasoning 分块，或 content 是 content-block
-    列表而文本在别处。以前这种响应会静默变成 finish_reason=stop 的空回答。
+    ch05 起 Agent 自己负责空回复兜底（`empty_response` + `AGENT_EMPTY_TEXT`），
+    所以这里断言的是「有内容、有 done、不是空成功」，不是旧的 error 契约。
     """
     text, _ = _stream(
         _client(test_settings, FakeChatModel(chunks=["", ""])),
-        {"session_id": "s1", "message": "在吗"},
+        {"session_id": "s1", "message": "订单 1001 的物流到哪了"},
     )
     events = _events(text)
     names = [n for n, _ in events]
 
     assert names[0] == "meta"
-    assert "done" not in names, "没有内容就不该发 done"
-    assert names[-1] == "error"
-    assert (events[-1][1] or {})["type"] == "upstream_empty_response"
+    assert "done" in names
+    assert AGENT_EMPTY_TEXT in "".join(_deltas(events))
+    done = events[-1][1] or {}
+    assert done["stop_reason"] == "empty_response"
 
 
-def test_non_streaming_empty_response_is_an_error_not_empty_content(test_settings):
-    """非流式路径同样不能把空内容当成功返回。"""
+def test_non_streaming_empty_response_gets_fixed_fallback(test_settings):
+    """非流式路径同样不把空内容当成功返回；给固定兜底，不是空字符串。"""
     client = _client(test_settings, FakeChatModel(reply=""))
     resp = client.post(
-        "/api/chat/completions", json={"session_id": "s1", "message": "在吗", "stream": False}
+        "/api/chat/completions", json={"session_id": "s1", "message": "订单 1001 的物流到哪了", "stream": False}
     )
-    assert resp.status_code == 502
-    assert resp.json()["error"]["type"] == "upstream_empty_response"
+    assert resp.status_code == 200
+    assert resp.json()["content"] == AGENT_EMPTY_TEXT
+    assert resp.json()["stop_reason"] == "empty_response"
 
 
 def test_every_sse_data_field_is_valid_json(test_settings):

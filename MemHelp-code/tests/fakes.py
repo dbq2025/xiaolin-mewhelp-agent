@@ -20,6 +20,8 @@
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Iterator, Optional, Sequence
 
+import json
+
 from langchain_core.callbacks import (
     AsyncCallbackManagerForLLMRun,
     CallbackManagerForLLMRun,
@@ -203,7 +205,11 @@ class FakeChatModel(BaseChatModel):
 
     def _reply_message(self) -> AIMessage:
         # ch02：第一次调用给工具选择，之后才产文本。
-        if self.tool_calls_then_stream and not self.turn_state.tool_calls_fired:
+        #
+        # ch05：必须同时满足「绑过工具」。意图分类也是 `ainvoke`，但它不绑工具；
+        # 若只看 `tool_calls_then_stream`，意图分类会把脚本里的工具调用吃掉，
+        # 于是 Agent 那一步拿到的是普通文本 —— 表现为「工具没被调用」的假失败。
+        if self.tool_calls_then_stream and not self.turn_state.tool_calls_fired and self.bound_schemas:
             self.turn_state.tool_calls_fired = True
             return AIMessage(
                 content="",
@@ -261,6 +267,12 @@ class FakeChatModel(BaseChatModel):
             return list(self.raw_chunks)
         if self.chunks:
             return list(self.chunks)
+        # ch05：`reply` 是「非流式回复」，但新编排的 Agent 全程 `astream`。
+        # 显式传了 reply 的用例把它当成一个 chunk 吐出去，否则它们会在 Agent
+        # 那一步拿到空流、被 LangChain 判成 No generation chunks。
+        # 没有显式 reply 时仍遵守「没有块就是没有块」，empty-response 用例不受影响。
+        if "reply" in self.model_fields_set:
+            return [self.reply]
         # 没有块但要求「有流」时吐一个空块，用来模拟「流完了但没文本」。
         return [""] if self.yield_empty_chunk_when_no_chunks else []
 
@@ -287,6 +299,31 @@ class FakeChatModel(BaseChatModel):
         **kwargs: Any,
     ) -> AsyncIterator[ChatGenerationChunk]:
         self._record(messages)
+        # ch05：Agent 从第一步就 `astream`，所以这里也要能吐 tool_calls。
+        # 与 `_generate` 共用 `turn_state`：意图分类那次（没绑工具）不会消费掉它。
+        if (
+            self.tool_calls_then_stream
+            and not self.turn_state.tool_calls_fired
+            and self.bound_schemas
+        ):
+            self.turn_state.tool_calls_fired = True
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        {
+                            "name": call.get("name", ""),
+                            "args": json.dumps(call.get("args") or {}, ensure_ascii=False),
+                            "id": call.get("id", ""),
+                            "index": index,
+                            "type": "tool_call_chunk",
+                        }
+                        for index, call in enumerate(self.tool_calls_then_stream)
+                    ],
+                    additional_kwargs=dict(self.tool_call_extra_kwargs),
+                )
+            )
+            return
         for index, content in enumerate(self._stream_items()):
             if self.fail_after is not None and index >= self.fail_after:
                 raise RuntimeError("fake upstream failure mid-stream")

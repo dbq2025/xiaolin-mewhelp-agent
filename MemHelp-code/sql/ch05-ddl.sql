@@ -9,6 +9,8 @@
 -- 幂等执行：先查列是否存在。MySQL 不支持 ADD COLUMN IF NOT EXISTS
 -- （8.0 也不支持），所以脚本用 information_schema 判断。
 
+SET NAMES utf8mb4;
+
 SET @col_exists := (
   SELECT COUNT(*) FROM information_schema.COLUMNS
   WHERE TABLE_SCHEMA = DATABASE()
