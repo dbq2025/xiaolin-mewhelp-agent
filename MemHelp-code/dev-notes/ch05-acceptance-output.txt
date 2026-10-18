@@ -35,4 +35,3 @@ PASS  用同一 idempotency_key 再 POST 一次：返回同一张 T20261018006�
 PASS  刷新页面：两个按钮仍在，状态仍为「已转接」/「已建单 T20261018006」
 PASS  控制台错误：0
 截图：dev-notes/ch05-ui.png（上一轮同一交互）
-
