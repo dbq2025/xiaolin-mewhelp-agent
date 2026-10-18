@@ -222,6 +222,67 @@ class Settings(BaseSettings):
         ),
     )
 
+    # -- ch06：正式版分流器 -------------------------------------------------
+    intent_model: str = Field(
+        default="",
+        description=(
+            "意图识别的主模型名。空串表示回落到 OPENAI_MODEL；"
+            "换更强模型只改这一项，不改代码。"
+        ),
+    )
+    intent_cheap_model: str = Field(
+        default="",
+        description=(
+            "成本档的小模型名。空串表示成本档不启用；"
+            "只有 INTENT_COST_MODE=true 时才先调它。"
+        ),
+    )
+    intent_cost_mode: bool = Field(
+        default=False,
+        description="true 时走「小模型先判 → 低置信度升级主模型」；默认质量档。",
+    )
+    intent_confidence_threshold: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+        description="成本档升级阈值：小模型置信度低于它时用主模型重判。",
+    )
+    intent_timeout: float = Field(
+        default=5.0, gt=0, description="单次意图分类调用超时（秒）。"
+    )
+    coref_enabled: bool = Field(
+        default=True,
+        description="指代消解是否启用；关掉只走确定性透传（排障用）。",
+    )
+    coref_timeout: float = Field(
+        default=5.0, gt=0, description="单次指代消解调用超时（秒）。"
+    )
+    coref_history_messages: int = Field(
+        default=8,
+        ge=1,
+        le=20,
+        description="送入指代消解的最近消息条数（只取 Human/AI 文本）。",
+    )
+    query_expansion_enabled: bool = Field(
+        default=True,
+        description="退款/售后子流程是否做 Query 扩写；关掉直接单查询。",
+    )
+    query_expansion_timeout: float = Field(
+        default=5.0, gt=0, description="单次 Query 扩写调用超时（秒）。"
+    )
+    query_expansion_max_queries: int = Field(
+        default=4,
+        ge=2,
+        le=6,
+        description="扩写最多保留几条查询；去重后截断。",
+    )
+    refund_order_count: int = Field(
+        default=3,
+        ge=1,
+        le=5,
+        description="订单选择器候选数（按 session 确定性派生）。",
+    )
+
     def require_embedding_key(self) -> str:
         """返回嵌入服务密钥；没配就抛可读错误。
 
@@ -290,6 +351,8 @@ class Settings(BaseSettings):
         "openai_base_url",
         "openai_api_key",
         "openai_model",
+        "intent_model",
+        "intent_cheap_model",
         "mysql_host",
         "mysql_user",
         "mysql_password",

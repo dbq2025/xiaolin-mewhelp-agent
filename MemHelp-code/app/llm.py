@@ -42,18 +42,23 @@ class GatewayChatOpenAI(ChatOpenAI):
         return super().bind_tools(tools, **kwargs)
 
 
-def get_chat_model(settings: Settings | None = None) -> BaseChatModel:
+def get_chat_model(
+    settings: Settings | None = None, model_name: str | None = None
+) -> BaseChatModel:
     """按配置产出一个说 OpenAI 协议的上游客户端。
 
     应用侧统一按 OpenAI 协议说话，所以这里只认 ``base_url`` / ``api_key`` /
     ``model`` 三件事 —— 具体的上游是谁对上层完全透明。
+
+    :param model_name: 覆盖 ``OPENAI_MODEL``。ch06 用它给意图识别单独配
+        主模型/小模型，而不把模型名写死在业务代码里。空串/``None`` 回落配置。
 
     ``stream_usage=True`` 让流式响应附带 token 用量，为后续章节接 Langfuse
     埋点留好数据（当前不消费）。
     """
     s = settings or get_settings()
     return GatewayChatOpenAI(
-        model=s.openai_model,
+        model=model_name or s.openai_model,
         base_url=s.openai_base_url,
         api_key=s.openai_api_key,
         timeout=s.request_timeout,
