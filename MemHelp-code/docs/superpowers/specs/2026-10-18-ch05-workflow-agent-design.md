@@ -191,6 +191,7 @@ class AgentState(TypedDict, total=False):
     pending_messages: list[AnyMessage]  # 本轮待提交的消息（工具调用/结果/最终回答）
     citations: list[dict]
     suggested_actions: list[str]    # transfer_human | create_ticket
+    ticket_type: str                # 建单按钮用：投诉 | 售后 | 咨询
     agent_steps: int                # 已执行的工具轮数（不是 LLM 调用数）
     llm_calls: int
     token_usage: dict               # prompt / completion / total
@@ -439,6 +440,11 @@ POST /api/actions/create-ticket
 ### 9.2 MySQL
 
 - `messages` 表新增 `actions JSON NULL`（`sql/ch05-ddl.sql`）。
+- `actions` 的形状是 **列表 of 对象**：
+  `[{"action": "transfer_human", "ticket_type": "投诉"},
+    {"action": "create_ticket", "ticket_type": "投诉"}]`。
+  state 里仍是 `suggested_actions: list[str]` + `ticket_type: str`，由 `done` / 落库
+  映射成对象列表；前端两种形状都兼容。
 - ORM `Message.actions`、`MessageRow.actions`、`MessageRepository.append(actions=...)`。
 - `/messages` 在 assistant 行上返回 `actions`（仅非空时出现，与 `tools/citations` 同风格）。
 - 落库顺序：`user` →（有工具时）`assistant(tool_calls)` → `tool` → … → `assistant(answer, citations, actions)`。
