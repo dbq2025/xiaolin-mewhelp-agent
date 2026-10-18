@@ -9,28 +9,48 @@
 
 from __future__ import annotations
 
-INTENT_PROMPT: str = """你是电商客服系统的意图分类器。把用户这一句话分到七类中的**恰好一类**。
+INTENT_PROMPT: str = """你是电商客服系统的意图分类器。把用户这一句话分到八个选项中的**恰好一类**：
+七类业务意图 + `other` 兜底。
 
-七类定义：
+八类定义：
 - logistics：物流轨迹。问「到哪了 / 发货了吗 / 派送到哪 / 快递为什么不动 / 什么时候到」。
 - order：订单本身。问「订单状态 / 订单金额 / 什么时候下的单 / 订单号是多少」。
 - product_consult：商品咨询。问价格、库存、参数、型号、尺寸、颜色、功能、续航。
 - refund_return：退款退货。问退款、退货、退换、退款流程、退货政策、七天无理由。
 - after_sales：售后处理。换货、维修、保修、质保、发票、补发、质量问题处理。
 - complaint：投诉。明确表达投诉、举报、曝光、要求道歉/赔偿，或强烈不满并要求人工介入。
-- chitchat：寒暄、感谢、告别、与售后无关的闲聊。
+- chitchat：寒暄、感谢、告别、与购物/售后无关的闲聊。
+- other：无法归入七类、多个意图互相冲突、问题过于模糊、与购物/售后无关的怪问题。
 
-边界规则：
-1. 「订单 1001 的物流到哪了」→ logistics（问的是物流，不是订单状态）。
-2. 「订单 1001 多少钱」→ order（问的是订单金额）。
-3. 「我要投诉」→ complaint；「收到的杯子是碎的，我要投诉并退款」→ complaint（投诉优先）。
-4. 「退货政策是什么」→ refund_return；「这个能退吗」→ refund_return。
-5. 只有寒暄、没有具体诉求时才判 chitchat。
+边界 few-shot（只学边界，不要背答案）：
+用户：订单 1001 的物流到哪了
+输出：{"intent": "logistics", "confidence": 0.95}
+用户：订单 1001 多少钱
+输出：{"intent": "order", "confidence": 0.95}
+用户：XH-3000A 续航多久
+输出：{"intent": "product_consult", "confidence": 0.9}
+用户：这个能退吗
+输出：{"intent": "refund_return", "confidence": 0.85}
+用户：发票怎么开
+输出：{"intent": "after_sales", "confidence": 0.9}
+用户：收到的杯子是碎的，我要投诉并退款
+输出：{"intent": "complaint", "confidence": 0.95}
+用户：你好呀
+输出：{"intent": "chitchat", "confidence": 0.98}
+用户：你们公司股票能买吗
+输出：{"intent": "other", "confidence": 0.9}
+用户：帮我看看那个
+输出：{"intent": "other", "confidence": 0.8}
 
-只输出一个 JSON 对象，不要解释、不要 markdown：
-{"intent": "<七类之一>", "confidence": 0.0 到 1.0 的小数}
-
-不确定时给低 confidence，但仍必须选一个枚举。"""
+规则：
+1. 投诉优先：同一句里既有投诉又有退款，选 complaint。
+2. 问物流选 logistics，问订单金额/状态选 order；不要因为句子里有「订单」就选 order。
+3. 只有寒暄、没有具体诉求时才选 chitchat。
+4. **拿不准就选 other**：低置信度、多个意图冲突、问题过于模糊、与购物/售后无关，
+   都不要硬塞进业务意图。confidence 可以低，但 intent 必须是八选一。
+5. 只输出一个 JSON 对象，不要解释、不要 markdown：
+   {"intent": "<八选一>", "confidence": 0.0 到 1.0 的小数}
+"""
 
 #: ch06：指代消解 + Query 改写。只补全，不回答；已完整则原样返回。
 COREF_PROMPT: str = """你是电商客服系统的问句补全器。根据对话历史，把用户当前这句话补成
