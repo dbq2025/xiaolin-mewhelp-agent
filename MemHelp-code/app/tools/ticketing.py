@@ -85,6 +85,8 @@ async def create_ticket(
             "ticket_no": ticket_no,
             "ticket_type": ticket_type,
             "status": "待处理",
+            # 幂等命中时调用方靠它判断「同一个 key 是不是同一笔申请」。
+            "description": description,
             "message": f"已为你创建工单 {ticket_no}，人工客服会尽快跟进。",
         },
         ensure_ascii=False,

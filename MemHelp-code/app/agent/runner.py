@@ -76,14 +76,20 @@ def pending_interrupt(snapshot: Any) -> dict[str, Any] | None:
 
 
 def _awaiting_payload(
-    values: dict[str, Any], interrupt_value: dict[str, Any]
+    values: dict[str, Any],
+    interrupt_value: dict[str, Any],
+    *,
+    discarded_message: bool = False,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "kind": "order_picker",
+        "kind": interrupt_value.get("kind") or "order_picker",
         "turn_id": values.get("turn_id"),
         "orders": list(interrupt_value.get("orders") or []),
         "message": _AWAITING_TEXT,
     }
+    if discarded_message:
+        payload["discarded_message"] = True
+        payload["message"] = "请先选择要办理的订单；刚才的消息没有被处理。"
     if interrupt_value.get("error"):
         payload["error"] = interrupt_value["error"]
     return payload
@@ -148,7 +154,23 @@ async def _finish_or_pause(
     values = dict(snapshot.values or {})
     pending = pending_interrupt(snapshot)
     if pending is not None:
+        # 暂停前若已经产生工具/引用，先发出去，别让 UI 丢记录。
+        if values.get("tool_traces"):
+            yield {"type": "tools", "tools": list(values["tool_traces"])}
+        if values.get("citations"):
+            yield {"type": "citations", "citations": list(values["citations"])}
         yield {"type": "awaiting_input", "payload": _awaiting_payload(values, pending)}
+        return
+    if getattr(snapshot, "next", ()):
+        yield {
+            "type": "awaiting_input",
+            "payload": {
+                "kind": "incomplete",
+                "turn_id": values.get("turn_id"),
+                "orders": [],
+                "message": "上一轮没有收敛，请重新发起或清空会话后再试。",
+            },
+        }
         return
 
     done = done_payload(values, session_id=session_id)
@@ -190,7 +212,23 @@ async def astream_turn(
     if pending is not None:
         yield {
             "type": "awaiting_input",
-            "payload": _awaiting_payload(dict(snapshot.values or {}), pending),
+            "payload": _awaiting_payload(
+                dict(snapshot.values or {}),
+                pending,
+                discarded_message=True,
+            ),
+        }
+        return
+    if getattr(snapshot, "next", ()):
+        yield {
+            "type": "awaiting_input",
+            "payload": {
+                "kind": "incomplete",
+                "turn_id": (snapshot.values or {}).get("turn_id"),
+                "orders": [],
+                "message": "上一轮没有收敛，请重新发起或清空会话后再试。",
+                "discarded_message": True,
+            },
         }
         return
 

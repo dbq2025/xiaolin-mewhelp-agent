@@ -140,7 +140,7 @@ async def _refund(client: httpx.AsyncClient, lines: list[str]) -> bool:
     second = await _post_sse(
         client,
         "/api/chat/completions",
-        {"session_id": session, "message": "那它能退吗"},
+        {"session_id": session, "message": "这个能退吗"},
     )
     names = [name for name, _ in second]
     coref = next((data for name, data in second if name == "coref"), {}) or {}

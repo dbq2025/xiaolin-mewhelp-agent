@@ -54,7 +54,12 @@ from app.agent.prompts import (
 )
 from app.agent.query_expansion import QueryExpander
 from app.agent.react import run_react_agent
-from app.agent.refund_orders import build_refund_form, extract_order_id, list_demo_orders
+from app.agent.refund_orders import (
+    build_refund_form,
+    extract_order_id,
+    is_general_refund_policy,
+    list_demo_orders,
+)
 from app.agent.state import AgentState, route_for
 from app.chat import _message_text
 from app.context import build_context
@@ -152,6 +157,8 @@ def _reset_turn(state: Mapping[str, Any], node: str) -> dict[str, Any]:
         "refund_order_candidates": [],
         "refund_order": {},
         "refund_order_error": "",
+        "refund_order_optional": False,
+        "refund_order_blocked": False,
         "expanded_queries": [],
         "query_expansion_raw": "",
         "query_expansion_degraded": False,
@@ -218,7 +225,8 @@ async def _resolve_coref(state: AgentState, config: RunnableConfig) -> dict[str,
             "changed": result.changed,
         },
     )
-    calls = 1 if result.source == "llm" else 0
+    # 只要真的发过模型调用就计 1：fallback 也可能是超时/坏 JSON，计 0 会低估成本。
+    calls = 1 if result.raw else 0
     return {
         "resolved_message": result.resolved,
         "coref_changed": result.changed,
@@ -366,17 +374,35 @@ async def _refund_prepare_order(
     if state.get("refund_order_id"):
         return {"trace": _trace(state, "refund_prepare_order")}
 
-    order_id = extract_order_id(state.get("resolved_message") or "")
+    resolved = state.get("resolved_message") or ""
+    order_id = extract_order_id(resolved)
     if order_id:
         return {
             "refund_order_id": order_id,
             "trace": _trace(state, "refund_prepare_order"),
         }
 
+    # 通用政策问题（「退货政策是什么」）不指向某一单，跳过选择器但仍走
+    # 扩写 + 政策检索；「这个能退吗」/「我的订单能退吗」仍必须选单。
+    if is_general_refund_policy(resolved):
+        return {
+            "refund_order_optional": True,
+            "trace": _trace(state, "refund_prepare_order"),
+        }
+
     settings = _deps(config).settings
-    candidates = list_demo_orders(
-        state["session_id"], int(getattr(settings, "refund_order_count", 3))
-    )
+    try:
+        candidates = list_demo_orders(
+            state["session_id"], int(getattr(settings, "refund_order_count", 3))
+        )
+    except Exception:  # noqa: BLE001 - 候选生成失败不该打断聊天
+        logger.exception("订单选择器候选生成失败")
+        return {
+            "refund_order_error": "订单列表暂时不可用",
+            "refund_order_blocked": True,
+            "trace": _trace(state, "refund_prepare_order"),
+        }
+
     _emit(
         _stream_writer(),
         {
@@ -388,6 +414,7 @@ async def _refund_prepare_order(
     return {
         "refund_order_candidates": candidates,
         "refund_order_error": "" if candidates else "订单列表暂时不可用",
+        "refund_order_blocked": not candidates,
         "trace": _trace(state, "refund_prepare_order"),
     }
 
@@ -396,6 +423,9 @@ async def _refund_await_order(
     state: AgentState, config: RunnableConfig
 ) -> dict[str, Any]:
     """缺订单号时 interrupt；用户点选后从 checkpoint 续跑。"""
+    if state.get("refund_order_optional"):
+        return {"trace": _trace(state, "refund_await_order")}
+
     order_id = str(state.get("refund_order_id") or "")
     candidates = list(state.get("refund_order_candidates") or [])
 
@@ -403,6 +433,7 @@ async def _refund_await_order(
         if not candidates:
             return {
                 "refund_order_error": "订单列表暂时不可用",
+                "refund_order_blocked": True,
                 "trace": _trace(state, "refund_await_order"),
             }
 
@@ -528,12 +559,21 @@ async def _refund_retrieve_policies(
     min_score = float(getattr(settings, "rag_min_rerank_score", 0.3))
 
     if hasattr(retriever, "retrieve_many"):
-        outcome = await retriever.retrieve_many(queries)
-        evidence = outcome.evidence
-        top_score = float(outcome.top_score)
-        refused = bool(outcome.refused)
-        degraded = bool(outcome.rerank_degraded)
-        reason = outcome.refusal_reason or ""
+        try:
+            outcome = await retriever.retrieve_many(queries)
+        except Exception:  # noqa: BLE001 - 政策检索失败也要进 Agent 明说无法确认
+            logger.exception("多查询政策检索失败，按空证据继续")
+            evidence = ()
+            top_score = 0.0
+            refused = True
+            degraded = True
+            reason = "多查询检索失败"
+        else:
+            evidence = outcome.evidence
+            top_score = float(outcome.top_score)
+            refused = bool(outcome.refused)
+            degraded = bool(outcome.rerank_degraded)
+            reason = outcome.refusal_reason or ""
     else:
         evidence, top_score, empty, degraded, reason = await _retrieve_policies_fallback(
             retriever, queries, top_n=top_n
@@ -590,7 +630,9 @@ async def _run_agent_node(
             state.get("evidence") or [],
             resolved_question=resolved_question,
             refund_order=state.get("refund_order") or None,
+            refund_order_optional=bool(state.get("refund_order_optional")),
             refund_mode=refund_mode,
+            retrieval_attempted=bool(state.get("retrieval_attempted")),
             other_intent=(
                 state.get("route") == "business" and state.get("intent") == "other"
             ),
@@ -608,7 +650,8 @@ async def _run_agent_node(
         messages=ctx.messages,
         repositories=repositories,
         retriever=retriever,
-        include_faq=(state.get("route") == "business" and not refund_mode),
+        include_faq=(state.get("route") == "business"),
+        include_order=not refund_mode,
         evidence=evidence,
         max_steps=int(getattr(settings, "agent_max_steps", 6)),
         token_budget=int(getattr(settings, "agent_token_budget", 6000)),
@@ -773,7 +816,9 @@ def build_agent_graph(*, checkpointer: BaseCheckpointSaver | None = None):
     builder.add_conditional_edges(
         "refund_await_order",
         lambda state: (
-            "refund_agent" if state.get("refund_order_error") else "refund_expand_queries"
+            "refund_agent"
+            if state.get("refund_order_blocked")
+            else "refund_expand_queries"
         ),
         {
             "refund_agent": "refund_agent",

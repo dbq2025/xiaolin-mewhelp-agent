@@ -20,6 +20,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from app.agent.coref import CorefResolver
 from app.agent.intent import IntentClassifier
+from app.agent.state import ALL_INTENTS
 from app.agent.query_expansion import QueryExpander
 from app.config import PROJECT_ROOT, get_settings
 from app.llm import get_chat_model
@@ -46,10 +47,7 @@ def validate_case(case: dict[str, Any]) -> None:
         if not isinstance(turn, dict) or not turn.get("user"):
             raise ValueError(f"{case.get('id')}: 每轮必须有 user")
         intent = turn.get("intent")
-        if intent not in {
-            "logistics", "order", "product_consult", "refund_return",
-            "after_sales", "complaint", "chitchat", "other",
-        }:
+        if intent not in ALL_INTENTS:
             raise ValueError(f"{case.get('id')}: 非法 intent {intent!r}")
         for key in ("coref_contains", "coref_forbidden"):
             value = turn.get(key, [])
@@ -127,7 +125,13 @@ def _expansion_ok(original: str, queries: Sequence[str], degraded: bool) -> bool
     return any(original in query or query in original for query in queries)
 
 
-async def run(cases: Sequence[dict[str, Any]], model: Any, settings: Any) -> list[dict[str, Any]]:
+async def run(
+    cases: Sequence[dict[str, Any]],
+    model: Any,
+    settings: Any,
+    *,
+    intent_model: Any = None,
+) -> list[dict[str, Any]]:
     resolver = CorefResolver(
         model,
         timeout=settings.coref_timeout,
@@ -135,7 +139,7 @@ async def run(cases: Sequence[dict[str, Any]], model: Any, settings: Any) -> lis
         enabled=settings.coref_enabled,
     )
     classifier = IntentClassifier(
-        model,
+        intent_model or model,
         timeout=settings.intent_timeout,
         confidence_threshold=settings.intent_confidence_threshold,
         cost_mode=False,
@@ -190,17 +194,31 @@ async def run(cases: Sequence[dict[str, Any]], model: Any, settings: Any) -> lis
     return rows
 
 
-def write_report(report: dict[str, Any], rows: Sequence[dict[str, Any]], model_name: str) -> None:
+def write_report(
+    report: dict[str, Any],
+    rows: Sequence[dict[str, Any]],
+    conversation_model: str,
+    intent_model: str,
+) -> None:
     REPORT_JSON.write_text(
-        json.dumps({"model": model_name, "report": report, "rows": rows},
-                   ensure_ascii=False, indent=2),
+        json.dumps(
+            {
+                "conversation_model": conversation_model,
+                "intent_model": intent_model,
+                "report": report,
+                "rows": rows,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
         encoding="utf-8",
     )
 
     lines = [
         "# ch06 多轮指代/意图/扩写评估",
         "",
-        f"- 模型：`{model_name}`",
+        f"- 对话/指代/扩写模型：`{conversation_model}`",
+        f"- 意图模型：`{intent_model}`",
         f"- 轮数：**{report['total']}**",
         f"- 意图 accuracy：**{report['intent_accuracy']:.3f}**（阈值 {INTENT_THRESHOLD}）",
         f"- 指代通过率：**{report['coref_accuracy']:.3f}**（阈值 {COREF_THRESHOLD}）",
@@ -262,13 +280,18 @@ async def _main() -> int:
     args = parser.parse_args()
 
     settings = get_settings()
-    model = get_chat_model(settings)
+    conversation_model = get_chat_model(settings)
+    intent_model = get_chat_model(
+        settings, model_name=settings.intent_model or None
+    )
+    conversation_name = settings.openai_model
+    intent_name = settings.intent_model or settings.openai_model
     cases = load_cases()
     if args.limit:
         cases = cases[: args.limit]
-    rows = await run(cases, model, settings)
+    rows = await run(cases, conversation_model, settings, intent_model=intent_model)
     report = summarise(rows)
-    write_report(report, rows, settings.intent_model or settings.openai_model)
+    write_report(report, rows, conversation_name, intent_name)
 
     print(json.dumps({key: report[key] for key in (
         "total", "intent_accuracy", "coref_accuracy", "other_accuracy",

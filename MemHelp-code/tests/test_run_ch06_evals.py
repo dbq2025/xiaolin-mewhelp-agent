@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import pytest
 
-from evals.run_ch06_evals import load_cases, summarise, validate_case
+from langchain_core.messages import AIMessage
+
+from app.config import Settings
+from evals.run_ch06_evals import load_cases, run, summarise, validate_case
 
 
 def test_validate_rejects_unknown_intent():
@@ -67,3 +70,33 @@ def test_metrics_counts_other_and_coref():
     assert report["json_failures"] == 0
     assert report["expansion_failures"] == 1
     assert len(report["failures"]) == 2
+
+
+class _Model:
+    def __init__(self, reply: str) -> None:
+        self.reply = reply
+        self.calls = 0
+
+    async def ainvoke(self, *args, **kwargs):
+        self.calls += 1
+        return AIMessage(content=self.reply)
+
+
+async def test_run_uses_the_configured_intent_model():
+    settings = Settings(
+        openai_base_url="https://gw.example.com/v1",
+        openai_api_key="sk-test",
+        openai_model="conversation-model",
+        _env_file=None,
+    )
+    conversation = _Model("{}")
+    intent = _Model('{"intent":"product_consult","confidence":0.9}')
+    rows = await run(
+        [{"id": "X", "turns": [{"user": "XH-3000A 续航多久", "intent": "product_consult"}]}],
+        conversation,
+        settings,
+        intent_model=intent,
+    )
+    assert rows[0]["intent_ok"] is True
+    assert intent.calls == 1
+    assert conversation.calls == 0

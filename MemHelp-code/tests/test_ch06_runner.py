@@ -142,7 +142,25 @@ async def test_astream_turn_reprompts_when_pending(test_settings, fake_repositor
         )
     )
     assert [event["type"] for event in events] == ["awaiting_input"]
+    assert events[0]["payload"]["discarded_message"] is True
+    assert "没有被处理" in events[0]["payload"]["message"]
     assert model.state.index == calls_before
+
+    # 重发 awaiting_input 之后，原来的选择器仍然可以续跑。
+    order_id = events[0]["payload"]["orders"][0]["order_id"]
+    model.script.extend([_expand("退货条件", "退货运费"), text_turn("可以退。")])
+    resumed = await _collect(
+        astream_resume(
+            graph,
+            session_id="r3",
+            order_id=order_id,
+            model=model,
+            repositories=fake_repositories,
+            retriever=_Retriever(),
+            settings=test_settings,
+        )
+    )
+    assert any(event["type"] == "done" for event in resumed)
 
 
 async def test_complete_turn_returns_awaiting_payload(

@@ -192,6 +192,8 @@ class AgentState(TypedDict, total=False):
     refund_order_candidates: list[dict]   # 选择器卡片
     refund_order: dict                    # 确定性查回的订单快照
     refund_order_error: str
+    refund_order_optional: bool           # 通用政策问题：跳过选择器
+    refund_order_blocked: bool            # 候选生成失败：直接进 Agent 说明无法确认
     expanded_queries: list[str]
     query_expansion_raw: str
     query_expansion_degraded: bool
@@ -230,9 +232,10 @@ class AgentState(TypedDict, total=False):
 
 **触发条件**（满足任一才调模型，否则原样透传）：
 
-- 当前消息含指代/省略标记：`它 / 他 / 她 / 这个 / 那个 / 这单 / 那单 / 刚才 / 上面 / 前面 / 那个订单 / 这款 / 这台 / 还有 / 再 / 呢` 等；
-- 当前消息像口语问法（复用 `app.knowledge.query` 的口语标记思路：`啥 / 咋 / 多久 / 多少 / 怎么 / 能不能 / 可以不可以` 等）；
-- 首轮消息很短且没有明确业务名词（长度 ≤ 12 且不含订单号/型号/品类词），但**整句寒暄除外**。
+- 当前消息含指代/省略标记：`它 / 他 / 她 / 这个 / 那个 / 这单 / 那单 / 那 / 刚才 / 上面 / 前面 / 这款 / 这台 / 还有 / 再 / 呢` 等；
+- 当前消息像口语问法（复用 `app.knowledge.query` 的口语标记思路：`啥 / 咋 / 多久 / 多少 / 怎么 / 能不能 / 可以不可以` 等）。
+
+**明确编号透传**：消息里已经有 8–20 位独立订单号或 `XX-123` / `F94` 这类型号时，说明问题已足够自包含，即使带「多久/多少」也不调 coref，避免多付一次调用、也避免把完整问句改坏。
 
 **寒暄不触发**：`is_trivial_chitchat(message)` 为真时直接透传，保证「你好 / 在吗 / 谢谢」仍然是零模型调用的快速通道；coref 不能把 ch05 的这个保证吃掉。
 
@@ -255,8 +258,8 @@ class AgentState(TypedDict, total=False):
 **解析与防幻觉**：
 
 - 容忍 ```json 代码块与前后解释；取第一个 `{` 到最后一个 `}`。
-- `resolved` 必须是非空字符串；超长截断到 512 字符。
-- 抽取 `resolved` 里的订单号（8–20 位数字）与型号 token（如 `XH-3000A`）；若某个 token 不在「原话 + 历史文本」中出现过，判定为模型编造，整句回退原话，`coref_source="fallback"`。
+- `resolved` 必须是非空字符串；超过 512 字符视为无法解析并回退原话。
+- 订单号与槽位抽取共用一套口径：`订单/订单号/单号 + [A-Za-z0-9-]{4,32}`，以及 8–20 位独立数字；型号含 `XH-3000A`、`A1234`、`F94` 等。把 `resolved` 的 token **集合**与「原话 + 历史」的 token 集合比较；不是子集就判定为模型编造，整句回退，`coref_source="fallback"`（不能用子串：`20240115` 是 `20240115001` 的前缀）。
 - 模型超时/异常/坏 JSON：回退原话，`coref_source="fallback"`，`coref_reason` 记原因。
 - `changed` 以「resolved 去空白后是否等于原话」为准，不盲信模型布尔值。
 - 历史只取最近 8 条 Human/AI 文本；忽略 ToolMessage 与带 tool_calls 的中间消息；每条截断到 200 字符。
@@ -336,14 +339,15 @@ INTENT_TO_ROUTE = {
    - 再匹配独立的 8–20 位数字 `(?<!\d)(\d{8,20})(?!\d)`；
    - 多个命中取第一个；纯空白/纯标点不抽。
 3. 命中 → 写 `refund_order_id`，返回 trace。
-4. 未命中 → `list_demo_orders(session_id, count=REFUND_ORDER_COUNT)` 生成候选；写 `refund_order_candidates`；发 `order_picker` 事件：
+4. 未命中且是**通用政策问题**（`is_general_refund_policy`：含政策/规则/流程/多久/运费/到账等，且不含「这/那/我/订单」等指向词）→ 写 `refund_order_optional=True`，**跳过选择器**，继续扩写+政策检索；「这个能退吗」「我的订单能退吗」仍必须选单。
+5. 未命中且不是通用政策 → `list_demo_orders(session_id, count=REFUND_ORDER_COUNT)` 生成候选；写 `refund_order_candidates`；发 `order_picker` 事件：
    ```json
    {"type": "order_picker", "turn_id": "...", "orders": [
      {"order_id": "20240115001", "title": "商品名 型号",
       "amount_yuan": "299.00", "status": "已发货", "created_at": "..."}
    ]}
    ```
-5. 候选生成失败/为空 → `refund_order_error`，发空列表并**不**中断；`refund_await_order` 直接返回错误，后续 `refund_agent` 明说「订单列表暂时不可用，请稍后重试或转人工」，不让模型猜订单号。`REFUND_ORDER_COUNT` 校验 `ge=1`，正常路径不会为空。
+6. 候选生成失败/为空 → `refund_order_error="订单列表暂时不可用"` + `refund_order_blocked=True`，发空列表并**不**中断；条件边直接进 `refund_agent`，由 Agent 明说「订单列表暂时不可用，请稍后重试或转人工」，不让模型猜订单号。`REFUND_ORDER_COUNT` 校验 `ge=1`，正常路径不会为空。
 
 **演示订单生成**：
 
@@ -354,13 +358,14 @@ INTENT_TO_ROUTE = {
 ### 6.5 `refund_await_order`
 
 1. `order_id = state.get("refund_order_id")`。
-2. 若为空且 `refund_order_candidates` 为空（候选生成失败）：
-   - 不 `interrupt`，直接返回 `refund_order_error`，由 `refund_agent` 明说无法确认；不让用户面对一个没有卡片的死局。
-3. 若为空且候选非空：
+2. 若 `refund_order_optional` 为真（通用政策问题）：不 `interrupt`，直接返回 trace，继续扩写+检索。
+3. 若为空且 `refund_order_candidates` 为空（候选生成失败）：
+   - 不 `interrupt`，返回 `refund_order_error` + `refund_order_blocked=True`，由 `refund_agent` 明说无法确认；不让用户面对一个没有卡片的死局。
+4. 若为空且候选非空：
    - `payload = interrupt({"kind": "order_picker", "orders": state["refund_order_candidates"]})`；
    - 兼容 `payload` 为 `{"order_id": "..."}` 或直接字符串；
    - 校验选中的 `order_id` 在候选列表里；不在 → 带着 `{"error": "请从列表里选择订单"}` 再次 `interrupt`，不猜、不查。
-4. 确定性查订单：
+5. 确定性查订单：
    - `query_order(order_id)` → 解析 JSON；
    - `query_product(product_id)` → 解析 JSON；
    - 组装 `refund_order`：
@@ -369,8 +374,8 @@ INTENT_TO_ROUTE = {
       "product_id": "P1234", "product_name": "无线蓝牙耳机",
       "product_model": "A42", "created_at": "2026-..."}
      ```
-5. 查询结果坏 JSON/缺字段 → `refund_order_error`，不编造；继续后续节点，由 Agent 明说无法确认订单。
-6. 返回 `refund_order`、`refund_order_id`、trace。
+6. 查询结果坏 JSON/缺字段 → `refund_order_error`，不编造；`refund_order_blocked` 保持 false，**继续**扩写+政策检索，由 Agent 明说无法确认订单。
+7. 返回 `refund_order`、`refund_order_id`、trace。
 
 **为什么中断节点不自己发 `order_picker`**：LangGraph 在 resume 时会重新执行中断节点；如果把发事件放在中断节点内，续跑时会重复发一次卡片。把「发卡片」放在前一个节点，保证只发一次。
 
@@ -404,8 +409,9 @@ INTENT_TO_ROUTE = {
   4. 政策证据（若有）；
   5. 只判断「这一单能不能退/能不能售后」，说明依据与下一步；
   6. 证据不足时明确说无法确认，不编造政策数字，不承诺到账时间；
-  7. 订单数据缺失（`refund_order_error`）时，先说明「订单信息没取到」，给重试/转人工建议，不猜订单。
-- 工具集：`query_order` / `query_product` / `query_logistics` / `suggest_actions`；**无 `query_faq`**（政策已强制预检索，避免二次检索与引用编号冲突），**无 `create_ticket`**（退款单由用户在前端提交）。Prompt 要求不要重复查订单与政策，但保留查询工具作为兜底。
+  7. 订单数据缺失（`refund_order_error`）时，先说明「订单信息没取到」，给重试/转人工建议，不猜订单；
+  8. `refund_order_optional` 为真时，说明这是通用政策问题，基于证据回答，不要求用户先给订单号。
+- 工具集：`query_product` / `suggest_actions`；**无 `query_order` / `query_logistics`**（订单快照已由系统查好并锁死，运行时不再给模型换号重查的机会），**无 `query_faq`**（政策已强制预检索），**无 `create_ticket`**（退款单由用户在前端提交）。
 - 不调用 `confidence_gate`；`gate_passed` 在退款子流程里可以不设置（`total=False`），done 里按 `gate.passed=None` 呈现。
 - 输出 `refund_form`：
   ```json
@@ -523,6 +529,11 @@ async def retrieve_many(
 
 **暂停轮不发送 `done`**：避免前端把「等待选择」误判成「回答结束」。前端收到 `awaiting_input` 后保留气泡、渲染卡片；续跑流的 `done` 到达时才结束这一轮。
 
+**暂停中又发新消息**：不把新消息塞进暂停图（LangGraph 需要 `Command(resume=...)`）。
+runner 返回带 `discarded_message: true` 的 `awaiting_input`，消息明确写「刚才的消息
+没有被处理」；前端在暂停态禁用输入框，避免用户以为它被回答了。非流式路径返回
+409 `refund_pending`。这是**显式拒绝**，不是静默丢弃。
+
 ### 9.2 续跑接口
 
 `POST /api/chat/refund/select`
@@ -535,8 +546,12 @@ async def retrieve_many(
 - 校验：
   - `session_id` 允许字符与 `ChatRequest` 一致；
   - `order_id` `^[A-Za-z0-9-]{4,32}$`；
-  - `graph.aget_state(config).next` 必须包含 `refund_await_order` 且存在 interrupt；否则返回 409 `{"error":{"type":"no_pending_refund","message":"没有待选择的订单。"}}`。
-- 续跑失败：按现有错误外壳返回；不重复落用户轮（用户消息已在暂停轮的 checkpoint 里，续跑成功后由 `log_turn` 一次落库）。
+  - `graph.aget_state(config).next` 必须包含 `refund_await_order` **且** `pending_interrupt(snapshot)` 非空；否则返回 409 `{"error":{"type":"no_pending_refund","message":"没有待选择的订单。"}}`。
+  - 同一 session 的续跑互斥：in-flight 集合里已有该 session 时返回 409 `refund_resume_in_progress`，避免两个点选并发跑同一 thread。
+- 续跑失败：按现有错误外壳返回，并做恢复——若这一轮尚未落库且不是 `log_turn` 失败，
+  先 `persist_user_only` 保住用户问题，再 `adelete_thread` 清掉未收敛 checkpoint，
+  让同一 session 可以重新发起；错误帧带 `recovered: true`。
+- 续跑成功：由 `log_turn` 一次落库；`last_committed_turn_id` 防顺序重试重复落库。
 
 ### 9.3 非流式路径（`stream=false`）
 
@@ -556,12 +571,18 @@ async def retrieve_many(
  "reason": "商品质量问题", "idempotency_key": "refund-20261018-001"}
 ```
 
-- `reason` 用 `Literal` 固定六类，非法值 422。
+- `reason` 用 `Literal` 固定六类，非法值 422；`idempotency_key` 必填。
+- **订单白名单**：从该 session 的 checkpoint 读 `refund_order_id` /
+  `refund_order_candidates` / `refund_form.order_id`，请求的 `order_id` 不在集合里返回
+  409 `refund_order_mismatch`；不信任前端传任意订单号。
+- 幂等键服务端命名空间化：`sha256(f"{session_id}:{client_key}")`，避免不同会话
+  用同一个 key 互相命中。命中已有键时比较工单里存的描述；描述不同返回 409
+  `idempotency_conflict`，相同则回显同一工单号。
 - 复用 `execute_tool("create_ticket", {...})`：
   - `description = "退款申请｜订单 {order_id}｜原因：{reason}"`
   - `ticket_type = "售后"`
   - `conversation_id = session_id`
-  - `idempotency_key` 透传
+  - `idempotency_key` 传命名空间化后的值
 - 响应：
   ```json
   {"ok": true, "refund_no": "T20261018001", "ticket_no": "T20261018001",
@@ -623,13 +644,17 @@ async def retrieve_many(
 | 意图模型超时/坏 JSON | 成本档先尝试主模型；仍失败走启发式（默认 other） |
 | 扩写超时/坏 JSON | `[resolved_message]`；`query_expansion_degraded=true` |
 | 多查询某条检索失败 | 跳过该条，继续；全失败 → 空证据 + refused；不 500 |
-| 订单候选生成失败 | `refund_order_error`；中断载荷空列表；Agent 明说无法确认 |
+| 订单候选生成失败 | `refund_order_blocked=true`；直接进 Agent，明说无法确认 |
+| 订单快照坏 JSON/缺字段 | `refund_order_error`，**仍走**扩写+政策检索；Agent 说订单没取到 |
+| 通用政策问题（无订单指向） | `refund_order_optional=true`；跳过选择器，仍走扩写+检索 |
 | 用户点选非法订单 | 重新 interrupt；不查、不猜 |
 | 暂停轮 | 不写 MySQL、不写完成日志；checkpoint 保存现场 |
-| 续跑重试 | `last_committed_turn_id` 幂等；不会重复落库 |
-| 用户没点卡片又发新消息 | runner 检测 pending interrupt，重新发 `awaiting_input`，不把新消息塞进暂停图 |
+| 续跑失败（模型/DB） | 未落库时先 `persist_user_only`，再清未收敛 checkpoint；错误帧 `recovered=true`，可重新发起 |
+| 续跑重试 | `last_committed_turn_id` 幂等；同一 session 并发续跑 409 `refund_resume_in_progress` |
+| 用户没点卡片又发新消息 | 显式拒绝：`awaiting_input.discarded_message=true` + 提示未处理；前端禁用输入框；非流式 409 |
 | 退款单非法原因 | 422；不写 tickets |
-| 退款单重复提交 | `idempotency_key` 复用 `create_ticket` 的幂等语义 |
+| 退款单订单不在本轮流程 | 409 `refund_order_mismatch`；不写 tickets |
+| 退款单重复提交 | 服务端命名空间化 key；同描述回显同一工单，不同描述 409 `idempotency_conflict` |
 
 **暂停轮的可见性**：用户消息已进入 checkpoint，但未进 MySQL；刷新页面看不到这条 pending 轮。本轮明确不做「刷新后恢复选择器」（见 §1.2），但同一页面内续跑不受影响。
 

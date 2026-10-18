@@ -149,6 +149,7 @@ async def run_react_agent(
     repositories: Any,
     retriever: Any,
     include_faq: bool,
+    include_order: bool = True,
     evidence: Sequence[Evidence] = (),
     max_steps: int = 6,
     token_budget: int = 6000,
@@ -163,6 +164,7 @@ async def run_react_agent(
         repositories,
         retriever,
         include_faq=include_faq,
+        include_order=include_order,
         record_actions=record_actions,  # type: ignore[arg-type]
     )
     tools_by_name: dict[str, BaseTool] = {tool.name: tool for tool in tools}

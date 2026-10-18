@@ -26,6 +26,8 @@ __all__ = [
     "REFUND_REASONS",
     "build_refund_form",
     "extract_order_id",
+    "extract_order_tokens",
+    "is_general_refund_policy",
     "list_demo_orders",
 ]
 
@@ -45,6 +47,46 @@ _ORDER_ARG = re.compile(
 )
 #: 独立的长数字订单号（8–20 位）。
 _ORDER_STANDALONE = re.compile(r"(?<!\d)(\d{8,20})(?!\d)")
+
+
+#: 通用政策问句的标记词。
+_POLICY_MARKERS: tuple[str, ...] = (
+    "政策", "规则", "流程", "怎么退", "多久", "条件", "运费", "到账",
+    "时效", "七天", "无理由", "需要什么", "材料", "标准",
+)
+#: 出现这些词说明问题指向「某一单」，不能当通用政策。
+_DEICTIC_MARKERS: tuple[str, ...] = (
+    "这", "那", "它", "我", "订单", "该", "此", "本单",
+)
+
+
+def is_general_refund_policy(text: str) -> bool:
+    """是不是「不指向具体某一单」的通用退款/售后政策问题。
+
+    例：``退货政策是什么``、``退款流程要多久``、``退货运费谁承担`` →
+    跳过订单选择器，直接走扩写+政策检索+Agent；``这个能退吗``、
+    ``我的订单能退吗`` 仍走订单槽位。
+    """
+    source = (text or "").strip()
+    if not source or extract_order_id(source):
+        return False
+    if any(marker in source for marker in _DEICTIC_MARKERS):
+        return False
+    return any(marker in source for marker in _POLICY_MARKERS)
+
+
+def extract_order_tokens(text: str) -> set[str]:
+    """抽取文本里所有「像订单号」的 token，用于 coref 防幻觉的整体比对。
+
+    与 :func:`extract_order_id` 同一套正则：``订单/单号 + 4–32 位字母数字``，
+    以及独立 8–20 位数字。coref 不能用子串判断（``20240115`` 是
+    ``20240115001`` 的前缀），必须比较 token 集合。
+    """
+    source = text or ""
+    return {
+        *(_ORDER_ARG.findall(source)),
+        *(_ORDER_STANDALONE.findall(source)),
+    }
 
 
 def extract_order_id(text: str) -> str | None:

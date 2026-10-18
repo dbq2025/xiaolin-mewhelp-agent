@@ -59,6 +59,23 @@ def test_knowledge_tools_drop_query_faq(fake_repositories, empty_retriever):
     assert {"query_order", "query_product", "query_logistics", "suggest_actions"} <= set(names)
 
 
+def test_refund_tools_lock_the_order(fake_repositories, empty_retriever):
+    names = [
+        tool.name
+        for tool in agent_tools(
+            fake_repositories,
+            empty_retriever,
+            include_faq=False,
+            include_order=False,
+            record_actions=[],
+        )
+    ]
+    assert "query_order" not in names
+    assert "query_logistics" not in names
+    assert "query_product" in names
+    assert "suggest_actions" in names
+
+
 def test_business_tools_keep_query_faq(fake_repositories, empty_retriever):
     names = [
         tool.name

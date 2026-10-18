@@ -31,6 +31,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 
 from app.agent.intent import is_trivial_chitchat
 from app.agent.prompts import COREF_PROMPT
+from app.agent.refund_orders import extract_order_tokens
 from app.chat import _message_text
 
 logger = logging.getLogger(__name__)
@@ -60,7 +61,9 @@ _MAX_RESOLVED_CHARS = 512
 _MAX_HISTORY_CHARS = 200
 
 _ORDER_TOKEN = re.compile(r"(?<!\d)(\d{8,20})(?!\d)")
-_MODEL_TOKEN = re.compile(r"(?<![A-Za-z0-9])([A-Za-z]{2,}-\d{2,}[A-Za-z]?)(?![A-Za-z0-9])")
+_MODEL_TOKEN = re.compile(
+    r"(?<![A-Za-z0-9])([A-Za-z]{1,4}(?:-\d{2,}|\d{2,})[A-Za-z]?)(?![A-Za-z0-9])"
+)
 
 
 @dataclass(frozen=True)
@@ -137,15 +140,19 @@ def _loads_json(text: str) -> object | None:
 
 
 def _has_hallucinated_tokens(resolved: str, allowed_text: str) -> bool:
-    """补全结果里有没有历史中不存在的订单号/型号。"""
-    allowed_lower = allowed_text.lower()
-    for token in _ORDER_TOKEN.findall(resolved):
-        if token not in allowed_text:
-            return True
-    for token in _MODEL_TOKEN.findall(resolved):
-        if token.lower() not in allowed_lower:
-            return True
-    return False
+    """补全结果里有没有历史中不存在的订单号/型号。
+
+    订单号用**token 集合**比较，不用子串：``20240115`` 是 ``20240115001`` 的
+    前缀，子串判断会把截断/编造的号放过去。型号按大小写不敏感比较。
+    """
+    allowed_orders = extract_order_tokens(allowed_text)
+    resolved_orders = extract_order_tokens(resolved)
+    if not resolved_orders.issubset(allowed_orders):
+        return True
+
+    allowed_models = {token.lower() for token in _MODEL_TOKEN.findall(allowed_text)}
+    resolved_models = {token.lower() for token in _MODEL_TOKEN.findall(resolved)}
+    return not resolved_models.issubset(allowed_models)
 
 
 def parse_coref_reply(

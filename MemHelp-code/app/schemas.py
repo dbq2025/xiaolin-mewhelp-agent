@@ -269,10 +269,10 @@ class CreateRefundRequest(BaseModel):
         description="退款订单号。",
     )
     reason: RefundReason = Field(description="退款原因，固定六类之一。")
-    idempotency_key: str | None = Field(
-        default=None,
+    idempotency_key: str = Field(
+        min_length=1,
         max_length=64,
-        description="前端生成的一次性键；重复提交返回同一张工单。",
+        description="前端生成的一次性键；服务端会按 session 命名空间化。",
     )
 
 

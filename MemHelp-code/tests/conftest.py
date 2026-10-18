@@ -254,6 +254,20 @@ def _isolate_real_env_file(monkeypatch):
         "AGENT_MAX_STEPS",
         "AGENT_TOKEN_BUDGET",
         "TURN_LOG_PATH",
+        # ch06 新增：宿主机设了 INTENT_* / COREF_* / QUERY_EXPANSION_* /
+        # REFUND_ORDER_COUNT 时，配置默认值与图测试不能依赖那台机器。
+        "INTENT_MODEL",
+        "INTENT_CHEAP_MODEL",
+        "INTENT_COST_MODE",
+        "INTENT_CONFIDENCE_THRESHOLD",
+        "INTENT_TIMEOUT",
+        "COREF_ENABLED",
+        "COREF_TIMEOUT",
+        "COREF_HISTORY_MESSAGES",
+        "QUERY_EXPANSION_ENABLED",
+        "QUERY_EXPANSION_TIMEOUT",
+        "QUERY_EXPANSION_MAX_QUERIES",
+        "REFUND_ORDER_COUNT",
     ):
         monkeypatch.delenv(name, raising=False)
 

@@ -172,6 +172,126 @@ async def test_resume_with_selected_order_finishes(
     assert not any(event.get("type") == "order_picker" for event in events)
 
 
+async def test_general_policy_question_skips_picker_but_retrieves(
+    test_settings, fake_repositories
+):
+    graph = build_agent_graph(checkpointer=memory_checkpointer())
+    model = ScriptedChatModel(
+        script=[
+            _intent("refund_return"),
+            _expand("退货政策", "退款流程"),
+            text_turn("七天无理由退货，具体见政策 [1]。"),
+        ]
+    )
+    retriever = _RefundRetriever()
+    values, events, config = await _run(
+        graph,
+        message="退货政策是什么",
+        model=model,
+        repositories=fake_repositories,
+        retriever=retriever,
+        settings=test_settings,
+        session="s-general-policy",
+    )
+    assert not any(event.get("type") == "order_picker" for event in events)
+    assert values["refund_order_optional"] is True
+    assert "refund_retrieve_policies" in values["trace"]
+    assert retriever.many_calls
+    assert (await graph.aget_state(config)).next == ()
+
+
+async def test_order_snapshot_failure_still_retrieves_policy(
+    test_settings, fake_repositories, monkeypatch
+):
+    monkeypatch.setattr("app.agent.graph.query_order", lambda order_id: "not-json")
+    graph = build_agent_graph(checkpointer=memory_checkpointer())
+    model = ScriptedChatModel(
+        script=[
+            _intent("refund_return"),
+            _expand("退货条件", "退货运费"),
+            text_turn("订单信息没取到，这项政策我暂时无法确认。"),
+        ]
+    )
+    retriever = _RefundRetriever()
+    values, _, _ = await _run(
+        graph,
+        message="订单 20240115001 能退吗",
+        model=model,
+        repositories=fake_repositories,
+        retriever=retriever,
+        settings=test_settings,
+        session="s-snapshot-fail",
+    )
+    assert values["refund_order_error"] == "订单信息查询失败"
+    assert values["refund_order_blocked"] is False
+    assert "refund_retrieve_policies" in values["trace"]
+    assert retriever.many_calls
+    assert "refund_agent" in values["trace"]
+
+
+async def test_retrieve_many_exception_still_calls_agent(
+    test_settings, fake_repositories
+):
+    class _BoomRetriever(_RefundRetriever):
+        async def retrieve_many(self, queries, *, category=None):
+            raise RuntimeError("milvus down")
+
+    graph = build_agent_graph(checkpointer=memory_checkpointer())
+    model = ScriptedChatModel(
+        script=[
+            _intent("refund_return"),
+            _expand("退货条件", "退货运费"),
+            text_turn("这项政策我暂时无法确认。"),
+        ]
+    )
+    values, _, _ = await _run(
+        graph,
+        message="订单 20240115001 能退吗",
+        model=model,
+        repositories=fake_repositories,
+        retriever=_BoomRetriever(),
+        settings=test_settings,
+        session="s-retrieve-boom",
+    )
+    assert values["answer"] == "这项政策我暂时无法确认。"
+    assert values["retrieval_refused"] is True
+    assert values["retrieval_degraded"] is True
+    assert "refund_agent" in values["trace"]
+
+
+async def test_invalid_then_valid_selection_finishes(
+    test_settings, fake_repositories
+):
+    graph = build_agent_graph(checkpointer=memory_checkpointer())
+    model = ScriptedChatModel(
+        script=[_coref("这个商品能退吗", True), _intent("refund_return")]
+    )
+    values, _, config = await _run(
+        graph,
+        message="这个能退吗",
+        model=model,
+        repositories=fake_repositories,
+        retriever=_RefundRetriever(),
+        settings=test_settings,
+        session="s-bad-then-good",
+        turn_id="t-bad-good",
+    )
+    async for _ in graph.astream(
+        Command(resume={"order_id": "not-in-list"}), config, stream_mode="custom"
+    ):
+        pass
+    picked = values["refund_order_candidates"][0]["order_id"]
+    model.script.extend([_expand("退货条件", "退货运费"), text_turn("可以退。")])
+    async for _ in graph.astream(
+        Command(resume={"order_id": picked}), config, stream_mode="custom"
+    ):
+        pass
+    final = (await graph.aget_state(config)).values
+    assert final["answer"] == "可以退。"
+    assert final["refund_order"]["order_id"] == picked
+    assert "refund_agent" in final["trace"]
+
+
 async def test_invalid_selection_reinterrupts(test_settings, fake_repositories):
     graph = build_agent_graph(checkpointer=memory_checkpointer())
     model = ScriptedChatModel(

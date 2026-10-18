@@ -145,7 +145,7 @@ async def main() -> None:
         )
         await ask("订单 20240115001 的物流到哪了")
         await wait_done()
-        await ask("那它能退吗")
+        await ask("这个能退吗")
         await wait_done()
         coref_note = await session.js(
             "Array.from(document.querySelectorAll('.flow-note')).map(n => n.textContent).find(t => t.includes('已补全')) || ''"

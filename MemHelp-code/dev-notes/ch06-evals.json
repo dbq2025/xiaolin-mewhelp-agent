@@ -1,5 +1,6 @@
 {
-  "model": "deepseek-flash",
+  "conversation_model": "deepseek-flash",
+  "intent_model": "deepseek-flash",
   "report": {
     "total": 22,
     "intent_correct": 22,
@@ -40,7 +41,7 @@
       "coref_ok": true,
       "expected_intent": "refund_return",
       "actual_intent": "refund_return",
-      "intent_confidence": 0.9,
+      "intent_confidence": 0.92,
       "intent_source": "llm",
       "intent_ok": true,
       "json_ok": true,
@@ -48,9 +49,9 @@
       "expansion_ok": true,
       "queries": [
         "订单 20240115001 能退吗",
-        "订单 20240115001 是否在退货退款的有效时间窗口内？",
-        "订单 20240115001 申请退货需要满足哪些适用条件？",
-        "订单 20240115001 退货的运费由谁承担、责任如何划分？"
+        "订单 20240115001 是否在退款退货的申请时间窗口内，符合哪些退货条件？",
+        "订单 20240115001 退货时运费由谁承担，退款金额如何计算？",
+        "订单 20240115001 的商品是否属于不支持退货的特殊品类或例外情形？"
       ],
       "expansion_degraded": false
     },
@@ -58,12 +59,12 @@
       "id": "M01",
       "turn": 3,
       "user": "那现在到哪了",
-      "resolved": "订单 20240115001 现在到哪了",
+      "resolved": "订单 20240115001 的物流现在到哪了",
       "coref_source": "llm",
       "coref_ok": true,
       "expected_intent": "logistics",
       "actual_intent": "logistics",
-      "intent_confidence": 0.96,
+      "intent_confidence": 0.97,
       "intent_source": "llm",
       "intent_ok": true,
       "json_ok": true,
@@ -103,9 +104,9 @@
       "expansion_ok": true,
       "queries": [
         "XH-3000A 能退吗",
-        "订单 20240115001 中的商品 XH-3000A 是否符合退货条件，退货申请的时间窗口是多久？",
-        "订单 20240115001 退货时 XH-3000A 的退货运费由谁承担，是否需要原包装或配件齐全？",
-        "XH-3000A 是否属于不支持七天无理由退货的特殊品类或有其他退货例外规定？"
+        "订单 20240115001 中的商品 XH-3000A 是否在退货时间窗口内可以申请退货？",
+        "XH-3000A 退货时运费由谁承担、退款责任如何划分？",
+        "XH-3000A 属于特殊品类还是例外商品，是否存在不支持退货的情形？"
       ],
       "expansion_degraded": false
     },
@@ -126,9 +127,9 @@
       "expansion_ok": true,
       "queries": [
         "XH-3000A 能换货吗",
-        "订单20240115001中的XH-3000A商品是否在换货的有效时间窗口内可以申请换货？",
-        "XH-3000A换货产生的运费由谁承担，订单20240115001的责任如何划分？",
-        "XH-3000A属于哪类商品，是否存在不支持换货的特殊品类或例外情形？"
+        "订单 20240115001 中的 XH-3000A 是否支持换货，换货的适用条件和时间窗口是什么？",
+        "XH-3000A 换货时往返运费由谁承担，责任如何划分？",
+        "XH-3000A 属于特殊品类或例外情形吗，是否有换货限制？"
       ],
       "expansion_degraded": false
     },
@@ -141,7 +142,7 @@
       "coref_ok": true,
       "expected_intent": "complaint",
       "actual_intent": "complaint",
-      "intent_confidence": 0.97,
+      "intent_confidence": 0.95,
       "intent_source": "llm",
       "intent_ok": true,
       "json_ok": true,
@@ -152,22 +153,22 @@
       "id": "M03",
       "turn": 2,
       "user": "那能赔多少",
-      "resolved": "杯子碎了这种情况能赔多少",
+      "resolved": "杯子碎了能赔多少",
       "coref_source": "llm",
       "coref_ok": true,
       "expected_intent": "after_sales",
       "actual_intent": "after_sales",
-      "intent_confidence": 0.72,
+      "intent_confidence": 0.7,
       "intent_source": "llm",
       "intent_ok": true,
       "json_ok": true,
       "expansion_checked": true,
       "expansion_ok": true,
       "queries": [
-        "杯子碎了这种情况能赔多少",
-        "订单20240115001 杯子碎了 破损商品的赔付金额标准是多少",
-        "易碎品杯子运输破损申请理赔需要提供哪些凭证和照片",
-        "杯子破损退款或补发的运费由谁承担"
+        "杯子碎了能赔多少",
+        "订单 20240115001 的杯子在运输中破损，赔付金额标准是多少？",
+        "签收后发现杯子碎裂，需要在多长时间内申请破损赔付，适用条件是什么？",
+        "杯子属于易碎品，破损责任如何认定，运费与退款由谁承担？"
       ],
       "expansion_degraded": false
     },
@@ -180,7 +181,7 @@
       "coref_ok": true,
       "expected_intent": "other",
       "actual_intent": "other",
-      "intent_confidence": 0.95,
+      "intent_confidence": 0.9,
       "intent_source": "llm",
       "intent_ok": true,
       "json_ok": true,
@@ -228,7 +229,7 @@
       "coref_ok": true,
       "expected_intent": "other",
       "actual_intent": "other",
-      "intent_confidence": 0.55,
+      "intent_confidence": 0.75,
       "intent_source": "llm",
       "intent_ok": true,
       "json_ok": true,
@@ -287,22 +288,22 @@
       "id": "M06",
       "turn": 2,
       "user": "那退款呢",
-      "resolved": "订单 20240115001 的退款怎么处理",
+      "resolved": "订单 20240115001 退款能退多少钱",
       "coref_source": "llm",
       "coref_ok": true,
       "expected_intent": "refund_return",
       "actual_intent": "refund_return",
-      "intent_confidence": 0.92,
+      "intent_confidence": 0.9,
       "intent_source": "llm",
       "intent_ok": true,
       "json_ok": true,
       "expansion_checked": true,
       "expansion_ok": true,
       "queries": [
-        "订单 20240115001 的退款怎么处理",
-        "订单 20240115001 申请退款需要满足哪些条件，是否有时间窗口限制？",
-        "订单 20240115001 退款时运费由谁承担，退款金额如何计算？",
-        "订单 20240115001 的商品是否属于不支持退款的特殊品类或例外情形？"
+        "订单 20240115001 退款能退多少钱",
+        "订单 20240115001 申请退款时退款金额如何计算，是否包含运费？",
+        "订单 20240115001 在什么时间窗口内可以申请退款，退款比例或扣费标准是什么？",
+        "订单 20240115001 的商品若属于特殊品类（如生鲜、定制、已拆封），退款金额是否会扣除相应费用？"
       ],
       "expansion_degraded": false
     },
@@ -315,7 +316,7 @@
       "coref_ok": true,
       "expected_intent": "after_sales",
       "actual_intent": "after_sales",
-      "intent_confidence": 0.9,
+      "intent_confidence": 0.92,
       "intent_source": "llm",
       "intent_ok": true,
       "json_ok": true,
@@ -323,9 +324,9 @@
       "expansion_ok": true,
       "queries": [
         "发票怎么开",
-        "订单20240115001怎么申请开具发票，需要提供哪些开票信息和凭证？",
-        "订单20240115001开具发票的时间窗口和适用条件是什么？",
-        "订单20240115001发票开具的流程是怎样的，支持哪些发票类型以及如何交付？"
+        "订单20240115001如何申请开具发票？开票入口和操作流程是什么？",
+        "订单20240115001开具发票需要提供哪些信息或凭证？可选择哪些发票类型（电子发票、纸质发票、专用发票）？",
+        "订单20240115001申请开票的时间窗口和开票时限有什么规定？发票开错后能否重开或换开？"
       ],
       "expansion_degraded": false
     },
@@ -333,7 +334,7 @@
       "id": "M07",
       "turn": 2,
       "user": "那保修呢",
-      "resolved": "保修怎么办理",
+      "resolved": "保修怎么处理",
       "coref_source": "llm",
       "coref_ok": true,
       "expected_intent": "after_sales",
@@ -345,10 +346,10 @@
       "expansion_checked": true,
       "expansion_ok": true,
       "queries": [
-        "保修怎么办理",
-        "订单 20240115001 的商品申请保修需要满足哪些条件和保修期限？",
-        "订单 20240115001 办理保修时运费由谁承担、如何寄回商品？",
-        "订单 20240115001 中的商品属于哪些品类可能不在保修范围内或有例外？"
+        "保修怎么处理",
+        "订单 20240115001 的商品保修怎么处理，保修申请的条件和保修期限是什么？",
+        "订单 20240115001 申请保修需要提供哪些凭证，具体流程怎么走？",
+        "订单 20240115001 保修期内维修的运费由谁承担，责任如何划分？"
       ],
       "expansion_degraded": false
     },
@@ -369,9 +370,9 @@
       "expansion_ok": true,
       "queries": [
         "这个能退吗",
-        "订单 20240115001 的商品是否支持退货，需要满足哪些退货条件？",
-        "订单 20240115001 申请退货的时间窗口是多久，超过期限还能退吗？",
-        "订单 20240115001 退货的运费由谁承担，退款责任如何划分？"
+        "订单20240115001的商品是否在退货退款适用条件与申请时间窗口内？",
+        "订单20240115001退货时运费由谁承担、责任如何划分？",
+        "订单20240115001中的商品是否属于不支持退货的特殊品类或例外情形？"
       ],
       "expansion_degraded": false
     },
@@ -416,7 +417,7 @@
       "coref_ok": true,
       "expected_intent": "complaint",
       "actual_intent": "complaint",
-      "intent_confidence": 0.95,
+      "intent_confidence": 0.97,
       "intent_source": "llm",
       "intent_ok": true,
       "json_ok": true,

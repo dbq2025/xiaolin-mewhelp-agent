@@ -41,6 +41,15 @@ def test_chat_model_defaults_to_openai_model():
     assert model.model_name == "base-model"
 
 
+def test_intent_model_client_is_cached():
+    from app.api import _cached_intent_model
+
+    settings = _settings()
+    first = _cached_intent_model(settings, "intent-big")
+    second = _cached_intent_model(settings, "intent-big")
+    assert first is second
+
+
 def test_coref_history_messages_is_bounded():
     import pytest
     from pydantic import ValidationError

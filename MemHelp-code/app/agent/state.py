@@ -1,10 +1,10 @@
-"""ch05 的 State 契约与「七类意图 → 四个出口」映射。
+"""State 契约与「八类意图 → 五个出口」映射。
 
 ## 为什么分流是常量表
 
-意图识别可以模型化，但**分流规则不能**。把七类归到四个出口是产品决策，
+意图识别可以模型化，但**分流规则不能**。把八类归到五个出口是产品决策，
 不是模型的自由；写成常量表后，任何一次路由变化都会在 diff 里出现，
-也能被 `test_seven_intents_map_to_four_exits` 逐项钉住。
+也能被 `test_eight_intents_map_to_five_exits` 逐项钉住。
 
 ## 为什么 messages 用 add_messages
 
@@ -45,7 +45,7 @@ Route = Literal["knowledge", "business", "refund", "complaint", "chitchat"]
 
 SuggestedAction = Literal["transfer_human", "create_ticket"]
 
-#: 七类意图的权威顺序（也是评估集与日志里的顺序）。
+#: 八类意图的权威顺序（也是评估集与日志里的顺序）。
 ALL_INTENTS: tuple[Intent, ...] = (
     "logistics",
     "order",
@@ -116,6 +116,10 @@ class AgentState(TypedDict, total=False):
     refund_order_candidates: list[dict[str, Any]]
     refund_order: dict[str, Any]
     refund_order_error: str
+    #: 通用政策问题（不指向某一单）：跳过选择器，但仍走扩写+政策检索。
+    refund_order_optional: bool
+    #: 候选生成失败，连「可选订单」都没有：直接进 Agent 说明无法确认。
+    refund_order_blocked: bool
     expanded_queries: list[str]
     query_expansion_raw: str
     query_expansion_degraded: bool

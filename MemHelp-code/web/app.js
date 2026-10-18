@@ -541,6 +541,12 @@
       addNotice(`继续退款流程失败：${err && err.message ? err.message : err}`, true);
       setStatus('继续失败', 'bad');
       target.flow.querySelectorAll('.order-card').forEach((card) => { card.disabled = false; });
+    } finally {
+      if (!ctx.awaiting) {
+        els.input.disabled = false;
+        els.send.disabled = false;
+        els.input.focus();
+      }
     }
   }
 
@@ -655,8 +661,15 @@
     if (event === 'awaiting_input') {
       ctx.awaiting = true;
       ctx.bot.body.innerHTML = '';
+      els.input.disabled = true;
+      els.send.disabled = true;
       setStatus('等待选择订单', 'ok');
-      if (!ctx.bot.flow.querySelector('.order-picker') && data.orders) {
+      if (data.error) {
+        addNotice(data.error, true);
+      }
+      if (data.discarded_message) {
+        addNotice(data.message || '请先选择要办理的订单；刚才的消息没有被处理。', true);
+      } else if (!ctx.bot.flow.querySelector('.order-picker') && data.orders) {
         renderOrderPicker(ctx.bot, data, ctx);
       }
       return;
@@ -688,6 +701,8 @@
 
     if (event === 'done') {
       ctx.awaiting = false;
+      els.input.disabled = false;
+      els.send.disabled = false;
       ctx.finish();
       setToolRecords(ctx.bot, data.tools);
       // 引用与反馈都挂在最终答案上：流式过程中 cites 还没到，先不管。
@@ -1086,6 +1101,8 @@
       },
       fail(data) {
         settled = true;
+        els.input.disabled = false;
+        els.send.disabled = false;
         failRunningTools(bot, data.message || '调用中断');
         if (!acc) bot.row.remove();
         else bot.body.innerHTML = renderMarkdown(acc);
@@ -1125,8 +1142,11 @@
       setStatus('连接异常', 'bad');
     } finally {
       busy = false;
-      els.send.disabled = false;
-      els.input.focus();
+      if (!ctx.awaiting) {
+        els.send.disabled = false;
+        els.input.disabled = false;
+        els.input.focus();
+      }
     }
   }
 

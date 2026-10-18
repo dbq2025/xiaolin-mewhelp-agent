@@ -77,6 +77,28 @@ async def test_hallucinated_order_number_falls_back():
     assert result.source == "fallback"
 
 
+async def test_hallucinated_alphanumeric_order_falls_back():
+    model = _Model('{"resolved":"订单 A1234 能退吗","changed":true}')
+    result = await CorefResolver(model).resolve("那它能退吗", [])
+    assert result.resolved == "那它能退吗"
+    assert result.source == "fallback"
+
+
+async def test_hallucinated_short_model_falls_back():
+    model = _Model('{"resolved":"F94 能退吗","changed":true}')
+    result = await CorefResolver(model).resolve("那它能退吗", [])
+    assert result.resolved == "那它能退吗"
+    assert result.source == "fallback"
+
+
+async def test_prefix_truncated_order_falls_back():
+    history = [HumanMessage(content="订单 20240115001 的物流到哪了")]
+    model = _Model('{"resolved":"订单 20240115 能退吗","changed":true}')
+    result = await CorefResolver(model).resolve("那它能退吗", history)
+    assert result.resolved == "那它能退吗"
+    assert result.source == "fallback"
+
+
 async def test_timeout_falls_back():
     class _Slow:
         async def ainvoke(self, *args, **kwargs):
