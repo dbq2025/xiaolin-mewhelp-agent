@@ -23,6 +23,9 @@ dependencies = [
     # 嵌入走硅基流动的云端 API（上游 DeepSeek 无 /embeddings）。
     # httpx 本来就是传递依赖，但我们直接 import 了它，所以显式声明。
     "httpx>=0.28",
+    # ch05：LangGraph 官方 SQLite checkpointer（图状态持久化）。
+    # 它是独立官方包，不在 langgraph 主包里；测试注入 InMemorySaver，不落盘。
+    "langgraph-checkpoint-sqlite>=3.1.2",
 ]
 
 [dependency-groups]
