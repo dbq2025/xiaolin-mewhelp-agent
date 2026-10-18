@@ -101,6 +101,9 @@
     const tools = el('div', 'tool-records');
     tools.hidden = true;
     tools.setAttribute('aria-label', '工具调用记录');
+    // ch06：指代补全/意图/订单选择这些流程信息放在正文上方，不混进回答文本。
+    const flow = el('div', 'flow-notes');
+    flow.hidden = true;
     const body = el('div', 'bubble-content');
 
     if (typing) {
@@ -110,6 +113,7 @@
     }
 
     bubble.appendChild(tools);
+    bubble.appendChild(flow);
     bubble.appendChild(body);
     wrap.appendChild(bubble);
     row.appendChild(avatar);
@@ -123,6 +127,7 @@
       bubble,
       body,
       tools,
+      flow,
       // 渲染状态挂在消息节点上：多次工具调用、增量结果与最终 done 都改这一份。
       toolState: { items: [], open: new Set() },
     };
@@ -441,6 +446,186 @@
     }
   }
 
+  const INTENT_LABELS = {
+    logistics: '物流',
+    order: '订单',
+    product_consult: '商品咨询',
+    refund_return: '退款退货',
+    after_sales: '售后',
+    complaint: '投诉',
+    chitchat: '闲聊',
+    other: '其他',
+  };
+
+  function addFlowNote(target, text) {
+    if (!text) return;
+    target.flow.hidden = false;
+    target.flow.appendChild(el('div', 'flow-note', text));
+  }
+
+  function showCoref(target, data) {
+    if (!data || !data.changed || !data.resolved) return;
+    addFlowNote(target, `已补全：${data.resolved}`);
+  }
+
+  function showIntent(target, data) {
+    if (!data || !data.intent) return;
+    const label = INTENT_LABELS[data.intent] || data.intent;
+    const confidence = typeof data.confidence === 'number'
+      ? ` · ${Math.round(data.confidence * 100)}%` : '';
+    addFlowNote(target, `意图：${label}${confidence}`);
+  }
+
+  function formatCardTime(iso) {
+    if (!iso) return '';
+    const when = new Date(iso);
+    if (Number.isNaN(when.getTime())) return String(iso);
+    return when.toLocaleString('zh-CN', {
+      month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
+    });
+  }
+
+  function renderOrderPicker(target, data, ctx) {
+    if (!data || !Array.isArray(data.orders) || !data.orders.length) return;
+    const box = el('div', 'order-picker');
+    box.appendChild(el('div', 'order-picker-title', '请选择要办理的订单'));
+    data.orders.forEach((order) => {
+      const card = el('button', 'order-card');
+      card.type = 'button';
+      card.dataset.orderId = order.order_id || '';
+      const head = el('div', 'order-card-head');
+      head.appendChild(el('span', 'order-card-title', order.title || order.order_id || '订单'));
+      head.appendChild(el('span', 'order-card-amount',
+        order.amount_yuan ? `¥${order.amount_yuan}` : ''));
+      card.appendChild(head);
+      card.appendChild(el('div', 'order-card-meta',
+        [order.order_id, order.status, formatCardTime(order.created_at)]
+          .filter(Boolean).join(' · ')));
+      card.appendChild(el('span', 'order-card-hint', '点击选择这一单'));
+      card.addEventListener('click', () => {
+        if (card.disabled) return;
+        box.querySelectorAll('button').forEach((button) => { button.disabled = true; });
+        resumeRefund(ctx, order, target);
+      });
+      box.appendChild(card);
+    });
+    target.flow.hidden = false;
+    target.flow.appendChild(box);
+  }
+
+  async function resumeRefund(ctx, order, target) {
+    if (!sessionId || !order || !order.order_id) {
+      addNotice('会话或订单信息缺失，请重新发起退款。', true);
+      return;
+    }
+    addFlowNote(target, `已选择订单 ${order.order_id}，正在继续…`);
+    setStatus('正在继续…', 'ok');
+    try {
+      const resp = await fetch('/api/chat/refund/select', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId, order_id: order.order_id }),
+      });
+      if (!resp.ok) {
+        const payload = await resp.json().catch(() => null);
+        const err = (payload && payload.error) || {};
+        throw new Error(err.message || `HTTP ${resp.status}`);
+      }
+      ctx.awaiting = false;
+      ctx.acc = '';
+      ctx.bot.body.innerHTML = '';
+      await consumeStream(resp, ctx);
+      ctx.finish();
+      setStatus('已连接', 'ok');
+    } catch (err) {
+      addNotice(`继续退款流程失败：${err && err.message ? err.message : err}`, true);
+      setStatus('继续失败', 'bad');
+      target.flow.querySelectorAll('.order-card').forEach((card) => { card.disabled = false; });
+    }
+  }
+
+  function attachRefundForm(target, form) {
+    if (!form || !form.order_id) return;
+    const existing = target.wrap.querySelector('.refund-form');
+    if (existing) existing.remove();
+
+    const box = el('form', 'refund-form');
+    box.appendChild(el('div', 'refund-form-title', '申请退款'));
+    box.appendChild(el('div', 'refund-form-order', form.order_label || form.order_id));
+
+    const row = el('div', 'refund-form-row');
+    const label = el('label', 'refund-form-label', '退款原因');
+    const select = el('select', 'refund-select');
+    (form.reasons || []).forEach((reason) => {
+      const option = el('option', null, reason);
+      option.value = reason;
+      select.appendChild(option);
+    });
+    label.appendChild(select);
+    row.appendChild(label);
+    const submit = el('button', 'refund-submit', '提交退款申请');
+    submit.type = 'submit';
+    row.appendChild(submit);
+    box.appendChild(row);
+    box.appendChild(el('div', 'refund-form-note', '原因只用于这次申请，不会在对话里反复追问。'));
+
+    box.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      submit.disabled = true;
+      const original = submit.textContent;
+      submit.textContent = '提交中…';
+      try {
+        const resp = await fetch('/api/actions/create-refund', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: sessionId,
+            order_id: form.order_id,
+            reason: select.value,
+            idempotency_key: `${sessionId || 'anon'}:${form.order_id}`,
+          }),
+        });
+        const payload = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          const err = (payload && payload.error) || {};
+          throw new Error(err.message || `HTTP ${resp.status}`);
+        }
+        box.replaceChildren(
+          el('div', 'refund-success', `已提交退款申请，工单号 ${payload.refund_no}。`)
+        );
+      } catch (err) {
+        submit.disabled = false;
+        submit.textContent = original;
+        addNotice(`提交退款单失败：${err && err.message ? err.message : err}`, true);
+      }
+    });
+
+    target.wrap.appendChild(box);
+    scrollToBottom();
+  }
+
+  async function consumeStream(resp, ctx) {
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let match;
+      while ((match = FRAME_SEP.exec(buf)) !== null) {
+        const block = buf.slice(0, match.index);
+        buf = buf.slice(match.index + match[0].length);
+        const frame = parseFrame(block);
+        if (frame) applyFrame(frame, ctx);
+      }
+    }
+    if (buf.trim()) {
+      const frame = parseFrame(buf);
+      if (frame) applyFrame(frame, ctx);
+    }
+  }
+
   function applyFrame(frame, ctx) {
     const { event, data } = frame;
 
@@ -448,6 +633,31 @@
       if (data.session_id && data.session_id !== sessionId) {
         sessionId = data.session_id;
         sessionStorage.setItem(SESSION_KEY, sessionId);
+      }
+      return;
+    }
+
+    if (event === 'coref') {
+      showCoref(ctx.bot, data);
+      return;
+    }
+
+    if (event === 'intent') {
+      showIntent(ctx.bot, data);
+      return;
+    }
+
+    if (event === 'order_picker') {
+      renderOrderPicker(ctx.bot, data, ctx);
+      return;
+    }
+
+    if (event === 'awaiting_input') {
+      ctx.awaiting = true;
+      ctx.bot.body.innerHTML = '';
+      setStatus('等待选择订单', 'ok');
+      if (!ctx.bot.flow.querySelector('.order-picker') && data.orders) {
+        renderOrderPicker(ctx.bot, data, ctx);
       }
       return;
     }
@@ -477,6 +687,7 @@
     }
 
     if (event === 'done') {
+      ctx.awaiting = false;
       ctx.finish();
       setToolRecords(ctx.bot, data.tools);
       // 引用与反馈都挂在最终答案上：流式过程中 cites 还没到，先不管。
@@ -486,6 +697,7 @@
         route: data.route,
         sourceText: ctx.userText,
       });
+      attachRefundForm(ctx.bot, data.refund_form);
       if (els.stats.checked) {
         const s = el('div', 'stats');
         s.innerHTML = `上下文：保留 <code>${data.kept}</code> 条，`
@@ -842,6 +1054,7 @@
     const ctx = {
       bot,
       userText: text,
+      awaiting: false,
       get acc() { return acc; },
       set acc(v) { acc = v; },
       showStatus(toolEvent) {
@@ -860,6 +1073,11 @@
       },
       finish() {
         if (settled) return;
+        if (ctx.awaiting) {
+          // 暂停轮还没有回答：保留选择器，不要画「客服没有返回内容」。
+          if (!acc) bot.body.innerHTML = '';
+          return;
+        }
         settled = true;
         bot.body.innerHTML = acc
           ? renderMarkdown(acc)
@@ -897,30 +1115,7 @@
 
       setStatus('已连接', 'ok');
       bot.body.innerHTML = '';         // 清掉三点等待
-
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder('utf-8');
-      let buf = '';
-
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-
-        let m;
-        while ((m = FRAME_SEP.exec(buf)) !== null) {
-          const block = buf.slice(0, m.index);
-          buf = buf.slice(m.index + m[0].length);
-          const frame = parseFrame(block);
-          if (frame) applyFrame(frame, ctx);
-        }
-      }
-
-      // 收尾：流结束时若最后一段没有以空行结束，也要处理掉
-      if (buf.trim()) {
-        const frame = parseFrame(buf);
-        if (frame) applyFrame(frame, ctx);
-      }
+      await consumeStream(resp, ctx);
       ctx.finish();
     } catch (err) {
       failRunningTools(bot, '连接中断，未拿到工具结果');
