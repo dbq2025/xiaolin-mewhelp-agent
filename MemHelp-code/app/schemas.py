@@ -130,7 +130,13 @@ class ChatResponse(BaseModel):
     context: ContextStats = Field(default_factory=ContextStats, description="本轮上下文裁剪统计。")
     #: ch05：与 SSE `done` 同形的编排摘要。默认值让旧调用方（ch01/ch02 测试）
     #: 不需要改构造参数。
-    tools: list[dict[str, Any]] = Field(default_factory=list, description="本轮工具轨迹。")
+    tools: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "本轮工具轨迹。每项含 name / args / ok / duration_ms / attempts / "
+            "started_at / result / error，供界面展示工具调用记录。"
+        ),
+    )
     citations: list[dict[str, Any]] = Field(default_factory=list, description="本轮引用快照。")
     actions: list[dict[str, Any]] = Field(
         default_factory=list, description="本轮建议动作（转人工/建工单）。"
@@ -157,7 +163,8 @@ class SessionMessagesResponse(BaseModel):
         default_factory=list,
         description=(
             "历史消息。``tools`` 字段（可缺省）是本轮的工具轨迹，"
-            "每项含 name / args / ok / duration_ms / attempts；"
+            "每项含 name / args / ok / duration_ms / attempts / started_at / "
+            "result / error（后三项在旧历史里可能缺省）；"
             "``actions`` 是本轮建议动作（转人工 / 建工单）。"
         ),
     )

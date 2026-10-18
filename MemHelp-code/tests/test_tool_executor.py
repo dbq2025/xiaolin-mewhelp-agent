@@ -135,7 +135,19 @@ async def test_result_summary_is_serialisable_for_the_done_frame(repos):
     summary = result.summary()
     assert summary["name"] == "query_order"
     assert summary["ok"] is True
-    assert set(summary) == {"name", "args", "ok", "duration_ms", "attempts"}
+    assert set(summary) == {
+        "name",
+        "args",
+        "ok",
+        "duration_ms",
+        "attempts",
+        "started_at",
+        "result",
+        "error",
+    }
+    assert summary["started_at"].endswith("+00:00")
+    assert '"ok": true' in summary["result"]
+    assert summary["error"] is None
     json.dumps(summary)  # 不可序列化会抛
 
 

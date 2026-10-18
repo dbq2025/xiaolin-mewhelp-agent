@@ -141,6 +141,11 @@ body {
   background: var(--bot-bubble);
   border: 1px solid var(--line);
   box-shadow: var(--shadow);
+  min-width: 0;
+}
+
+.bubble-content {
+  min-width: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -171,19 +176,148 @@ body {
 }
 .stats code { font-size: 11px; background: #f1f3f6; padding: 1px 4px; border-radius: 4px; }
 
-/* ---- ch02：工具执行状态行（气泡上方，工具跑起来那一刻出现）---- */
-.tool-status {
-  font-size: 11.5px;
-  color: var(--accent);
-  padding: 0 4px;
+/* ---- 工具调用记录（气泡内容顶部，随历史一起还原）----
+ * 视觉参考飞书截图：每条调用是一枚虚线胶囊，左侧扳手图标，中间「调用了 xxx」，
+ * 右侧状态（执行中 / 成功 / 失败）与耗时。默认折叠，点开看参数与结果。
+ */
+
+.tool-records {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 10px;
+  white-space: normal;
+}
+
+.tool-records[hidden] { display: none; }
+
+.tool-record {
+  border: 1px dashed #cbd5e1;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: var(--ink-soft);
+  overflow: hidden;
+  transition: background .15s ease, border-color .15s ease, border-radius .15s ease;
+}
+
+.tool-record.is-open {
+  border-radius: 11px;
+  background: #f8fafc;
+}
+
+.tool-record.is-running {
+  border-color: #93b4f8;
+  background: #f4f8ff;
+}
+
+.tool-record.is-success {
+  border-color: #cbd5e1;
+}
+
+.tool-record.is-failed {
+  border-color: #f0b9a8;
+  background: #fff8f5;
+}
+
+.tool-record-summary {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 7px;
+  width: 100%;
+  min-height: 31px;
+  padding: 4px 9px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer;
 }
-.tool-status[hidden] { display: none; }
-/* 转圈：让「在查数据」有进行中的感觉，而不是一行静止的文字 */
-.tool-status::before {
-  content: '';
+
+.tool-record-summary:hover { color: var(--ink); }
+.tool-record-summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: inherit;
+}
+
+.tool-record-icon {
+  width: 21px;
+  height: 21px;
+  flex: 0 0 21px;
+  display: grid;
+  place-items: center;
+  border: 1px dashed #c6ceda;
+  border-radius: 50%;
+  color: #64748b;
+}
+
+.tool-record-icon svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tool-record.is-running .tool-record-icon { color: var(--accent); border-color: #a9c2f8; }
+
+.tool-record-label {
+  min-width: 0;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+
+.tool-record-name {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #334155;
+  background: #eef2f7;
+  border-radius: 4px;
+  padding: 1px 5px;
+  overflow-wrap: anywhere;
+}
+
+.tool-record-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tool-record-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.tool-record-status.running { color: var(--accent); }
+.tool-record-status.success { color: #15803d; }
+.tool-record-status.failed { color: #c2410c; }
+
+.tool-record-state-icon {
+  width: 12px; height: 12px;
+  display: grid; place-items: center;
+}
+.tool-record-state-icon svg {
+  width: 12px; height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tool-record-spinner {
   width: 9px; height: 9px;
   border: 1.5px solid currentColor;
   border-top-color: transparent;
@@ -192,39 +326,75 @@ body {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* ---- ch02：工具轨迹徽章（气泡下方，随历史一起还原）---- */
-.tool-badges {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  padding: 0 4px;
+.tool-record-duration { color: #94a3b8; }
+
+.tool-record-chevron {
+  width: 13px; height: 13px;
+  display: grid; place-items: center;
+  color: #94a3b8;
+  transition: transform .15s ease;
 }
-.tool-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
+.tool-record-chevron svg {
+  width: 13px; height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.tool-record.is-open .tool-record-chevron { transform: rotate(180deg); }
+
+.tool-record-detail {
+  border-top: 1px dashed #dbe2ea;
+  padding: 8px 10px 10px;
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+.tool-record-detail[hidden] { display: none; }
+
+.tool-record-detail-row {
+  display: grid;
+  grid-template-columns: 66px minmax(0, 1fr);
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.tool-record-detail-label {
+  color: #94a3b8;
+  white-space: nowrap;
+}
+
+.tool-record-detail-value {
+  color: #475569;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.tool-record-detail-value.mono {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 11px;
-  line-height: 1;
-  color: var(--ink-soft);
-  background: #f1f3f6;
-  border: 1px solid #e2e6ec;
-  border-radius: 999px;
-  padding: 3px 9px;
-  /* 工具名与耗时是等宽场景，用 tabular 避免徽章宽度跳动 */
-  font-variant-numeric: tabular-nums;
 }
-.tool-badge-icon { font-size: 10px; }
-.tool-badge-name { color: var(--ink); font-weight: 500; }
-.tool-badge-result { color: #1f9254; }
-.tool-badge-time { color: #9aa2af; }
-/* 失败用暖色描边而不是纯红底：徽章是信息，不是告警横幅 */
-.tool-badge.failed {
-  background: #fdf1ee;
+
+pre.tool-record-detail-value {
+  margin: 0;
+  max-height: 132px;
+  overflow: auto;
+  padding: 6px 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #fff;
+  white-space: pre;
+  overflow-wrap: normal;
+  color: #334155;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.tool-record.is-failed pre.tool-record-detail-value {
   border-color: #f3d3c9;
+  background: #fffafa;
 }
-.tool-badge.failed .tool-badge-result { color: #c2410c; }
-/* 用户自己的气泡不做徽章，但历史回读时可能出现在 ai 行上，故只作用于 bot 侧 */
-.row.user .tool-status, .row.user .tool-badges { display: none; }
 
 /* 打字光标 */
 .caret {
@@ -519,7 +689,30 @@ body {
 
 @media (max-width: 720px) {
   .app { border-left: 0; border-right: 0; max-width: none; }
-  .bubble-wrap { max-width: 84%; }
+  .bubble-wrap { max-width: 88%; }
   .messages { padding: 16px 12px 6px; }
   .composer { padding: 10px 12px 8px; }
+
+  .tool-record { border-radius: 12px; }
+  .tool-record-summary {
+    flex-wrap: wrap;
+    gap: 4px 6px;
+    padding: 7px 9px;
+    border-radius: 12px;
+  }
+  .tool-record-label { white-space: normal; }
+  .tool-record-meta {
+    width: 100%;
+    margin-left: 28px;
+    gap: 8px;
+  }
+  .tool-record-chevron { margin-left: auto; }
+  .tool-record-detail-row { grid-template-columns: 60px minmax(0, 1fr); }
+  pre.tool-record-detail-value { max-height: 110px; font-size: 10.5px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-record,
+  .tool-record-chevron { transition: none; }
+  .tool-record-spinner { animation-duration: 1.8s; }
 }

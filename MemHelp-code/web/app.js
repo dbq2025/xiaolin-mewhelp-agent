@@ -5,15 +5,17 @@
  * 自己按 SSE 规范切帧（event: / data: / 空行分隔）。
  *
  * 后端事件契约（见 app/api.py::_chat_stream_body）：
- *   event: meta    data: {session_id, model}
- *   event: status  data: {tool, args, label}   ← ch02：工具执行**之前**推，显示「正在查询物流…」
- *   event: token   data: {delta}               ← 逐字增量
- *   event: done    data: {finish_reason, session_id, trimmed, kept, tools}
- *   event: error   data: {type, message, session_id}
+ *   event: meta         data: {session_id, model}
+ *   event: status       data: {tool, args, label, call_id}
+ *   event: tool_result  data: {call_id, tool: {name, args, ok, duration_ms, ...}}
+ *   event: tools        data: {tools}          ← 本轮结束时的权威轨迹
+ *   event: token        data: {delta}          ← 逐字增量
+ *   event: done         data: {finish_reason, session_id, trimmed, kept, tools}
+ *   event: error        data: {type, message, session_id}
  *
- * ch02 的 done.tools 是本轮工具轨迹的**权威来源**（含成败与耗时），
- * 徽章只用它渲染；status 帧只负责让用户立刻看到「在查数据」，不承担持久化职责。
- * 历史回读（/messages）返回的每条消息也可能带 tools 字段，复用同一个渲染函数。
+ * status 帧让工具记录立刻以「执行中」出现；tool_result 帧把同一条记录翻成
+ * 成功/失败；done.tools 与历史回读再用完整摘要校对一遍。历史旧数据可能没有
+ * started_at / result / error，渲染函数会降级显示而不是报错。
  */
 
 (() => {
@@ -94,35 +96,46 @@
     const avatar = el('div', 'avatar ' + (role === 'user' ? 'me' : 'bot'),
                        role === 'user' ? '我' : '美');
     const wrap = el('div', 'bubble-wrap');
-    // 工具执行状态行：在气泡**上方**，工具跑起来那一刻出现，拿到第一个 token 后隐去。
-    const status = el('div', 'tool-status');
-    status.hidden = true;
     const bubble = el('div', 'bubble');
+    // 工具调用记录是气泡内容的第一块，顺序与飞书截图一致：记录在上，回答在下。
+    const tools = el('div', 'tool-records');
+    tools.hidden = true;
+    tools.setAttribute('aria-label', '工具调用记录');
+    const body = el('div', 'bubble-content');
 
     if (typing) {
       const dots = el('span', 'typing');
       dots.innerHTML = '<i></i><i></i><i></i>';
-      bubble.appendChild(dots);
+      body.appendChild(dots);
     }
 
-    wrap.appendChild(status);
+    bubble.appendChild(tools);
+    bubble.appendChild(body);
     wrap.appendChild(bubble);
     row.appendChild(avatar);
     row.appendChild(wrap);
     els.messages.appendChild(row);
     scrollToBottom(true);
 
-    return { row, wrap, bubble, status };
+    return {
+      row,
+      wrap,
+      bubble,
+      body,
+      tools,
+      // 渲染状态挂在消息节点上：多次工具调用、增量结果与最终 done 都改这一份。
+      toolState: { items: [], open: new Set() },
+    };
   }
 
-  /* ---------------------------------------------------------- 工具轨迹徽章
+  /* ------------------------------------------------------- 工具调用记录
    *
-   * 形如：🔧 查询物流 · 成功 · 12ms
+   * 一条记录三种状态：running / success / failed。所有用户可见文本都走
+   * ``textContent``（工具名、参数、结果都可能来自模型），只有固定的 SVG 图标
+   * 使用 innerHTML。
    *
-   * 渲染成 DOM 节点（不是 innerHTML）—— 工具名与参数来自模型输出，
-   * 走 innerHTML 就是一个现成的 XSS 面。textContent 天然免疫。
-   *
-   * label 用中文短语而不是工具名：用户看到「查询物流」比 query_logistics 有用。
+   * 默认折叠成虚线胶囊，点击展开参数、结果、状态、耗时与调用时间；失败时
+   * 自动展开，让用户不用再点一次就能看到原因。
    */
   const TOOL_LABELS = {
     query_order: '查询订单',
@@ -132,39 +145,254 @@
     create_ticket: '创建工单',
   };
 
-  function renderToolBadges(tools) {
-    const box = el('div', 'tool-badges');
-    (tools || []).forEach((t) => {
-      const badge = el('span', 'tool-badge' + (t.ok === false ? ' failed' : ''));
-      badge.appendChild(el('span', 'tool-badge-icon', '🔧'));
-      badge.appendChild(el('span', 'tool-badge-name',
-                           TOOL_LABELS[t.name] || t.name || '未知工具'));
-      badge.appendChild(el('span', 'tool-badge-result', t.ok === false ? '失败' : '成功'));
-      if (typeof t.duration_ms === 'number') {
-        badge.appendChild(el('span', 'tool-badge-time', t.duration_ms + 'ms'));
-      }
-      if (t.ok === false && t.error) {
-        badge.title = t.error;      // 失败原因放 title，不占视觉空间
-      }
-      box.appendChild(badge);
+  const TOOL_ICONS = {
+    wrench: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.1 5.1L3 18l3 3 6.6-6.6a4 4 0 0 0 5.1-5.1l-2.3 2.3-2.3-.6-.6-2.3 2.2-2.4Z"/></svg>',
+    check: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>',
+    alert: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2 21h20L12 3Z"/><path d="M12 9v5m0 3h.01"/></svg>',
+    chevron: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>',
+  };
+
+  let toolRecordSeq = 0;
+
+  function normaliseTool(raw, fallback = {}) {
+    const source = raw || {};
+    const ok = typeof source.ok === 'boolean'
+      ? source.ok
+      : (typeof fallback.ok === 'boolean' ? fallback.ok : undefined);
+    const status = source.status
+      || (ok === false ? 'failed' : ok === true ? 'success' : (fallback.status || 'running'));
+    return {
+      call_id: source.call_id || fallback.call_id || '',
+      name: source.name || fallback.name || '未知工具',
+      args: source.args !== undefined ? source.args : (fallback.args || {}),
+      ok,
+      status,
+      duration_ms: typeof source.duration_ms === 'number'
+        ? source.duration_ms
+        : (typeof fallback.duration_ms === 'number' ? fallback.duration_ms : null),
+      attempts: typeof source.attempts === 'number'
+        ? source.attempts
+        : (typeof fallback.attempts === 'number' ? fallback.attempts : null),
+      started_at: source.started_at || fallback.started_at || null,
+      result: source.result !== undefined ? source.result : (fallback.result ?? null),
+      error: source.error !== undefined ? source.error : (fallback.error ?? null),
+      label: source.label || fallback.label || '',
+    };
+  }
+
+  function toolStatusOf(item) {
+    if (item.status === 'failed') return { key: 'failed', label: '失败' };
+    if (item.status === 'success') return { key: 'success', label: '成功' };
+    return { key: 'running', label: '执行中' };
+  }
+
+  function toolKey(item, index = 0) {
+    if (item.call_id) return 'call:' + item.call_id;
+    return `${item.name}:${JSON.stringify(item.args || {})}:${index}`;
+  }
+
+  function prettyToolValue(value, emptyText = '无') {
+    if (value === null || value === undefined || value === '') return emptyText;
+    let parsed = value;
+    if (typeof value === 'string') {
+      try { parsed = JSON.parse(value); } catch { return value; }
+    }
+    try { return JSON.stringify(parsed, null, 2); } catch { return String(value); }
+  }
+
+  function formatDuration(ms) {
+    return typeof ms === 'number' ? `${ms} ms` : '未记录';
+  }
+
+  function formatToolTime(iso) {
+    if (!iso) return '未记录';
+    const when = new Date(iso);
+    if (Number.isNaN(when.getTime())) return String(iso);
+    return when.toLocaleString('zh-CN', {
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
     });
+  }
+
+  function toolDetailRow(label, value, { pre = false, mono = false } = {}) {
+    const row = el('div', 'tool-record-detail-row');
+    row.appendChild(el('span', 'tool-record-detail-label', label));
+    const valueEl = el(pre ? 'pre' : 'span',
+      'tool-record-detail-value' + (mono ? ' mono' : ''), value);
+    row.appendChild(valueEl);
+    return row;
+  }
+
+  function renderToolRecord(target, item, index) {
+    const state = toolStatusOf(item);
+    const key = toolKey(item, index);
+    const open = target.toolState.open.has(key);
+    const detailId = `tool-record-detail-${++toolRecordSeq}`;
+
+    const box = el('section',
+      `tool-record is-${state.key}` + (open ? ' is-open' : ''));
+    box.dataset.toolKey = key;
+
+    const button = el('button', 'tool-record-summary');
+    button.type = 'button';
+    button.setAttribute('aria-expanded', open ? 'true' : 'false');
+    button.setAttribute('aria-controls', detailId);
+    button.title = TOOL_LABELS[item.name] || item.name;
+
+    const icon = el('span', 'tool-record-icon');
+    icon.innerHTML = TOOL_ICONS.wrench;
+
+    const label = el('span', 'tool-record-label');
+    label.appendChild(document.createTextNode('调用了 '));
+    label.appendChild(el('code', 'tool-record-name', item.name));
+
+    const meta = el('span', 'tool-record-meta');
+    const chip = el('span', `tool-record-status ${state.key}`);
+    if (state.key === 'running') {
+      chip.appendChild(el('span', 'tool-record-spinner'));
+    } else {
+      const stateIcon = el('span', 'tool-record-state-icon');
+      stateIcon.innerHTML = state.key === 'success' ? TOOL_ICONS.check : TOOL_ICONS.alert;
+      chip.appendChild(stateIcon);
+    }
+    chip.appendChild(document.createTextNode(state.label));
+    meta.appendChild(chip);
+    if (typeof item.duration_ms === 'number') {
+      meta.appendChild(el('span', 'tool-record-duration', formatDuration(item.duration_ms)));
+    }
+
+    const chevron = el('span', 'tool-record-chevron');
+    chevron.innerHTML = TOOL_ICONS.chevron;
+
+    button.appendChild(icon);
+    button.appendChild(label);
+    button.appendChild(meta);
+    button.appendChild(chevron);
+
+    const detail = el('div', 'tool-record-detail');
+    detail.id = detailId;
+    detail.hidden = !open;
+
+    detail.appendChild(toolDetailRow('调用参数', prettyToolValue(item.args), {
+      pre: true, mono: true,
+    }));
+    if (state.key === 'failed') {
+      detail.appendChild(toolDetailRow('失败原因',
+        item.error || '工具没有返回失败原因', { pre: true }));
+    } else {
+      detail.appendChild(toolDetailRow('调用结果',
+        item.result ? prettyToolValue(item.result) : '暂无结果快照', {
+          pre: true, mono: Boolean(item.result),
+        }));
+    }
+    detail.appendChild(toolDetailRow('状态', state.label));
+    detail.appendChild(toolDetailRow('耗时', formatDuration(item.duration_ms)));
+    detail.appendChild(toolDetailRow('尝试次数',
+      item.attempts === null ? '未记录' : `${item.attempts} 次`));
+    detail.appendChild(toolDetailRow('调用时间', formatToolTime(item.started_at)));
+
+    button.addEventListener('click', () => {
+      const isOpen = target.toolState.open.has(key);
+      if (isOpen) target.toolState.open.delete(key);
+      else target.toolState.open.add(key);
+      box.classList.toggle('is-open', !isOpen);
+      detail.hidden = isOpen;
+      button.setAttribute('aria-expanded', isOpen ? 'false' : 'true');
+    });
+
+    box.appendChild(button);
+    box.appendChild(detail);
     return box;
   }
 
-  /* 把徽章挂到气泡下方，并把本轮轨迹写进 dataset —— 刷新后从 /messages 回读时
-   * 用同一份数据渲染，所以徽章不会「刷新就消失」。
-   *
-   * ``target`` 就是 ``addRow()`` 的返回值 ``{row, wrap, ...}``，两个调用点都传它：
-   * 流式那一轮传 ``ctx.bot``，历史回读传 ``row``。
-   * 别再传「外层 ctx」——它只有 ``bot``，没有 ``wrap``/``row``，
-   * 曾经因此在这里抛 TypeError，被 send() 的 catch 变成「网络或脚本错误」。 */
-  function attachTools(target, tools) {
-    if (!tools || !tools.length) return;
-    const existing = target.wrap.querySelector('.tool-badges');
-    if (existing) existing.remove();
-    target.wrap.appendChild(renderToolBadges(tools));
-    target.row.dataset.tools = JSON.stringify(tools);
+  function renderToolRecords(target) {
+    const items = target.toolState.items;
+    target.tools.innerHTML = '';
+    target.tools.hidden = items.length === 0;
+    items.forEach((item, index) => {
+      target.tools.appendChild(renderToolRecord(target, item, index));
+    });
+  }
+
+  /* 用权威摘要重建整组记录（done.tools 与 /messages 回读共用）。
+     用下标保留用户已展开的行，刷新或流结束时不会突然收起。 */
+  function setToolRecords(target, tools) {
+    const previous = target.toolState.items || [];
+    const previousOpen = new Set();
+    previous.forEach((item, index) => {
+      if (target.toolState.open.has(toolKey(item, index))) previousOpen.add(index);
+    });
+
+    const items = (tools || []).map((raw) => normaliseTool(raw));
+    target.toolState.items = items;
+    target.toolState.open = new Set();
+    items.forEach((item, index) => {
+      if (previousOpen.has(index) || item.status === 'failed') {
+        target.toolState.open.add(toolKey(item, index));
+      }
+    });
+
+    renderToolRecords(target);
+    if (tools && tools.length) target.row.dataset.tools = JSON.stringify(tools);
     scrollToBottom();
+  }
+
+  function addRunningTool(target, data) {
+    if (!data || !data.tool || data.tool === 'suggest_actions') return;
+    const item = normaliseTool({
+      call_id: data.call_id || '',
+      name: data.tool,
+      args: data.args || {},
+      status: 'running',
+      label: data.label || '',
+    });
+    const existing = item.call_id
+      ? target.toolState.items.findIndex((it) => it.call_id === item.call_id)
+      : -1;
+    if (existing >= 0) target.toolState.items[existing] = item;
+    else target.toolState.items.push(item);
+    renderToolRecords(target);
+    scrollToBottom();
+  }
+
+  function applyToolResult(target, data) {
+    if (!data || !data.tool) return;
+    const raw = data.tool;
+    const callId = data.call_id || raw.call_id || '';
+    let index = callId
+      ? target.toolState.items.findIndex((it) => it.call_id === callId)
+      : -1;
+    if (index < 0) {
+      index = target.toolState.items.findIndex((it) => (
+        it.status === 'running'
+        && it.name === raw.name
+        && JSON.stringify(it.args || {}) === JSON.stringify(raw.args || {})
+      ));
+    }
+    const fallback = index >= 0 ? target.toolState.items[index] : {};
+    const item = normaliseTool({ ...raw, call_id: callId || fallback.call_id }, fallback);
+    if (index < 0) {
+      target.toolState.items.push(item);
+      index = target.toolState.items.length - 1;
+    } else {
+      target.toolState.items[index] = item;
+    }
+    if (item.status === 'failed') target.toolState.open.add(toolKey(item, index));
+    renderToolRecords(target);
+    scrollToBottom();
+  }
+
+  function failRunningTools(target, message) {
+    let changed = false;
+    target.toolState.items.forEach((item, index) => {
+      if (item.status !== 'running') return;
+      item.status = 'failed';
+      item.ok = false;
+      item.error = item.error || message || '调用中断';
+      target.toolState.open.add(toolKey(item, index));
+      changed = true;
+    });
+    if (changed) renderToolRecords(target);
   }
 
   function welcome() {
@@ -225,14 +453,24 @@
     }
 
     if (event === 'status') {
-      // 工具执行**之前**到达：先让用户看到「在查数据」，而不是干等。
-      ctx.showStatus(data.label || '正在查询…');
+      // 工具执行**之前**到达：立刻出现一条「执行中」记录。
+      ctx.showStatus(data);
+      return;
+    }
+
+    if (event === 'tool_result') {
+      // 工具刚返回：只更新对应那条记录，不等最终 done。
+      applyToolResult(ctx.bot, data);
+      return;
+    }
+
+    if (event === 'tools') {
+      // 权威摘要先于 done 到达；这里校对整组记录（含失败原因与结果预览）。
+      setToolRecords(ctx.bot, data.tools);
       return;
     }
 
     if (event === 'token') {
-      // 第一个字到了就说明工具那段结束了，把状态行收掉。
-      ctx.hideStatus();
       ctx.acc += data.delta || '';
       ctx.queuePaint();
       return;
@@ -240,9 +478,9 @@
 
     if (event === 'done') {
       ctx.finish();
-      attachTools(ctx.bot, data.tools);
+      setToolRecords(ctx.bot, data.tools);
       // 引用与反馈都挂在最终答案上：流式过程中 cites 还没到，先不管。
-      decorateCitations(ctx.bot.bubble, data.citations);
+      decorateCitations(ctx.bot.body, data.citations);
       attachFeedback(ctx.bot);
       attachActions(ctx.bot, data.actions, {
         route: data.route,
@@ -459,7 +697,7 @@
     addNotice('已转接人工客服');
     const greeting = addRow('bot');
     greeting.row.dataset.simulated = '1';   // 不计入 bot 序号，避免刷新后按钮锁串位
-    greeting.bubble.textContent = '您好，我是客服小猫，请问有什么可以帮您的？';
+    greeting.body.textContent = '您好，我是客服小猫，请问有什么可以帮您的？';
     scrollToBottom(true);
   }
 
@@ -562,15 +800,15 @@
         const row = addRow(role);
         if (role === 'user') {
           lastUserText = m.content || '';
-          row.bubble.textContent = m.content || '';
+          row.body.textContent = m.content || '';
         } else {
-          row.bubble.innerHTML = m.content
+          row.body.innerHTML = m.content
             ? renderMarkdown(m.content)
             : '<span style="color:#9aa2af">（客服没有返回内容）</span>';
-          // 徽章随历史一起还原 —— 这正是「刷新后徽章还在」的实现
-          attachTools(row, m.tools);
+          // 工具记录随历史一起还原 —— 这正是「刷新后记录还在」的实现。
+          setToolRecords(row, m.tools);
           // 引用与反馈同理：刷新后角标仍可点、已反馈仍是已反馈
-          decorateCitations(row.bubble, m.citations);
+          decorateCitations(row.body, m.citations);
           attachFeedback(row);
           // ch05：建议动作也随历史还原；建单描述回退到上一条用户消息。
           attachActions(row, m.actions, { sourceText: lastUserText });
@@ -593,7 +831,7 @@
     els.input.value = '';
     autoGrow();
 
-    addRow('user').bubble.textContent = text;
+    addRow('user').body.textContent = text;
     const bot = addRow('bot', { typing: true });
 
     // 流式渲染状态。累积原始文本，用 rAF 合并成一次 DOM 写入，避免逐字抖动。
@@ -606,37 +844,33 @@
       userText: text,
       get acc() { return acc; },
       set acc(v) { acc = v; },
-      showStatus(text) {
-        bot.status.textContent = text;
-        bot.status.hidden = false;
-        scrollToBottom();
-      },
-      hideStatus() {
-        bot.status.hidden = true;
-        bot.status.textContent = '';
+      showStatus(toolEvent) {
+        // 兼容旧调用点传入纯文本；工具事件则直接落成一条执行中记录。
+        if (typeof toolEvent === 'string') return;
+        addRunningTool(bot, toolEvent);
       },
       queuePaint() {
         if (paintQueued) return;
         paintQueued = true;
         requestAnimationFrame(() => {
           paintQueued = false;
-          bot.bubble.innerHTML = renderMarkdown(acc) + '<span class="caret"></span>';
+          bot.body.innerHTML = renderMarkdown(acc) + '<span class="caret"></span>';
           scrollToBottom();
         });
       },
       finish() {
         if (settled) return;
         settled = true;
-        bot.bubble.innerHTML = acc
+        bot.body.innerHTML = acc
           ? renderMarkdown(acc)
           : '<span style="color:#9aa2af">（客服没有返回内容）</span>';
         scrollToBottom();
       },
       fail(data) {
         settled = true;
-        ctx.hideStatus();
+        failRunningTools(bot, data.message || '调用中断');
         if (!acc) bot.row.remove();
-        else bot.bubble.innerHTML = renderMarkdown(acc);
+        else bot.body.innerHTML = renderMarkdown(acc);
         addNotice(`出错了：${data.type || 'error'}\n${data.message || ''}`, true);
         if (data.type === 'configuration_error') setStatus('.env 未配置', 'bad');
         if (data.type === 'database_error') setStatus('数据库不可用', 'bad');
@@ -662,7 +896,7 @@
       }
 
       setStatus('已连接', 'ok');
-      bot.bubble.innerHTML = '';       // 清掉三点等待
+      bot.body.innerHTML = '';         // 清掉三点等待
 
       const reader = resp.body.getReader();
       const decoder = new TextDecoder('utf-8');
@@ -689,6 +923,7 @@
       }
       ctx.finish();
     } catch (err) {
+      failRunningTools(bot, '连接中断，未拿到工具结果');
       if (!acc) bot.row.remove();
       settled = true;
       addNotice(`网络或脚本错误：${err && err.message ? err.message : err}`, true);

@@ -77,6 +77,17 @@ async def test_one_tool_call_then_final():
     assert outcome.tool_traces[0]["name"] == "query_logistics"
     assert outcome.tool_records[0]["tool_call_id"] == "call_1"
 
+    # 工具执行完就推一条结果帧，界面才能在最终回答生成期间把「执行中」改成
+    # 「成功/失败」，而不是一直转圈到 done。
+    status_index = next(i for i, e in enumerate(events) if e.get("type") == "status")
+    result_index = next(i for i, e in enumerate(events) if e.get("type") == "tool_result")
+    assert status_index < result_index
+    result_event = events[result_index]
+    assert result_event["call_id"] == "call_1"
+    assert result_event["tool"]["name"] == "query_logistics"
+    assert result_event["tool"]["ok"] is True
+    assert "started_at" in result_event["tool"]
+
 
 async def test_complex_question_takes_two_tool_steps():
     model = ScriptedChatModel(

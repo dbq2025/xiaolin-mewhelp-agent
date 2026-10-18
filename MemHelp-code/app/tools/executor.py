@@ -28,6 +28,7 @@ import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import ValidationError
@@ -44,6 +45,10 @@ from app.tools.registry import TOOL_NAMES, get_tool
 #: 4000 字符约等于 1000~1500 token，对客服场景的工具体量足够。
 MAX_TOOL_RESULT_CHARS = 4000
 
+#: 工具记录详情里展示的结果预览上限（字符）。完整结果仍按原契约回灌模型，
+#: 这里只截给界面用，避免一条上万字的 FAQ 把气泡撑爆。
+TOOL_TRACE_PREVIEW_CHARS = 600
+
 
 @dataclass(frozen=True)
 class ToolResult:
@@ -59,6 +64,8 @@ class ToolResult:
     #: 实际尝试次数（含首次）。未知工具为 0。
     attempts: int
     duration_ms: int = 0
+    #: 工具开始执行的 UTC 时间。给界面展示「调用时间」，不参与模型历史。
+    started_at: str | None = None
     #: 是否因为瞬时错误重试过（供留痕与调试）。
     retried: bool = False
     #: 失败归类：``tool``（参数/业务/未知工具）或 ``database``（库不可用）。
@@ -66,13 +73,21 @@ class ToolResult:
     fault: str | None = None
 
     def summary(self) -> dict[str, Any]:
-        """给 SSE ``done.tools`` 与落库用的精简描述。"""
+        """给 SSE 工具记录与落库用的精简描述。
+
+        在 ch02 的五个字段之外补充 ``started_at`` / ``result`` / ``error``：
+        前端详情面板要展示调用时间与结果，刷新回读也靠同一份摘要。
+        ``result`` 只放截断后的预览，完整数据仍走 ``ToolMessage``。
+        """
         return {
             "name": self.tool,
             "args": self.args,
             "ok": self.ok,
             "duration_ms": self.duration_ms,
             "attempts": self.attempts,
+            "started_at": self.started_at,
+            "result": _preview_value(self.data) if self.ok else None,
+            "error": _preview_text(self.error) if not self.ok else None,
         }
 
 
@@ -149,6 +164,28 @@ def _serialise(data: Any) -> Any:
     return data
 
 
+def _preview_text(value: Any, *, limit: int = TOOL_TRACE_PREVIEW_CHARS) -> str | None:
+    """截断给界面看的文本；空值保持 None，前端据此显示「无」。"""
+    if value is None:
+        return None
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "…"
+
+
+def _preview_value(value: Any, *, limit: int = TOOL_TRACE_PREVIEW_CHARS) -> str | None:
+    """把工具返回值压成可读的 JSON 预览，失败时退回普通字符串。"""
+    if value is None:
+        return None
+    serialised = _serialise(value)
+    try:
+        text = json.dumps(serialised, ensure_ascii=False)
+    except (TypeError, ValueError):
+        text = str(serialised)
+    return _preview_text(text, limit=limit)
+
+
 def to_tool_message_content(result: ToolResult) -> str:
     """把结果编码成 ``ToolMessage`` 的正文。
 
@@ -223,6 +260,7 @@ async def execute_tool(
         任何加载方式下都稳定。
     """
     started = time.perf_counter()
+    started_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
     def _elapsed_ms() -> int:
         return int((time.perf_counter() - started) * 1000)
@@ -246,6 +284,7 @@ async def execute_tool(
             error=redact(f"工具 {name} 无法加载：{type(exc).__name__}: {exc}"),
             attempts=0,
             duration_ms=_elapsed_ms(),
+            started_at=started_at,
             fault="tool",
         )
 
@@ -258,6 +297,7 @@ async def execute_tool(
             error=redact(f"未知工具 {name!r}。可用工具：{', '.join(TOOL_NAMES)}"),
             attempts=0,
             duration_ms=_elapsed_ms(),
+            started_at=started_at,
             fault="tool",
         )
 
@@ -275,6 +315,7 @@ async def execute_tool(
                 error=redact(_validation_error_text(exc)),
                 attempts=1,
                 duration_ms=_elapsed_ms(),
+                started_at=started_at,
                 fault="tool",
             )
         call_args = validated.model_dump()
@@ -306,6 +347,7 @@ async def execute_tool(
                 error=None,
                 attempts=attempts,
                 duration_ms=_elapsed_ms(),
+                started_at=started_at,
                 retried=retried,
             )
 
@@ -326,6 +368,7 @@ async def execute_tool(
         error=redact(reason),
         attempts=attempts,
         duration_ms=_elapsed_ms(),
+        started_at=started_at,
         retried=retried,
         fault="database" if is_database_fault(last_error) else "tool",
     )

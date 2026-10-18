@@ -145,6 +145,7 @@ def test_status_frame_payload_is_complete(test_settings, fake_repositories):
     assert status["tool"] == "query_logistics"
     assert status["args"] == {"order_id": "1001"}
     assert status["label"].endswith("…")
+    assert status["call_id"] == "call_1"
 
 
 def test_no_status_frame_when_the_model_does_not_call_a_tool(test_settings, fake_repositories):
@@ -161,6 +162,26 @@ def test_no_status_frame_when_the_model_does_not_call_a_tool(test_settings, fake
 # ---------------------------------------------------------------------------
 
 
+def test_tool_result_frame_updates_the_running_tool_immediately(
+    test_settings, fake_repositories
+):
+    """工具一执行完就推结果，前端不必等整轮结束才从「执行中」翻成「成功」。"""
+    events = _stream(
+        _client(test_settings, fake_repositories, _tool_model()),
+        {"session_id": "s1", "message": "订单 1001 的物流到哪了"},
+    )
+    names = [n for n, _ in events]
+    result = next(d for n, d in events if n == "tool_result") or {}
+
+    assert "tool_result" in names
+    assert names.index("status") < names.index("tool_result")
+    assert result["call_id"] == "call_1"
+    assert result["tool"]["name"] == "query_logistics"
+    assert result["tool"]["ok"] is True
+    assert result["tool"]["started_at"]
+    assert result["tool"]["result"]
+
+
 def test_done_frame_carries_the_tools_array(test_settings, fake_repositories):
     """``done.tools`` 是徽章的权威来源。"""
     events = _stream(
@@ -173,6 +194,7 @@ def test_done_frame_carries_the_tools_array(test_settings, fake_repositories):
     assert done["tools"][0]["name"] == "query_logistics"
     assert done["tools"][0]["ok"] is True
     assert "duration_ms" in done["tools"][0]
+    assert done["tools"][0]["started_at"]
 
 
 def test_done_frame_has_an_empty_tools_array_without_a_tool_call(test_settings, fake_repositories):

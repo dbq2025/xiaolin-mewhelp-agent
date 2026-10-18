@@ -610,6 +610,14 @@ async def _chat_stream_body(
                 yield sse_frame("token", {"delta": event.get("delta") or ""})
             elif kind == "tools":
                 yield sse_frame("tools", {"tools": event.get("tools") or []})
+            elif kind == "tool_result":
+                yield sse_frame(
+                    "tool_result",
+                    {
+                        "call_id": event.get("call_id") or "",
+                        "tool": event.get("tool") or {},
+                    },
+                )
             elif kind == "citations":
                 yield sse_frame("citations", {"citations": event.get("citations") or []})
             elif kind == "done":

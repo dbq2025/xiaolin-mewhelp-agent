@@ -28,6 +28,7 @@ import json
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -123,7 +124,9 @@ def _emit(emit: Callable[[dict[str, Any]], None] | None, payload: dict[str, Any]
         emit(payload)
 
 
-def _status_payload(name: str, args: dict[str, Any]) -> dict[str, Any]:
+def _status_payload(
+    name: str, args: dict[str, Any], call_id: str = ""
+) -> dict[str, Any]:
     label = (
         "正在记录建议…"
         if name == "suggest_actions"
@@ -134,6 +137,8 @@ def _status_payload(name: str, args: dict[str, Any]) -> dict[str, Any]:
         "tool": name,
         "args": args,
         "label": label,
+        # 前端靠它是把「执行中」那条记录精确对应到结果帧，而不是按工具名猜。
+        "call_id": call_id,
     }
 
 
@@ -229,7 +234,7 @@ async def run_react_agent(
         name = str(chosen.get("name", ""))
         args = dict(chosen.get("args") or {})
         call_id = str(chosen.get("id", ""))
-        _emit(emit, _status_payload(name, args))
+        _emit(emit, _status_payload(name, args, call_id))
 
         if name == "suggest_actions":
             content, record = await _run_suggest_actions(tools_by_name, args, call_id)
@@ -249,6 +254,7 @@ async def run_react_agent(
                 ),
                 attempts=0,
                 duration_ms=0,
+                started_at=datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
             )
             tool_traces.append(result.summary())
             content = to_tool_message_content(result)
@@ -287,6 +293,18 @@ async def run_react_agent(
                 faq_evidence = await evidence_from_tool_result(result, repositories)
                 tools = [tool for tool in tools if tool.name != "query_faq"]
                 tools_by_name.pop("query_faq", None)
+
+        # 工具刚执行完就播报结果：用户不必等最终回答生成完才看到「成功/失败」。
+        # suggest_actions 是内部控制面工具，不属于用户可见的工具调用记录。
+        if name != "suggest_actions":
+            _emit(
+                emit,
+                {
+                    "type": "tool_result",
+                    "call_id": call_id,
+                    "tool": result.summary(),
+                },
+            )
 
         tool_message = ToolMessage(content=content, tool_call_id=call_id)
         loop_messages.append(tool_message)
