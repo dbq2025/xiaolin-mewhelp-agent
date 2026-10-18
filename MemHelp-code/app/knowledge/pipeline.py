@@ -120,11 +120,7 @@ class RagPipeline:
         self, query: str, *, category: str | None = None
     ) -> RetrievalOutcome:
         """理解 → 检索 → 两道闸 → 证据。不抛业务异常（空结果是正常结果）。"""
-        understood = await self._understander.understand(query)
-        result = await self._retriever.retrieve(
-            self._strategy, understood, category=category
-        )
-        chunks: tuple[RetrievedChunk, ...] = tuple(result.chunks[: self._top_n])
+        understood, result, chunks = await self._retrieve(query, category=category)
 
         if not chunks:
             return self._refuse(
@@ -175,6 +171,55 @@ class RagPipeline:
             rerank_degraded=result.rerank_degraded,
             self_check_degraded=verdict.degraded,
         )
+
+    async def retrieve_only(
+        self, query: str, *, category: str | None = None
+    ) -> RetrievalOutcome:
+        """只做「理解 → 检索 → 0 命中/分数阈值」，**不调用自评模型**。
+
+        ch05 的置信度闸卡在 Agent 之前：它要判断的是「检索证据够不够把问题交给
+        Agent」，不是「模型觉得够不够」。如果这里复用 `answer_context`，每轮知识类
+        问题都会多一次自评调用，而且 ch04 的正式自评会盖掉本章的最简阈值版。
+        """
+        understood, result, chunks = await self._retrieve(query, category=category)
+
+        if not chunks:
+            return self._refuse(
+                understood,
+                source="retrieval_low_conf",
+                reason="检索没有命中任何知识块",
+                rerank_degraded=result.rerank_degraded,
+            )
+
+        if self._strategy == ONLINE_STRATEGY and not result.rerank_degraded:
+            top_score = float(chunks[0].score)
+            if top_score < self._min_score:
+                return self._refuse(
+                    understood,
+                    source="retrieval_low_conf",
+                    reason=(
+                        f"最高重排分 {top_score:.3f} 低于阈值 {self._min_score}，"
+                        "证据相关性不足"
+                    ),
+                    rerank_degraded=result.rerank_degraded,
+                )
+
+        return RetrievalOutcome(
+            query=understood,
+            evidence=build_evidence(chunks),
+            refused=False,
+            rerank_degraded=result.rerank_degraded,
+        )
+
+    async def _retrieve(
+        self, query: str, *, category: str | None = None
+    ) -> tuple[UnderstoodQuery, StrategyResult, tuple[RetrievedChunk, ...]]:
+        """理解 + 检索 + 截断到 top_n。两个公开入口共用，避免闸的口径漂移。"""
+        understood = await self._understander.understand(query)
+        result = await self._retriever.retrieve(
+            self._strategy, understood, category=category
+        )
+        return understood, result, tuple(result.chunks[: self._top_n])
 
     @staticmethod
     def _refuse(
