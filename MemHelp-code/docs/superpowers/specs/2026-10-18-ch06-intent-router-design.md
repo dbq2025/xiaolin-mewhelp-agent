@@ -405,7 +405,7 @@ INTENT_TO_ROUTE = {
   5. 只判断「这一单能不能退/能不能售后」，说明依据与下一步；
   6. 证据不足时明确说无法确认，不编造政策数字，不承诺到账时间；
   7. 订单数据缺失（`refund_order_error`）时，先说明「订单信息没取到」，给重试/转人工建议，不猜订单。
-- 工具集沿用 refund 出口：`query_order` / `query_product` / `query_logistics` / `query_faq` / `suggest_actions`（无 `create_ticket`）；Prompt 要求不要重复查订单与政策，但保留工具作为兜底。
+- 工具集：`query_order` / `query_product` / `query_logistics` / `suggest_actions`；**无 `query_faq`**（政策已强制预检索，避免二次检索与引用编号冲突），**无 `create_ticket`**（退款单由用户在前端提交）。Prompt 要求不要重复查订单与政策，但保留查询工具作为兜底。
 - 不调用 `confidence_gate`；`gate_passed` 在退款子流程里可以不设置（`total=False`），done 里按 `gate.passed=None` 呈现。
 - 输出 `refund_form`：
   ```json
