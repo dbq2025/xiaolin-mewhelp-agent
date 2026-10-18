@@ -84,16 +84,24 @@ def agent_tools(
     retriever: AnswerContextLike | None,
     *,
     include_faq: bool,
+    include_order: bool = True,
     record_actions: list[SuggestedAction],
 ) -> list[BaseTool]:
     """本轮 Agent 可用的工具。
 
     :param include_faq: 业务数据出口为 True（Agent 可自己查政策）；
         知识出口为 False（已经强制预检索，避免二次检索与引用编号冲突）。
+    :param include_order: 退款子流程传 False：订单快照已由系统查好并锁死，
+        再给 `query_order`/`query_logistics` 会让模型拿另一个编号再查一次，
+        出现「系统快照 A 单、Agent 自报 B 单」。产品/商品查询仍保留。
     :param record_actions: 控制面工具写入的动作列表。
     """
     tools = [tool for tool in get_tools(repositories, retriever) if tool.name != "create_ticket"]
     if not include_faq:
         tools = [tool for tool in tools if tool.name != "query_faq"]
+    if not include_order:
+        tools = [
+            tool for tool in tools if tool.name not in ("query_order", "query_logistics")
+        ]
     tools.append(make_suggest_actions_tool(record_actions))
     return tools

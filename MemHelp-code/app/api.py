@@ -18,6 +18,7 @@ guard 里抛 ``HTTPException`` 只会直接返回 422，**不会回落到第二�
 帧编码抽到 ``app.sse`` 并由 ``tests/test_sse.py`` 单独钉住。
 """
 
+import hashlib
 import inspect
 import json
 import logging
@@ -38,7 +39,12 @@ from sqlalchemy.exc import InterfaceError, OperationalError, PendingRollbackErro
 from app.agent.checkpoint import open_checkpointer
 from app.agent.graph import build_agent_graph
 from app.agent.persist import persist_user_only
-from app.agent.runner import astream_turn, complete_turn
+from app.agent.runner import (
+    astream_resume,
+    astream_turn,
+    complete_turn,
+    pending_interrupt,
+)
 from app.config import PROJECT_ROOT, Settings, get_settings
 from app.db.repositories import Repositories
 from app.db.session import create_engine_from, ping, session_factory
@@ -71,11 +77,14 @@ from app.schemas import (
     ChatRequest,
     ChatResponse,
     ContextStats,
+    CreateRefundRequest,
+    CreateRefundResponse,
     CreateTicketRequest,
     CreateTicketResponse,
     ErrorResponse,
     ExtractRequest,
     FaithCaseUpdateRequest,
+    RefundSelectRequest,
     SessionMessagesResponse,
 )
 from app.sse import SSE_MEDIA_TYPE, sse_frame
@@ -421,6 +430,62 @@ def get_model(request: Request) -> BaseChatModel:
         ) from exc
 
 
+#: 意图模型客户端进程内复用：与 engine/embedder/Milvus 的教训同源，
+#: 每请求新建会让连接池随请求数增长。键含 base_url/key/model/timeout。
+_INTENT_MODEL_CACHE: dict[tuple[str, str, str, float], BaseChatModel] = {}
+
+#: 同一 session 的退款续跑互斥：两个 select 并发会让同一 thread 跑两遍。
+_RESUME_INFLIGHT: set[str] = set()
+
+
+def _cached_intent_model(settings: Settings, model_name: str) -> BaseChatModel:
+    key = (
+        settings.openai_base_url,
+        settings.openai_api_key,
+        model_name,
+        settings.request_timeout,
+    )
+    model = _INTENT_MODEL_CACHE.get(key)
+    if model is None:
+        model = get_chat_model(settings, model_name=model_name)
+        _INTENT_MODEL_CACHE[key] = model
+    return model
+
+
+def get_intent_model(request: Request) -> BaseChatModel:
+    """意图主模型；`INTENT_MODEL` 为空时复用聊天主模型。"""
+    injected = getattr(request.app.state, "intent_model", None)
+    if injected is not None:
+        return injected
+    settings = get_app_settings(request)
+    if not settings.intent_model:
+        return get_model(request)
+    try:
+        return _cached_intent_model(settings, settings.intent_model)
+    except Exception as exc:  # noqa: BLE001
+        raise UpstreamError(
+            redact(f"意图模型配置非法，请检查 INTENT_MODEL：{exc}"),
+            type_="configuration_error",
+        ) from exc
+
+
+def get_intent_cheap_model(request: Request) -> BaseChatModel | None:
+    """成本档小模型；没配返回 None，成本档自动不启用。"""
+    injected = getattr(request.app.state, "intent_cheap_model", None)
+    if injected is not None:
+        return injected
+    settings = get_app_settings(request)
+    if not settings.intent_cheap_model:
+        return None
+    try:
+        return _cached_intent_model(settings, settings.intent_cheap_model)
+    except Exception as exc:  # noqa: BLE001
+        raise UpstreamError(
+            redact(f"意图小模型配置非法，请检查 INTENT_CHEAP_MODEL：{exc}"),
+            type_="configuration_error",
+        ) from exc
+
+
 def get_app_settings(request: Request) -> Settings:
     injected = getattr(request.app.state, "settings", None)
     if injected is not None:
@@ -575,6 +640,58 @@ def _tool_traces(
     return traces
 
 
+def _sse_event(event: dict[str, Any]) -> str | None:
+    """把 runner 事件映射成 SSE 帧；未知事件丢弃。"""
+    kind = event.get("type")
+    if kind == "status":
+        return sse_frame("status", event)
+    if kind == "coref":
+        return sse_frame(
+            "coref",
+            {
+                "original": event.get("original") or "",
+                "resolved": event.get("resolved") or "",
+                "changed": bool(event.get("changed")),
+            },
+        )
+    if kind == "intent":
+        return sse_frame(
+            "intent",
+            {
+                "intent": event.get("intent"),
+                "confidence": event.get("confidence"),
+                "source": event.get("source"),
+            },
+        )
+    if kind == "order_picker":
+        return sse_frame(
+            "order_picker",
+            {
+                "turn_id": event.get("turn_id"),
+                "orders": event.get("orders") or [],
+            },
+        )
+    if kind == "awaiting_input":
+        return sse_frame("awaiting_input", event.get("payload") or {})
+    if kind == "token":
+        return sse_frame("token", {"delta": event.get("delta") or ""})
+    if kind == "tools":
+        return sse_frame("tools", {"tools": event.get("tools") or []})
+    if kind == "tool_result":
+        return sse_frame(
+            "tool_result",
+            {
+                "call_id": event.get("call_id") or "",
+                "tool": event.get("tool") or {},
+            },
+        )
+    if kind == "citations":
+        return sse_frame("citations", {"citations": event.get("citations") or []})
+    if kind == "done":
+        return sse_frame("done", event.get("payload") or {})
+    return None
+
+
 async def _chat_stream_body(
     req: ChatRequest,
     settings: Settings,
@@ -584,6 +701,8 @@ async def _chat_stream_body(
     session_id: str,
     graph: Any,
     retriever: AnswerContextLike | None = None,
+    intent_model: BaseChatModel | None = None,
+    intent_cheap_model: BaseChatModel | None = None,
 ) -> AsyncIterable[str]:
     """SSE 响应体：``meta`` → ``status``? → ``token``* → ``tools``? →
     ``citations``? → ``done``。
@@ -599,29 +718,15 @@ async def _chat_stream_body(
             session_id=session_id,
             message=req.message,
             model=model,
+            intent_model=intent_model,
+            intent_cheap_model=intent_cheap_model,
             repositories=repositories,
             retriever=retriever,
             settings=settings,
         ):
-            kind = event.get("type")
-            if kind == "status":
-                yield sse_frame("status", event)
-            elif kind == "token":
-                yield sse_frame("token", {"delta": event.get("delta") or ""})
-            elif kind == "tools":
-                yield sse_frame("tools", {"tools": event.get("tools") or []})
-            elif kind == "tool_result":
-                yield sse_frame(
-                    "tool_result",
-                    {
-                        "call_id": event.get("call_id") or "",
-                        "tool": event.get("tool") or {},
-                    },
-                )
-            elif kind == "citations":
-                yield sse_frame("citations", {"citations": event.get("citations") or []})
-            elif kind == "done":
-                yield sse_frame("done", event.get("payload") or {})
+            frame = _sse_event(event)
+            if frame is not None:
+                yield frame
     except Exception as exc:  # noqa: BLE001 - 必须转成事件，不能让连接裸断
         err = _as_upstream_error(exc)
         try:
@@ -632,6 +737,74 @@ async def _chat_stream_body(
             "error", {"type": err.type, "message": redact(str(err)), "session_id": session_id}
         )
         return
+
+
+async def _delete_thread(graph: Any, session_id: str) -> None:
+    """续跑失败后清掉未收敛的 checkpoint，避免 session 永久 409。"""
+    saver = getattr(graph, "checkpointer", None)
+    delete = getattr(saver, "adelete_thread", None)
+    if delete is None:
+        logger.warning("checkpointer 不支持 adelete_thread，无法清理 session=%s", session_id)
+        return
+    try:
+        await delete(session_id)
+    except Exception:  # noqa: BLE001 - 清理失败只告警，错误帧已经要发了
+        logger.exception("清理未收敛 checkpoint 失败（session=%s）", session_id)
+
+
+async def _refund_resume_body(
+    req: RefundSelectRequest,
+    settings: Settings,
+    model: BaseChatModel,
+    intent_model: BaseChatModel | None,
+    intent_cheap_model: BaseChatModel | None,
+    repositories: Repositories,
+    graph: Any,
+    retriever: AnswerContextLike | None = None,
+    *,
+    release_session: str | None = None,
+    recover_message: str = "",
+    persist_on_error: bool = False,
+) -> AsyncIterable[str]:
+    """订单点选后的续跑流；不重复落用户轮（暂停轮仍只有 checkpoint）。"""
+    yield sse_frame("meta", {"session_id": req.session_id, "model": settings.openai_model})
+    try:
+        async for event in astream_resume(
+            graph,
+            session_id=req.session_id,
+            order_id=req.order_id,
+            model=model,
+            intent_model=intent_model,
+            intent_cheap_model=intent_cheap_model,
+            repositories=repositories,
+            retriever=retriever,
+            settings=settings,
+        ):
+            frame = _sse_event(event)
+            if frame is not None:
+                yield frame
+    except Exception as exc:  # noqa: BLE001 - 必须转成事件，不能让连接裸断
+        err = _as_upstream_error(exc)
+        if persist_on_error and recover_message:
+            try:
+                await persist_user_only(
+                    repositories, req.session_id, recover_message
+                )
+            except Exception:  # noqa: BLE001 - 落库失败不该盖住原始故障
+                logger.exception("续跑失败后落用户轮次也失败（已忽略）")
+        await _delete_thread(graph, req.session_id)
+        yield sse_frame(
+            "error",
+            {
+                "type": err.type,
+                "message": redact(str(err)),
+                "session_id": req.session_id,
+                "recovered": True,
+            },
+        )
+    finally:
+        if release_session is not None:
+            _RESUME_INFLIGHT.discard(release_session)
 
 
 # ---------------------------------------------------------------------------
@@ -732,6 +905,8 @@ def create_app(
     rag_eval_runner: Any = None,
     checkpointer: Any = None,
     agent_graph: Any = None,
+    intent_model: BaseChatModel | None = None,
+    intent_cheap_model: BaseChatModel | None = None,
 ) -> FastAPI:
     """构造应用。
 
@@ -766,6 +941,8 @@ def create_app(
     app.state.repositories = repositories
     app.state.db_ping = db_ping
     app.state.retriever = retriever
+    app.state.intent_model = intent_model
+    app.state.intent_cheap_model = intent_cheap_model
     app.state.rag_warmup = rag_warmup
     # 评估重跑是进程内长任务；注入点让测试不用真的拉起评估子进程。
     app.state.rag_eval_runner = rag_eval_runner or EvalRunner()
@@ -866,6 +1043,8 @@ def create_app(
         req: ChatRequest,
         settings_: Settings = Depends(get_app_settings),
         model_: BaseChatModel = Depends(get_model),
+        intent_model_: BaseChatModel = Depends(get_intent_model),
+        intent_cheap_model_: BaseChatModel | None = Depends(get_intent_cheap_model),
         store_: InMemorySessionStore = Depends(get_store),
         repositories_: Repositories = Depends(get_repositories),
         retriever_: AnswerContextLike = Depends(get_retriever),
@@ -891,6 +1070,8 @@ def create_app(
                     session_id,
                     graph_,
                     retriever_,
+                    intent_model_,
+                    intent_cheap_model_,
                 ),
                 media_type=SSE_MEDIA_TYPE,
             )
@@ -901,6 +1082,8 @@ def create_app(
                 session_id=session_id,
                 message=req.message,
                 model=model_,
+                intent_model=intent_model_,
+                intent_cheap_model=intent_cheap_model_,
                 repositories=repositories_,
                 retriever=retriever_,
                 settings=settings_,
@@ -911,6 +1094,14 @@ def create_app(
             except Exception:  # noqa: BLE001 - 落库失败不该盖住原始故障
                 logger.exception("上游失败后落库用户轮次也失败了（已忽略）")
             raise _as_upstream_error(exc) from exc
+
+        awaiting = done.get("awaiting_input") or {}
+        if awaiting.get("discarded_message"):
+            return _error(
+                409,
+                "refund_pending",
+                str(awaiting.get("message") or "请先选择要办理的订单。"),
+            )
 
         return JSONResponse(
             status_code=200,
@@ -927,6 +1118,9 @@ def create_app(
                 actions=list(done.get("actions") or []),
                 intent=done.get("intent"),
                 route=done.get("route"),
+                resolved_message=done.get("resolved_message"),
+                coref_changed=bool(done.get("coref_changed")),
+                awaiting_input=done.get("awaiting_input"),
                 agent_steps=int(done.get("agent_steps") or 0),
                 stop_reason=done.get("stop_reason"),
             ).model_dump(),
@@ -1019,6 +1213,210 @@ def create_app(
                 ticket_type=str(data.get("ticket_type") or req.ticket_type),
                 status=str(data.get("status") or "待处理"),
                 message=str(data.get("message") or f"已为你创建工单 {data['ticket_no']}。"),
+            ).model_dump(),
+        )
+
+    # -- ch06：订单点选续跑 -------------------------------------------------
+
+    @app.post(
+        "/api/chat/refund/select",
+        response_class=StreamingResponse,
+        responses={
+            200: {"description": "SSE：token / tools / citations / done（或再次 awaiting_input）"},
+            409: {"model": ErrorResponse},
+        },
+    )
+    async def refund_select(
+        req: RefundSelectRequest,
+        settings_: Settings = Depends(get_app_settings),
+        model_: BaseChatModel = Depends(get_model),
+        intent_model_: BaseChatModel = Depends(get_intent_model),
+        intent_cheap_model_: BaseChatModel | None = Depends(get_intent_cheap_model),
+        repositories_: Repositories = Depends(get_repositories),
+        retriever_: AnswerContextLike = Depends(get_retriever),
+        graph_: Any = Depends(get_agent_graph),
+    ):
+        """用户点选订单卡片后，从退款子流程的 checkpoint 续跑。"""
+        config = {"configurable": {"thread_id": req.session_id}}
+        try:
+            snapshot = await graph_.aget_state(config)
+        except Exception as exc:  # noqa: BLE001
+            err = _as_upstream_error(exc)
+            status = 503 if err.type == "database_error" else 502
+            return _error(status, err.type, redact(str(err)))
+
+        pending_nodes = tuple(getattr(snapshot, "next", ()) or ())
+        if (
+            "refund_await_order" not in pending_nodes
+            or pending_interrupt(snapshot) is None
+        ):
+            return _error(
+                409,
+                "no_pending_refund",
+                "没有待选择的订单：请先发起退款/售后问题。",
+            )
+        if req.session_id in _RESUME_INFLIGHT:
+            return _error(
+                409,
+                "refund_resume_in_progress",
+                "这一轮正在处理订单选择，请稍候。",
+            )
+        values = dict(getattr(snapshot, "values", {}) or {})
+        already_committed = (
+            values.get("last_committed_turn_id") == values.get("turn_id")
+        )
+        persist_on_error = (
+            bool(values.get("user_message"))
+            and not already_committed
+            and "log_turn" not in pending_nodes
+        )
+        _RESUME_INFLIGHT.add(req.session_id)
+
+        return StreamingResponse(
+            _refund_resume_body(
+                req,
+                settings_,
+                model_,
+                intent_model_,
+                intent_cheap_model_,
+                repositories_,
+                graph_,
+                retriever_,
+                release_session=req.session_id,
+                recover_message=str(values.get("user_message") or ""),
+                persist_on_error=persist_on_error,
+            ),
+            media_type=SSE_MEDIA_TYPE,
+        )
+
+    # -- ch06：用户提交退款单（复用 tickets，不新增退款表）-----------------
+
+    @app.post(
+        "/api/actions/create-refund",
+        response_model=CreateRefundResponse,
+        responses={422: {"model": ErrorResponse}, 502: {"model": ErrorResponse}},
+    )
+    async def create_refund_action(
+        req: CreateRefundRequest,
+        settings_: Settings = Depends(get_app_settings),
+        repositories_: Repositories = Depends(get_repositories),
+        graph_: Any = Depends(get_agent_graph),
+    ) -> JSONResponse:
+        """提交退款申请：以售后工单形式落 tickets，原因来自固定六类。"""
+        config = {"configurable": {"thread_id": req.session_id}}
+        try:
+            snapshot = await graph_.aget_state(config)
+        except Exception as exc:  # noqa: BLE001
+            err = _as_upstream_error(exc)
+            status = 503 if err.type == "database_error" else 502
+            return _error(status, err.type, redact(str(err)))
+
+        values = dict(getattr(snapshot, "values", {}) or {})
+        allowed = {
+            str(values.get("refund_order_id") or ""),
+            *(
+                str(item.get("order_id") or "")
+                for item in (values.get("refund_order_candidates") or [])
+            ),
+            str((values.get("refund_form") or {}).get("order_id") or ""),
+        }
+        allowed.discard("")
+        if req.order_id not in allowed:
+            return _error(
+                409,
+                "refund_order_mismatch",
+                "这个订单不在本轮退款流程里：请重新发起退款或从订单卡片选择。",
+            )
+
+        description = f"退款申请｜订单 {req.order_id}｜原因：{req.reason}"
+        # 幂等键命名空间化并压到 64 字符内；避免不同 session 用同一个 key
+        # 互相命中，把别人的工单号当成自己的成功。
+        idempotency_key = hashlib.sha256(
+            f"{req.session_id}:{req.idempotency_key}".encode("utf-8")
+        ).hexdigest()
+
+        try:
+            existing = await repositories_.tickets.find_by_idempotency_key(
+                idempotency_key
+            )
+        except Exception as exc:  # noqa: BLE001
+            err = _as_upstream_error(exc)
+            status = 503 if err.type == "database_error" else 502
+            return _error(status, err.type, redact(str(err)))
+
+        if existing is not None:
+            ticket_no, stored_description = existing
+            if stored_description != description:
+                return _error(
+                    409,
+                    "idempotency_conflict",
+                    "这个幂等键已经用于另一笔退款申请；请刷新后重试。",
+                )
+            return JSONResponse(
+                status_code=200,
+                content=CreateRefundResponse(
+                    ok=True,
+                    refund_no=ticket_no,
+                    ticket_no=ticket_no,
+                    order_id=req.order_id,
+                    reason=req.reason,
+                    status="待处理",
+                    message=f"这笔退款申请已提交，工单号 {ticket_no}。",
+                ).model_dump(),
+            )
+
+        result = await execute_tool(
+            "create_ticket",
+            {
+                "description": description,
+                "ticket_type": "售后",
+                "conversation_id": req.session_id,
+                "idempotency_key": idempotency_key,
+            },
+            repositories=repositories_,
+            retriever=None,
+            timeout=settings_.tool_timeout_seconds,
+            max_retries=settings_.tool_max_retries,
+        )
+        if not result.ok:
+            if result.fault == "database":
+                return _error(503, "database_error", "数据库暂时不可用，请稍后重试。")
+            return _error(
+                502,
+                "tool_error",
+                redact(f"提交退款单失败：{result.error or '工具返回失败'}"),
+            )
+
+        data = result.data
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except (ValueError, TypeError):
+                return _error(502, "tool_error", "提交退款单失败：工具返回了无法解析的结果。")
+        if not isinstance(data, dict) or not data.get("ticket_no"):
+            return _error(502, "tool_error", "提交退款单失败：工具没有返回工单号。")
+        stored_description = data.get("description")
+        if stored_description is not None and stored_description != description:
+            return _error(
+                409,
+                "idempotency_conflict",
+                "这个幂等键已经用于另一笔退款申请；请刷新后重试。",
+            )
+
+        ticket_no = str(data["ticket_no"])
+        return JSONResponse(
+            status_code=200,
+            content=CreateRefundResponse(
+                ok=True,
+                refund_no=ticket_no,
+                ticket_no=ticket_no,
+                order_id=req.order_id,
+                reason=req.reason,
+                status=str(data.get("status") or "待处理"),
+                message=str(
+                    data.get("message")
+                    or f"已提交退款申请，工单号 {ticket_no}。"
+                ),
             ).model_dump(),
         )
 

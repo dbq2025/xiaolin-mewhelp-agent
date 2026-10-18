@@ -1,10 +1,10 @@
-"""ch05 的 State 契约与「七类意图 → 四个出口」映射。
+"""State 契约与「八类意图 → 五个出口」映射。
 
 ## 为什么分流是常量表
 
-意图识别可以模型化，但**分流规则不能**。把七类归到四个出口是产品决策，
+意图识别可以模型化，但**分流规则不能**。把八类归到五个出口是产品决策，
 不是模型的自由；写成常量表后，任何一次路由变化都会在 diff 里出现，
-也能被 `test_seven_intents_map_to_four_exits` 逐项钉住。
+也能被 `test_eight_intents_map_to_five_exits` 逐项钉住。
 
 ## 为什么 messages 用 add_messages
 
@@ -38,13 +38,14 @@ Intent = Literal[
     "after_sales",
     "complaint",
     "chitchat",
+    "other",
 ]
 
-Route = Literal["knowledge", "business", "complaint", "chitchat"]
+Route = Literal["knowledge", "business", "refund", "complaint", "chitchat"]
 
 SuggestedAction = Literal["transfer_human", "create_ticket"]
 
-#: 七类意图的权威顺序（也是评估集与日志里的顺序）。
+#: 八类意图的权威顺序（也是评估集与日志里的顺序）。
 ALL_INTENTS: tuple[Intent, ...] = (
     "logistics",
     "order",
@@ -53,17 +54,22 @@ ALL_INTENTS: tuple[Intent, ...] = (
     "after_sales",
     "complaint",
     "chitchat",
+    "other",
 )
 
 #: 写死的分流表。改它必须同时改 spec §4.1 与测试。
+#:
+#: ch06：退款退货与售后统一走 `refund` 确定性子流程；`other` 走 business，
+#: 由主力 Agent 做需求澄清，不硬塞业务意图。
 INTENT_TO_ROUTE: dict[Intent, Route] = {
     "logistics": "business",
     "order": "business",
     "product_consult": "knowledge",
-    "refund_return": "knowledge",
-    "after_sales": "business",
+    "refund_return": "refund",
+    "after_sales": "refund",
     "complaint": "complaint",
     "chitchat": "chitchat",
+    "other": "business",
 }
 
 #: 未知意图的兜底出口。宁可多走一次 Agent，也不要被当成闲聊糊弄掉。
@@ -94,12 +100,31 @@ class AgentState(TypedDict, total=False):
     # -- 指代消解 / 意图 -------------------------------------------------
     resolved_message: str
     coref_changed: bool
+    coref_raw: str
+    coref_source: Literal["llm", "passthrough", "fallback"]
+    coref_reason: str
+    coref_llm_calls: int
     intent: Intent
     intent_confidence: float
     intent_raw: str
-    intent_source: Literal["llm", "heuristic", "rule"]
+    intent_source: Literal["llm", "llm_cheap", "llm_escalated", "heuristic", "rule"]
     intent_llm_calls: int
     route: Route
+
+    # -- 退款/售后确定性子流程 --------------------------------------------
+    refund_order_id: str
+    refund_order_candidates: list[dict[str, Any]]
+    refund_order: dict[str, Any]
+    refund_order_error: str
+    #: 通用政策问题（不指向某一单）：跳过选择器，但仍走扩写+政策检索。
+    refund_order_optional: bool
+    #: 候选生成失败，连「可选订单」都没有：直接进 Agent 说明无法确认。
+    refund_order_blocked: bool
+    expanded_queries: list[str]
+    query_expansion_raw: str
+    query_expansion_degraded: bool
+    query_expansion_llm_calls: int
+    refund_form: dict[str, Any]
 
     # -- 知识类 -----------------------------------------------------------
     retrieval_attempted: bool

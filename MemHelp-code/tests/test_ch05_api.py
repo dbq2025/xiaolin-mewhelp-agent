@@ -70,7 +70,7 @@ def test_sse_emits_tools_and_citations_for_knowledge_answer(test_settings):
     client = TestClient(
         main.create_app(
             model=ScriptedChatModel(
-                script=[_intent("refund_return"), text_turn("可以 7 天无理由退货 [1]。")]
+                script=[_intent("product_consult"), text_turn("续航约 12 小时 [1]。")]
             ),
             settings=test_settings,
             retriever=_Retriever(),
@@ -79,7 +79,7 @@ def test_sse_emits_tools_and_citations_for_knowledge_answer(test_settings):
     with client.stream(
         "POST",
         "/api/chat/completions",
-        json={"session_id": "s-know-api", "message": "退货政策是什么"},
+        json={"session_id": "s-know-api", "message": "XH-3000A 续航多久"},
     ) as resp:
         text = "".join(resp.iter_text())
 

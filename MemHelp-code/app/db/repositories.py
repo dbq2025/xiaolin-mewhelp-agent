@@ -935,6 +935,26 @@ class TicketRepository:
         self._session.commit()
         return ticket_no
 
+    def _find_by_idempotency_key(
+        self, idempotency_key: str
+    ) -> tuple[str, str] | None:
+        row = self._session.scalar(
+            select(Ticket).where(Ticket.idempotency_key == idempotency_key)
+        )
+        if row is None:
+            return None
+        return str(row.ticket_no), str(row.description)
+
+    async def find_by_idempotency_key(
+        self, idempotency_key: str
+    ) -> tuple[str, str] | None:
+        """返回 ``(ticket_no, description)``；没有命中返回 None。
+
+        退款端点用它判断「同一个 key 是不是同一笔申请」：同 key 不同描述
+        不能把旧工单号当作本次成功返回。
+        """
+        return await _run(self._find_by_idempotency_key, idempotency_key)
+
     async def create(
         self,
         conversation_id: int,

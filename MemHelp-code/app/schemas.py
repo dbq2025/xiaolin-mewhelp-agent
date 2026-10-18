@@ -143,6 +143,14 @@ class ChatResponse(BaseModel):
     )
     intent: str | None = Field(default=None, description="本轮意图。")
     route: str | None = Field(default=None, description="本轮出口。")
+    resolved_message: str | None = Field(
+        default=None, description="补全指代后的完整问题；未改写时等于原话。"
+    )
+    coref_changed: bool = Field(default=False, description="本轮是否补全了指代/改写。")
+    awaiting_input: dict[str, Any] | None = Field(
+        default=None,
+        description="非流式路径遇到订单选择时的中断载荷；非空表示本轮未完成。",
+    )
     agent_steps: int = Field(default=0, description="ReAct 执行了几轮工具。")
     stop_reason: str | None = Field(default=None, description="本轮停止原因。")
 
@@ -212,6 +220,70 @@ class CreateTicketResponse(BaseModel):
     ok: bool = True
     ticket_no: str = Field(description="工单号，形如 T20261018001。")
     ticket_type: str = Field(description="工单类型。")
+    status: str = Field(description="工单状态。")
+    message: str = Field(description="给用户看的一句话。")
+
+
+# --------------------------------------------------------------------------
+# ch06：订单选择续跑 / 退款单
+# --------------------------------------------------------------------------
+
+RefundReason = Literal[
+    "商品质量问题",
+    "尺寸/颜色/型号不合适",
+    "与描述不符",
+    "不想要了（七天无理由）",
+    "物流破损/少件",
+    "其他",
+]
+
+
+class RefundSelectRequest(BaseModel):
+    """用户点选订单卡片后的续跑请求。"""
+
+    session_id: str = Field(
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_-]+$",
+        description="会话 ID，与聊天接口同一个值。",
+    )
+    order_id: str = Field(
+        min_length=4,
+        max_length=32,
+        pattern=r"^[A-Za-z0-9-]+$",
+        description="用户点选的订单号；必须在本次候选列表里。",
+    )
+
+
+class CreateRefundRequest(BaseModel):
+    """用户提交退款单。"""
+
+    session_id: str = Field(
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_-]+$",
+        description="会话 ID。",
+    )
+    order_id: str = Field(
+        min_length=4,
+        max_length=32,
+        pattern=r"^[A-Za-z0-9-]+$",
+        description="退款订单号。",
+    )
+    reason: RefundReason = Field(description="退款原因，固定六类之一。")
+    idempotency_key: str = Field(
+        min_length=1,
+        max_length=64,
+        description="前端生成的一次性键；服务端会按 session 命名空间化。",
+    )
+
+
+class CreateRefundResponse(BaseModel):
+    """退款单提交结果（复用 tickets，以售后工单形式落库）。"""
+
+    ok: bool = True
+    refund_no: str = Field(description="退款单号（即工单号）。")
+    ticket_no: str = Field(description="工单号。")
+    order_id: str = Field(description="订单号。")
+    reason: str = Field(description="退款原因。")
     status: str = Field(description="工单状态。")
     message: str = Field(description="给用户看的一句话。")
 

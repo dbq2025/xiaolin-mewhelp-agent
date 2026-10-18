@@ -1,18 +1,23 @@
-"""意图识别 —— 模型分类 + 确定性兜底 + 逐字寒暄快速通道。
+"""意图识别 —— 八类（七类业务 + other 兜底）+ 质量档 / 成本档。
 
-## 三层，按成本递增
+## 为什么有质量档和成本档
 
-1. **快速通道**：整句命中 `TRIVIAL_CHITCHAT` → 直接 chitchat，零模型调用。
-   需求要求「闲聊不花模型调用」；但「在吗，退货政策是什么」不能被这条吞掉，
-   所以只做**整句**匹配，不做前缀/包含匹配。
-2. **模型分类**：一个简单 Prompt 输出七类 JSON；超时/异常/坏 JSON 都不抛。
-3. **启发式兜底**：关键词优先级表，默认 `after_sales`（business 出口）。
-   把真实问题误判成闲聊的代价，比多走一次 Agent 大。
+用户要求「默认配够格的大模型先把准确率做上去，成本吃紧时再走降级路」。
+所以默认只调主模型；`INTENT_COST_MODE=true` 且有 `INTENT_CHEAP_MODEL` 时，
+才先用小模型判一次，置信度低于阈值再让主模型重判。
 
-## 为什么 raw 要留着
+## 三层兜底
 
-意图错路由时，第一手证据是「模型原话是什么」。`intent_raw` 只进日志，不回给
-用户（可能含用户原句，但日志本来就有；不要进 SSE）。
+1. **快速通道**：整句命中 `TRIVIAL_CHITCHAT` → chitchat，零模型调用。
+   只做整句匹配，不做包含匹配：「在吗，退货政策是什么」不能被吞掉。
+2. **模型**：强制 JSON；坏 JSON/超时/异常都不抛。
+3. **启发式**：关键词优先级表，默认 `other`（交给主力 Agent 澄清），
+   不再默认 `after_sales` —— 拿不准的问题不该被硬塞进业务意图。
+
+## `other` 不是「模型失败」
+
+`other` 是模型的合法输出，`source` 仍是 `llm`；只有模型调用失败才走
+`heuristic`。两者在日志里必须能区分。
 """
 
 from __future__ import annotations
@@ -21,7 +26,7 @@ import asyncio
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -49,7 +54,10 @@ _ALIASES: dict[str, Intent] = {
     "售后": "after_sales",
     "投诉": "complaint",
     "闲聊": "chitchat",
+    "其他": "other",
 }
+
+IntentSource = Literal["llm", "llm_cheap", "llm_escalated", "heuristic", "rule"]
 
 
 @dataclass(frozen=True)
@@ -59,7 +67,8 @@ class IntentResult:
     intent: Intent
     confidence: float
     raw: str
-    source: Literal["llm", "heuristic", "rule"]
+    source: IntentSource
+    llm_calls: int = 0
 
 
 def _normalise(message: str) -> str:
@@ -107,12 +116,12 @@ _HEURISTIC_RULES: tuple[tuple[Intent, tuple[str, ...]], ...] = (
 
 
 def heuristic_intent(message: str) -> Intent:
-    """关键词优先级兜底。默认 `after_sales`（business 出口），不是 chitchat。"""
+    """关键词优先级兜底。默认 `other`（business 出口，由 Agent 澄清）。"""
     text = message or ""
     for intent, keywords in _HEURISTIC_RULES:
         if any(keyword in text for keyword in keywords):
             return intent
-    return "after_sales"
+    return "other"
 
 
 def _strip_code_fence(text: str) -> str:
@@ -166,18 +175,57 @@ def parse_intent_reply(reply: str) -> IntentResult | None:
 class IntentClassifier:
     """一次意图判断；**永不抛**（异常降级为启发式）。"""
 
-    def __init__(self, model: object, *, timeout: float = 5.0) -> None:
-        self._model = model
+    def __init__(
+        self,
+        primary_model: object,
+        *,
+        cheap_model: object | None = None,
+        timeout: float = 5.0,
+        confidence_threshold: float = 0.6,
+        cost_mode: bool = False,
+    ) -> None:
+        self._primary = primary_model
+        self._cheap = cheap_model
         self._timeout = timeout
+        self._threshold = confidence_threshold
+        self._cost_mode = cost_mode
 
     async def classify(self, message: str) -> IntentResult:
         if is_trivial_chitchat(message):
-            return IntentResult(intent="chitchat", confidence=1.0, raw="", source="rule")
+            return IntentResult(
+                intent="chitchat", confidence=1.0, raw="", source="rule"
+            )
 
+        calls = 0
+        last_raw = ""
+
+        if self._cost_mode and self._cheap is not None:
+            cheap, last_raw = await self._call(self._cheap, message)
+            calls += 1
+            if cheap is not None and cheap.confidence >= self._threshold:
+                return replace(cheap, source="llm_cheap", llm_calls=1)
+
+        primary, raw = await self._call(self._primary, message)
+        calls += 1
+        if raw:
+            last_raw = raw
+        if primary is not None:
+            source: IntentSource = "llm_escalated" if calls > 1 else "llm"
+            return replace(primary, source=source, llm_calls=calls)
+
+        return IntentResult(
+            intent=heuristic_intent(message),
+            confidence=0.0,
+            raw=last_raw,
+            source="heuristic",
+            llm_calls=calls,
+        )
+
+    async def _call(self, model: object, message: str) -> tuple[IntentResult | None, str]:
         raw = ""
         try:
             response = await asyncio.wait_for(
-                self._model.ainvoke(  # type: ignore[attr-defined]
+                model.ainvoke(  # type: ignore[attr-defined]
                     [
                         SystemMessage(content=INTENT_PROMPT),
                         HumanMessage(content=message),
@@ -187,16 +235,12 @@ class IntentClassifier:
             )
             raw = _message_text(response)
             parsed = parse_intent_reply(raw)
-            if parsed is not None:
-                return parsed
-            logger.warning("意图分类返回无法解析的 JSON，走启发式兜底：%r", raw[:120])
+            if parsed is None:
+                logger.warning(
+                    "意图分类返回无法解析的 JSON，尝试下一档：%r", raw[:120]
+                )
+            return parsed, raw
         except Exception as exc:  # noqa: BLE001 - 分类失败不该把聊天变成 500
             raw = f"{type(exc).__name__}: {exc}"[:200]
-            logger.warning("意图分类模型调用失败，走启发式兜底", exc_info=True)
-
-        return IntentResult(
-            intent=heuristic_intent(message),
-            confidence=0.0,
-            raw=raw,
-            source="heuristic",
-        )
+            logger.warning("意图分类模型调用失败，尝试下一档", exc_info=True)
+            return None, raw

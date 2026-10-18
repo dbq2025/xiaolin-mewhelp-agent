@@ -65,8 +65,8 @@ def test_heuristic_separates_order_and_logistics():
     assert heuristic_intent("订单 1001 的物流到哪了") == "logistics"
 
 
-def test_heuristic_default_is_business_not_chitchat():
-    assert heuristic_intent("这个东西怎么弄") == "after_sales"
+def test_heuristic_default_is_other_not_chitchat():
+    assert heuristic_intent("这个东西怎么弄") == "other"
 
 
 async def test_classifier_uses_model_json():

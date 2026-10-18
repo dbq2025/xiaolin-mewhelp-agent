@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -77,6 +78,8 @@ class RetrievalOutcome:
 
     query: UnderstoodQuery
     evidence: tuple[Evidence, ...]
+    #: ch06：多查询检索时保留每一次理解结果，供日志/评估看扩写是否真的生效。
+    queries: tuple[UnderstoodQuery, ...] = ()
     #: 最高检索分。拒答时 evidence 可能为空，但分数仍要留给日志/低置信度池，
     #: 否则「0 命中」与「差一点命中」在运维视角里长得一模一样。
     top_score: float = 0.0
@@ -219,6 +222,93 @@ class RagPipeline:
             top_score=top_score,
             refused=False,
             rerank_degraded=result.rerank_degraded,
+        )
+
+    async def retrieve_many(
+        self, queries: Sequence[str], *, category: str | None = None
+    ) -> RetrievalOutcome:
+        """逐条检索，按 `chunk_id` 去重合并；单条失败不拖垮整轮。
+
+        退款/售后子流程用：扩写出的几条查询各走一次「理解→混合召回→重排」，
+        同一块知识可能被多条查询命中，只保留最高分的一条。单条查询网络失败只
+        记 warning，其他查询继续；全部失败时返回空证据 + refused，由 Agent 明说
+        无法确认，不把聊天变成 500。
+        """
+        understood_queries: list[UnderstoodQuery] = []
+        merged: dict[int, RetrievedChunk] = {}
+        rerank_degraded = False
+        failures = 0
+
+        for query in queries:
+            text = (query or "").strip()
+            if not text:
+                continue
+            try:
+                understood, result, chunks = await self._retrieve(
+                    text, category=category
+                )
+            except Exception:  # noqa: BLE001 - 单条检索失败不拖垮整轮
+                failures += 1
+                logger.warning("多查询检索的单条查询失败（query=%r）", text, exc_info=True)
+                continue
+
+            understood_queries.append(understood)
+            rerank_degraded = rerank_degraded or bool(result.rerank_degraded)
+            for chunk in chunks:
+                current = merged.get(chunk.chunk_id)
+                if current is None or chunk.score > current.score:
+                    merged[chunk.chunk_id] = chunk
+
+        ordered = tuple(
+            sorted(merged.values(), key=lambda chunk: chunk.score, reverse=True)[
+                : self._top_n
+            ]
+        )
+        first_query = (
+            understood_queries[0]
+            if understood_queries
+            else UnderstoodQuery(original="", standard="", bm25_text="")
+        )
+
+        if not ordered:
+            return RetrievalOutcome(
+                query=first_query,
+                evidence=(),
+                queries=tuple(understood_queries),
+                top_score=0.0,
+                refused=True,
+                refusal_source="retrieval_low_conf",
+                refusal_reason=(
+                    "多查询检索全部失败"
+                    if failures
+                    else "检索没有命中任何知识块"
+                ),
+                rerank_degraded=rerank_degraded,
+            )
+
+        top_score = float(ordered[0].score)
+        refused = False
+        reason: str | None = None
+        if (
+            self._strategy == ONLINE_STRATEGY
+            and not rerank_degraded
+            and top_score < self._min_score
+        ):
+            refused = True
+            reason = (
+                f"最高重排分 {top_score:.3f} 低于阈值 {self._min_score}，"
+                "证据相关性不足"
+            )
+
+        return RetrievalOutcome(
+            query=first_query,
+            evidence=build_evidence(ordered),
+            queries=tuple(understood_queries),
+            top_score=top_score,
+            refused=refused,
+            refusal_source="retrieval_low_conf" if refused else None,
+            refusal_reason=reason,
+            rerank_degraded=rerank_degraded,
         )
 
     async def _retrieve(

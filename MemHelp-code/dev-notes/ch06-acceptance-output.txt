@@ -1,0 +1,21 @@
+[multiturn] 物流 → 退款 → 物流
+  PASS | 订单 20240115001 的物流到哪了 -> 订单 20240115001 的物流到哪了 | intent=logistics (0.97) expected=logistics
+  PASS | 那它能退吗 -> 订单 20240115001 能退吗 | intent=refund_return (0.92) expected=refund_return
+  PASS | 那现在到哪了 -> 订单 20240115001 的物流现在到哪了 | intent=logistics (0.97) expected=logistics
+[other] 拿不准/怪问题落点
+  PASS | 你们公司股票能买吗 -> other (0.90, llm) expected=other
+  PASS | 帮我看看那个 -> other (0.85, llm) expected=other
+  PASS | 这个怎么弄 -> other (0.55, llm) expected=other
+  PASS | 今天天气怎么样 -> chitchat (0.95, llm) expected=chitchat
+[refund] 带订单号问「这个能退吗」
+  first_done=True
+  coref=订单 20240115001 的马克杯能退吗 changed=True
+  trace=begin_turn -> resolve_coref -> classify_intent -> route_intent -> refund_prepare_order -> refund_await_order -> refund_expand_queries -> refund_retrieve_policies -> refund_agent -> log_turn
+  refund_form_order=20240115001
+  PASS | 退款子流程完成
+[picker] 不带订单号问「这个能退吗」
+  order_picker=3 张，awaiting_input=yes
+  selected=20245274773 -> refund_form_order=20245274773 trace_tail=refund_retrieve_policies -> refund_agent -> log_turn
+  PASS | 选单后续跑完成
+
+SUMMARY multiturn=PASS other=PASS refund=PASS picker=PASS
