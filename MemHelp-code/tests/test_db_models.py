@@ -62,7 +62,7 @@ def test_conversation_session_id_is_unique_and_not_nullable():
 
 
 def test_message_columns_match_ddl():
-    """列名必须与 sql/ch02-ddl.sql 的 messages 表逐字相同（ch04 追加 citations）。"""
+    """列名必须与 sql/ch02-ddl.sql 的 messages 表逐字相同（ch04 citations / ch05 actions）。"""
     from app.db.models import Message
 
     assert set(Message.__table__.c.keys()) == {
@@ -74,6 +74,7 @@ def test_message_columns_match_ddl():
         "tool_call_id",
         "tool_traces",
         "citations",
+        "actions",
         "created_at",
     }
 

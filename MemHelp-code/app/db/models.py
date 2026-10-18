@@ -153,6 +153,13 @@ class Message(Base):
     #: 为什么存快照而不是只存 chunk_id：chunk 日后会被重切/删除，审计时要能看到
     #: **当时**喂给模型的到底是什么文本；只留 id 的话，一次重建就把证据变成悬空指针。
     citations: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    #: ch05：本轮建议给用户的动作选项（转人工 / 建工单）。
+    #:
+    #: 形状是 **列表 of 对象**，例如
+    #: ``[{"action": "transfer_human", "ticket_type": "投诉"}]``。
+    #: 存动作而不是「按钮已点状态」：点击状态是浏览器侧的一次性 UX，不该冒充
+    #: 业务事实；工单是否真的创建，以 ``tickets`` 表为准。
+    actions: Mapped[list | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
     )

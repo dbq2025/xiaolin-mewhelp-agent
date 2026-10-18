@@ -130,6 +130,8 @@ class MessageRow:
     tool_traces: list[dict[str, Any]] | None = None
     #: ch04：本轮引用证据快照。刷新页面后角标还能点开，就靠它。
     citations: list[dict[str, Any]] | None = None
+    #: ch05：本轮建议动作（转人工 / 建工单）。刷新后按钮还能渲染，就靠它。
+    actions: list[dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True)
@@ -298,14 +300,9 @@ class MessageRepository:
         tool_call_id: str | None,
         tool_traces: Sequence[dict[str, Any]] | None,
         citations: Sequence[dict[str, Any]] | None = None,
+        actions: Sequence[dict[str, Any]] | None = None,
     ) -> None:
-        # 入口校验：非法 role 在这里就炸，错误信息带角色名。
-        # 靠 MySQL 的 ENUM 兜会拖到 commit，报的是驱动的
-        # "Data truncated for column 'role'" —— 把拼错字符串伪装成数据库故障。
-        if role not in MESSAGE_ROLES:
-            raise ValueError(
-                f"非法消息角色 {role!r}，只允许 {MESSAGE_ROLES}（对应 DDL 的 ENUM）"
-            )
+        self._check_role(role)
 
         self._session.add(
             Message(
@@ -316,9 +313,20 @@ class MessageRepository:
                 tool_call_id=tool_call_id,
                 tool_traces=list(tool_traces) if tool_traces is not None else None,
                 citations=list(citations) if citations is not None else None,
+                actions=list(actions) if actions is not None else None,
             )
         )
         self._session.commit()
+
+    @staticmethod
+    def _check_role(role: str) -> None:
+        # 入口校验：非法 role 在这里就炸，错误信息带角色名。
+        # 靠 MySQL 的 ENUM 兜会拖到 commit，报的是驱动的
+        # "Data truncated for column 'role'" —— 把拼错字符串伪装成数据库故障。
+        if role not in MESSAGE_ROLES:
+            raise ValueError(
+                f"非法消息角色 {role!r}，只允许 {MESSAGE_ROLES}（对应 DDL 的 ENUM）"
+            )
 
     async def append(
         self,
@@ -330,6 +338,7 @@ class MessageRepository:
         tool_call_id: str | None = None,
         tool_traces: Sequence[dict[str, Any]] | None = None,
         citations: Sequence[dict[str, Any]] | None = None,
+        actions: Sequence[dict[str, Any]] | None = None,
     ) -> None:
         """追加一条消息。``role`` 必须是 ``MESSAGE_ROLES`` 之一。
 
@@ -339,6 +348,8 @@ class MessageRepository:
 
         :param citations: ch04 的引用证据快照。只有**最终答案**那一行需要它；
             带工具调用的「申请单」行不需要。
+
+        :param actions: ch05 的建议动作快照。同样只挂最终答案那一行。
 
         :raises ValueError: 角色不在 DDL 的 ENUM 取值内。
         """
@@ -351,7 +362,45 @@ class MessageRepository:
             tool_call_id,
             tool_traces,
             citations,
+            actions,
         )
+
+    def _append_many(
+        self, conversation_id: int, rows: Sequence[dict[str, Any]]
+    ) -> None:
+        """一次事务写入多行。
+
+        **先把所有 role 校验完再 add**：否则第二行非法时第一行已经进 Session，
+        调用方 catch 了异常也不知道要不要 rollback。这里要么全写、要么一行不写。
+        """
+        for row in rows:
+            self._check_role(str(row["role"]))
+
+        for row in rows:
+            self._session.add(
+                Message(
+                    conversation_id=conversation_id,
+                    role=row["role"],
+                    content=row.get("content"),
+                    tool_calls=row.get("tool_calls"),
+                    tool_call_id=row.get("tool_call_id"),
+                    tool_traces=row.get("tool_traces"),
+                    citations=row.get("citations"),
+                    actions=row.get("actions"),
+                )
+            )
+        self._session.commit()
+
+    async def append_many(
+        self, conversation_id: int, rows: Sequence[dict[str, Any]]
+    ) -> None:
+        """把一轮的多行（user / assistant tool_calls / tool / assistant）单事务写入。
+
+        ch05 的 ReAct 一轮可能产生多组工具调用；逐行 ``append`` 每次 commit，
+        中途失败会留下「有工具申请单、没有工具结果」的半截历史，下一轮回灌时
+        上游会直接拒绝。单事务是这条链路的结构性保证。
+        """
+        await _run(self._append_many, conversation_id, rows)
 
     def _list(self, conversation_id: int) -> list[MessageRow]:
         rows = self._session.scalars(
@@ -369,6 +418,7 @@ class MessageRepository:
                 created_at=row.created_at,
                 tool_traces=row.tool_traces,
                 citations=row.citations,
+                actions=row.actions,
             )
             for row in rows
         ]
@@ -400,6 +450,24 @@ class MessageRepository:
         而模型的反应是拒绝回答或编造 —— 排查方向会完全跑偏。
         """
         return await _run(self._history, session_id)
+
+    def _last_user_content(self, session_id: str) -> str | None:
+        value = self._session.scalar(
+            select(Message.content)
+            .join(Conversation, Message.conversation_id == Conversation.id)
+            .where(Conversation.session_id == session_id, Message.role == "user")
+            .order_by(Message.id.desc())
+            .limit(1)
+        )
+        return None if value is None else str(value)
+
+    async def last_user_content(self, session_id: str) -> str | None:
+        """该会话最后一条用户消息。
+
+        ch05 的「建工单」按钮只带 session_id 时，用这句话当工单描述 ——
+        比让前端把整段聊天历史回传更安全，也比让模型再生成一次更省。
+        """
+        return await _run(self._last_user_content, session_id)
 
 
 def _row_to_message(row: MessageRow) -> BaseMessage:
