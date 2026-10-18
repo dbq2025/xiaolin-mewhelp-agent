@@ -1,0 +1,56 @@
+{"id": "L01", "message": "订单 1001 的物流到哪了", "expected_intent": "logistics", "expected_route": "business", "bucket": "logistics", "note": "订单号+物流，边界题"}
+{"id": "L02", "message": "我的快递怎么还没到", "expected_intent": "logistics", "expected_route": "business", "bucket": "logistics", "note": "无订单号，仍是物流"}
+{"id": "L03", "message": "帮我看下运单 SF123456789 到哪了", "expected_intent": "logistics", "expected_route": "business", "bucket": "logistics", "note": "运单号"}
+{"id": "L04", "message": "发货了吗", "expected_intent": "logistics", "expected_route": "business", "bucket": "logistics", "note": "发货状态"}
+{"id": "L05", "message": "快递一直停在杭州转运中心", "expected_intent": "logistics", "expected_route": "business", "bucket": "logistics", "note": "停滞"}
+{"id": "L06", "message": "什么时候能派送", "expected_intent": "logistics", "expected_route": "business", "bucket": "logistics", "note": "派送时间"}
+{"id": "L07", "message": "显示已签收但我没收到", "expected_intent": "logistics", "expected_route": "business", "bucket": "logistics", "note": "签收异常"}
+{"id": "L08", "message": "物流三天没更新了", "expected_intent": "logistics", "expected_route": "business", "bucket": "logistics", "note": "轨迹不更新"}
+{"id": "O01", "message": "订单 1001 多少钱", "expected_intent": "order", "expected_route": "business", "bucket": "order", "note": "边界：订单金额 ≠ 物流"}
+{"id": "O02", "message": "我的订单是什么状态", "expected_intent": "order", "expected_route": "business", "bucket": "order", "note": "订单状态"}
+{"id": "O03", "message": "订单 20240115001 什么时候下的单", "expected_intent": "order", "expected_route": "business", "bucket": "order", "note": "下单时间"}
+{"id": "O04", "message": "帮我查下订单 1001 的金额", "expected_intent": "order", "expected_route": "business", "bucket": "order", "note": "金额"}
+{"id": "O05", "message": "我昨天下的单怎么显示待付款", "expected_intent": "order", "expected_route": "business", "bucket": "order", "note": "付款状态"}
+{"id": "O06", "message": "订单号是多少来着", "expected_intent": "order", "expected_route": "business", "bucket": "order", "note": "问订单号本身"}
+{"id": "O07", "message": "这个订单付款成功了吗", "expected_intent": "order", "expected_route": "business", "bucket": "order", "note": "支付结果"}
+{"id": "O08", "message": "查一下订单 1001", "expected_intent": "order", "expected_route": "business", "bucket": "order", "note": "泛查订单"}
+{"id": "P01", "message": "XH-3000A 续航多久", "expected_intent": "product_consult", "expected_route": "knowledge", "bucket": "product", "note": "型号参数"}
+{"id": "P02", "message": "这个耳机多少钱", "expected_intent": "product_consult", "expected_route": "knowledge", "bucket": "product", "note": "价格"}
+{"id": "P03", "message": "保温杯有货吗", "expected_intent": "product_consult", "expected_route": "knowledge", "bucket": "product", "note": "库存"}
+{"id": "P04", "message": "XH-3000B 支持 IP54 吗", "expected_intent": "product_consult", "expected_route": "knowledge", "bucket": "product", "note": "防护参数"}
+{"id": "P05", "message": "这件衣服有哪些颜色", "expected_intent": "product_consult", "expected_route": "knowledge", "bucket": "product", "note": "规格"}
+{"id": "P06", "message": "机械键盘的尺寸是多少", "expected_intent": "product_consult", "expected_route": "knowledge", "bucket": "product", "note": "尺寸"}
+{"id": "P07", "message": "商品参数在哪里看", "expected_intent": "product_consult", "expected_route": "knowledge", "bucket": "product", "note": "参数咨询"}
+{"id": "P08", "message": "你们这款充电宝能带上飞机吗", "expected_intent": "product_consult", "expected_route": "knowledge", "bucket": "product", "note": "使用场景"}
+{"id": "R01", "message": "退货政策是什么", "expected_intent": "refund_return", "expected_route": "knowledge", "bucket": "refund", "note": "政策"}
+{"id": "R02", "message": "我要退款", "expected_intent": "refund_return", "expected_route": "knowledge", "bucket": "refund", "note": "退款诉求"}
+{"id": "R03", "message": "七天无理由怎么算", "expected_intent": "refund_return", "expected_route": "knowledge", "bucket": "refund", "note": "规则"}
+{"id": "R04", "message": "退款流程要多久", "expected_intent": "refund_return", "expected_route": "knowledge", "bucket": "refund", "note": "流程/时效"}
+{"id": "R05", "message": "这个能退吗", "expected_intent": "refund_return", "expected_route": "knowledge", "bucket": "refund", "note": "省略主语的退"}
+{"id": "R06", "message": "退货运费谁承担", "expected_intent": "refund_return", "expected_route": "knowledge", "bucket": "refund", "note": "退货运费"}
+{"id": "R07", "message": "我想退货但包装拆了", "expected_intent": "refund_return", "expected_route": "knowledge", "bucket": "refund", "note": "条件"}
+{"id": "R08", "message": "退款原路返回吗", "expected_intent": "refund_return", "expected_route": "knowledge", "bucket": "refund", "note": "退款路径"}
+{"id": "A01", "message": "我要换货", "expected_intent": "after_sales", "expected_route": "business", "bucket": "after_sales", "note": "换货"}
+{"id": "A02", "message": "杯子碎了能补发吗", "expected_intent": "after_sales", "expected_route": "business", "bucket": "after_sales", "note": "补发"}
+{"id": "A03", "message": "耳机坏了怎么维修", "expected_intent": "after_sales", "expected_route": "business", "bucket": "after_sales", "note": "维修"}
+{"id": "A04", "message": "保修期多久", "expected_intent": "after_sales", "expected_route": "business", "bucket": "after_sales", "note": "保修"}
+{"id": "A05", "message": "发票怎么开", "expected_intent": "after_sales", "expected_route": "business", "bucket": "after_sales", "note": "发票"}
+{"id": "A06", "message": "质保范围包括进水吗", "expected_intent": "after_sales", "expected_route": "business", "bucket": "after_sales", "note": "质保范围"}
+{"id": "A07", "message": "收到的商品有质量问题", "expected_intent": "after_sales", "expected_route": "business", "bucket": "after_sales", "note": "质量问题"}
+{"id": "A08", "message": "申请售后需要什么材料", "expected_intent": "after_sales", "expected_route": "business", "bucket": "after_sales", "note": "售后材料"}
+{"id": "C01", "message": "我要投诉", "expected_intent": "complaint", "expected_route": "complaint", "bucket": "complaint", "note": "投诉"}
+{"id": "C02", "message": "你们客服太差了，我要投诉", "expected_intent": "complaint", "expected_route": "complaint", "bucket": "complaint", "note": "情绪+投诉"}
+{"id": "C03", "message": "收到的杯子是碎的，我要投诉并退款", "expected_intent": "complaint", "expected_route": "complaint", "bucket": "complaint", "note": "边界：投诉优先于退款"}
+{"id": "C04", "message": "我要举报你们虚假宣传", "expected_intent": "complaint", "expected_route": "complaint", "bucket": "complaint", "note": "举报"}
+{"id": "C05", "message": "再不解决我就去 12315 投诉", "expected_intent": "complaint", "expected_route": "complaint", "bucket": "complaint", "note": "外部投诉"}
+{"id": "C06", "message": "我要你们道歉并赔偿", "expected_intent": "complaint", "expected_route": "complaint", "bucket": "complaint", "note": "道歉/赔偿"}
+{"id": "C07", "message": "太失望了，我要找人工投诉", "expected_intent": "complaint", "expected_route": "complaint", "bucket": "complaint", "note": "人工+投诉"}
+{"id": "C08", "message": "曝光你们这种服务", "expected_intent": "complaint", "expected_route": "complaint", "bucket": "complaint", "note": "曝光"}
+{"id": "H01", "message": "你好", "expected_intent": "chitchat", "expected_route": "chitchat", "bucket": "chitchat", "note": "寒暄快速通道"}
+{"id": "H02", "message": "在吗", "expected_intent": "chitchat", "expected_route": "chitchat", "bucket": "chitchat", "note": "寒暄快速通道"}
+{"id": "H03", "message": "谢谢", "expected_intent": "chitchat", "expected_route": "chitchat", "bucket": "chitchat", "note": "感谢"}
+{"id": "H04", "message": "再见", "expected_intent": "chitchat", "expected_route": "chitchat", "bucket": "chitchat", "note": "告别"}
+{"id": "H05", "message": "今天天气不错", "expected_intent": "chitchat", "expected_route": "chitchat", "bucket": "chitchat", "note": "闲聊"}
+{"id": "H06", "message": "你是机器人吗", "expected_intent": "chitchat", "expected_route": "chitchat", "bucket": "chitchat", "note": "身份闲聊"}
+{"id": "H07", "message": "讲个笑话", "expected_intent": "chitchat", "expected_route": "chitchat", "bucket": "chitchat", "note": "娱乐"}
+{"id": "H08", "message": "早上好", "expected_intent": "chitchat", "expected_route": "chitchat", "bucket": "chitchat", "note": "寒暄快速通道"}

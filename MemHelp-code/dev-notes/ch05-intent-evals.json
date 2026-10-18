@@ -1,0 +1,44 @@
+{
+  "total": 56,
+  "correct": 56,
+  "accuracy": 1.0,
+  "route_accuracy": 1.0,
+  "per_intent_recall": {
+    "logistics": 1.0,
+    "order": 1.0,
+    "product_consult": 1.0,
+    "refund_return": 1.0,
+    "after_sales": 1.0,
+    "complaint": 1.0,
+    "chitchat": 1.0
+  },
+  "confusion": {
+    "logistics": {
+      "logistics": 8
+    },
+    "order": {
+      "order": 8
+    },
+    "product_consult": {
+      "product_consult": 8
+    },
+    "refund_return": {
+      "refund_return": 8
+    },
+    "after_sales": {
+      "after_sales": 8
+    },
+    "complaint": {
+      "complaint": 8
+    },
+    "chitchat": {
+      "chitchat": 8
+    }
+  },
+  "sources": {
+    "llm": 51,
+    "rule": 5
+  },
+  "avg_latency_ms": 756.9821428582405,
+  "failures": []
+}
