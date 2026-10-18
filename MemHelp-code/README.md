@@ -728,4 +728,119 @@ SSE 既有事件名不变；`tools` / `citations` 事件仍在有内容时发。
 **本章不做（用户指定）**：指代消解/意图识别的正式版、上下文管理策略升级、MCP、
 飞轮入库；正式的置信度检查留给可观测章节。
 
+---
+
+# 第六章「正式版分流器」运行说明
+
+## 1. 本章新增
+
+- `resolve_coref` 从透传升级为 **LLM 指代消解 + Query 改写**：有指代/省略/口语标记才调模型；
+  完整问句/寒暄原样透传；补全结果里新出现的订单号/型号必须来自原话+历史，否则回退。
+- 意图识别升级为 **七类业务意图 + `other`**（八选一），强制 JSON、9 组边界 few-shot；
+  默认质量档，`INTENT_COST_MODE=true` 时走「小模型先判 → 低置信度大模型重判」。
+- `refund_return` / `after_sales` 统一走 **refund 确定性子流程**：
+  订单槽位 → 确定性订单快照 → Query 扩写（强制 JSON `queries`）→
+  多查询强制检索政策并去重合并 → 只把「这一单能不能退/售后」交给主力 Agent。
+- 缺订单号时用 LangGraph `interrupt()` 暂停，前端聊天流里弹**订单卡片**；
+  点选后 `POST /api/chat/refund/select` 从 checkpoint 续跑。
+- 退款单是内联简单表单：原因固定六类下拉，提交复用 `tickets`（售后工单），
+  不新增退款表。
+- Query 扩写只在检索侧现查现用，知识库仍只有一份。
+
+## 2. 配置（`.env` 新增，均有默认值）
+
+```dotenv
+INTENT_MODEL=
+INTENT_CHEAP_MODEL=
+INTENT_COST_MODE=false
+INTENT_CONFIDENCE_THRESHOLD=0.6
+INTENT_TIMEOUT=5
+COREF_ENABLED=true
+COREF_TIMEOUT=5
+COREF_HISTORY_MESSAGES=8
+QUERY_EXPANSION_ENABLED=true
+QUERY_EXPANSION_TIMEOUT=5
+QUERY_EXPANSION_MAX_QUERIES=4
+REFUND_ORDER_COUNT=3
+```
+
+- `INTENT_MODEL` 留空 = 用 `OPENAI_MODEL`；要更强模型只改这一项。
+- 成本档必须同时设 `INTENT_COST_MODE=true` 和 `INTENT_CHEAP_MODEL`，否则不生效。
+
+## 3. 测试与评估
+
+```powershell
+# 离线测试（不连网、不连 MySQL/Milvus）
+& $uv run --directory MemHelp-code python -m pytest -q --color=no
+
+# 多轮指代/意图/扩写评估（真实模型；输出报告）
+& $uv run --directory MemHelp-code python evals/run_ch06_evals.py
+```
+
+报告：`dev-notes/ch06-eval-report.md` / `dev-notes/ch06-evals.json`。
+当前模型 `deepseek-flash` 的实测（22 轮）：意图 1.000、指代 1.000、other 3/3、
+JSON 失败 0、扩写 8/8。
+
+## 4. 功能演示
+
+先起服务（真实 `.env`；MySQL/Milvus 可用）：
+
+```powershell
+& $uv run --directory MemHelp-code uvicorn app.main:app --port 8000
+```
+
+```powershell
+# 四条验收一次跑完，输出到文件
+& $uv run --directory MemHelp-code python scripts/demo-ch06.py `
+    --case all --base-url http://127.0.0.1:8000 `
+    --out dev-notes/ch06-acceptance-output.txt
+
+# 单独跑
+& $uv run --directory MemHelp-code python scripts/demo-ch06.py --case multiturn
+& $uv run --directory MemHelp-code python scripts/demo-ch06.py --case other
+& $uv run --directory MemHelp-code python scripts/demo-ch06.py --case refund
+& $uv run --directory MemHelp-code python scripts/demo-ch06.py --case picker
+```
+
+## 5. 浏览器验收（订单卡片 / 退款单）
+
+前置：Chrome/Edge 以 `--remote-debugging-port=9222` 启动；服务在 8000。
+
+```powershell
+& $uv run --directory MemHelp-code python scripts/ch06_ui_check.py
+```
+
+脚本会：
+1. 多轮问「订单 20240115001 的物流到哪了」→「那它能退吗」，断言出现
+   **「已补全：订单 20240115001 能退吗」**；
+2. 新会话问「这个能退吗」，断言订单卡片出现；
+3. 点第一张卡，断言退款单出现；
+4. 选「商品质量问题」提交，断言显示工单号。
+
+截图：`dev-notes/ch06-coref.png`、`dev-notes/ch06-order-picker.png`、
+`dev-notes/ch06-refund-form.png`。
+
+## 6. 接口变化
+
+| 方法 | 路径 | 变化 |
+|---|---|---|
+| POST | `/api/chat/completions` | SSE 新增 `coref` / `intent` / `order_picker` / `awaiting_input`；`done` 新增 `resolved_message` / `coref_changed` / `query_expansion` / `refund_form` / `trace` |
+| POST | `/api/chat/refund/select` | 新增；订单点选后从 checkpoint 续跑，无 pending 返回 409 |
+| POST | `/api/actions/create-refund` | 新增；固定原因提交退款申请，复用 `create_ticket` 写 `tickets` |
+
+暂停轮只发 `awaiting_input`，**不发 `done`**；续跑完成后才落 MySQL。
+
+## 7. 本章留痕
+
+- 设计文档：`docs/superpowers/specs/2026-10-18-ch06-intent-router-design.md`
+- 实施计划：`docs/superpowers/plans/2026-10-18-ch06-intent-router-plan.md`
+- 开发过程追记：`dev-notes/ch06.md`
+- 评估报告：`dev-notes/ch06-eval-report.md`、`dev-notes/ch06-evals.json`
+- 验收输出：`dev-notes/ch06-acceptance-output.txt`
+- 截图：`dev-notes/ch06-coref.png`、`dev-notes/ch06-order-picker.png`、
+  `dev-notes/ch06-refund-form.png`
+
+**本章不做（用户指定）**：微调小模型/BERT 做意图分类、跨会话记忆；真实订单表/退款单表；
+入库侧多份拆存；刷新页面后恢复未完成的订单选择。
+
 
