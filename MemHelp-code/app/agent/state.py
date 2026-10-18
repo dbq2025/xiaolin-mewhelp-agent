@@ -98,6 +98,7 @@ class AgentState(TypedDict, total=False):
     intent_confidence: float
     intent_raw: str
     intent_source: Literal["llm", "heuristic", "rule"]
+    intent_llm_calls: int
     route: Route
 
     # -- 知识类 -----------------------------------------------------------

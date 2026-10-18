@@ -100,7 +100,9 @@ async def _load_history(state: AgentState, config: RunnableConfig) -> dict[str, 
 def _reset_turn(state: Mapping[str, Any], node: str) -> dict[str, Any]:
     """清掉上一轮的派生字段；`messages` 不在这里清（那是跨轮上下文）。"""
     return {
-        "trace": [*list(state.get("trace") or []), node],
+        # 每轮从头记：不能把上一轮的 knowledge_retrieve 带进本轮日志，
+        # 否则验收 1 的「这一轮走了检索」证据会被历史污染。
+        "trace": [node],
         "turn_started_at": time.time(),
         "answer": "",
         "pending_messages": [],
@@ -111,6 +113,7 @@ def _reset_turn(state: Mapping[str, Any], node: str) -> dict[str, Any]:
         "ticket_type": "售后",
         "agent_steps": 0,
         "llm_calls": 0,
+        "intent_llm_calls": 0,
         "token_usage": {},
         "stop_reason": "",
         "retrieval_attempted": False,
@@ -156,6 +159,9 @@ async def _classify_intent(state: AgentState, config: RunnableConfig) -> dict[st
         "intent_confidence": result.confidence,
         "intent_raw": result.raw,
         "intent_source": result.source,
+        "intent_llm_calls": 1 if result.source == "llm" else 0,
+        # 非 Agent 出口（投诉/闲聊/兜底）也要把这次意图调用记进总数。
+        "llm_calls": 1 if result.source == "llm" else 0,
         "trace": _trace(state, "classify_intent"),
     }
 
@@ -173,11 +179,16 @@ async def _knowledge_retrieve(state: AgentState, config: RunnableConfig) -> dict
     _, _, retriever, _ = _deps(config)
     outcome = await retriever.retrieve_only(state["resolved_message"])
     evidence = list(evidence_payload(outcome.evidence))
+    # `top_score` 是正式字段；测试/旧 fake 可能只构造 evidence，没有填它，
+    # 此时用第一条证据的分数兜底，避免把「有证据」误判成 0 分。
+    top_score = float(outcome.top_score)
+    if not top_score and outcome.evidence:
+        top_score = float(outcome.evidence[0].score)
     return {
         "retrieval_attempted": True,
         "retrieval_refused": bool(outcome.refused),
         "retrieval_degraded": bool(outcome.rerank_degraded),
-        "retrieval_score": float(outcome.evidence[0].score) if outcome.evidence else 0.0,
+        "retrieval_score": top_score,
         "evidence": evidence,
         "gate_reason": outcome.refusal_reason or "",
         "trace": _trace(state, "knowledge_retrieve"),
@@ -195,6 +206,7 @@ async def _confidence_gate(state: AgentState, config: RunnableConfig) -> dict[st
     )
 
     if not decision.passed:
+        reason = state.get("gate_reason") or decision.reason
         try:
             conversation_id = await repositories.conversations.upsert_by_session(
                 state["session_id"], "anonymous"
@@ -203,14 +215,14 @@ async def _confidence_gate(state: AgentState, config: RunnableConfig) -> dict[st
                 conversation_id,
                 state["user_message"],
                 "retrieval_low_conf",
-                decision.reason,
+                reason,
             )
         except Exception:  # noqa: BLE001 - 入池失败不该吞掉兜底话术
             logger.exception("低置信度入池失败（已忽略，仍然回兜底话术）")
 
     return {
         "gate_passed": decision.passed,
-        "gate_reason": decision.reason,
+        "gate_reason": state.get("gate_reason") or decision.reason,
         "trace": _trace(state, "confidence_gate"),
     }
 
@@ -223,13 +235,23 @@ async def _agent(
     if not messages:
         raise RuntimeError("agent 节点没有可用的消息历史")
 
+    # 取**最后一条 HumanMessage**，不要假设它在列表末尾：同一 turn_id 重放时
+    # `begin_turn` 不会再追加用户消息，messages[-1] 会是上一轮的 AI 回答。
+    question_index = next(
+        (index for index in range(len(messages) - 1, -1, -1)
+         if isinstance(messages[index], HumanMessage)),
+        len(messages) - 1,
+    )
+    question = messages[question_index]
+    history = messages[:question_index]
+
     evidence = evidence_from_payload(state.get("evidence") or [])
     system = SystemMessage(
         content=build_agent_system_prompt(state["session_id"], state.get("evidence") or [])
     )
     ctx = build_context(
-        history=messages[:-1],
-        question=messages[-1],
+        history=history,
+        question=question,
         system_message=system,
         budget_tokens=int(getattr(settings, "context_token_budget", 2000)),
     )
@@ -256,7 +278,7 @@ async def _agent(
         "citations": outcome.citations,
         "suggested_actions": outcome.suggested_actions,
         "agent_steps": outcome.agent_steps,
-        "llm_calls": outcome.llm_calls,
+        "llm_calls": outcome.llm_calls + int(state.get("intent_llm_calls") or 0),
         "token_usage": outcome.token_usage,
         "stop_reason": outcome.stop_reason,
         "context": {

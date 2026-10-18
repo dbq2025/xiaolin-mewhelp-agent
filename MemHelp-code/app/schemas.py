@@ -189,6 +189,14 @@ class CreateTicketRequest(BaseModel):
         default="售后",
         description="工单类型，取自 DDL 的三个 ENUM 取值。",
     )
+    idempotency_key: str | None = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "前端生成的一次性键；同一个键重复提交返回同一张工单，"
+            "避免网络重试建出两张。"
+        ),
+    )
 
 
 class CreateTicketResponse(BaseModel):

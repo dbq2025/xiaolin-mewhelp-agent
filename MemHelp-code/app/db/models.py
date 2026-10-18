@@ -211,11 +211,17 @@ class Ticket(Base):
         nullable=False,
         server_default=TICKET_STATUSES[0],
     )
+    #: ch05：用户点「建工单」时带的一次性键。唯一索引保证重试不会建出第二张。
+    #: 可空：ch02 的模型直接调 create_ticket 时不需要它。
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
     )
 
-    __table_args__ = (Index("idx_tickets_conversation_id", "conversation_id"),)
+    __table_args__ = (
+        Index("idx_tickets_conversation_id", "conversation_id"),
+        Index("uq_tickets_idempotency_key", "idempotency_key", unique=True),
+    )
 
 
 class KnowledgeChunk(Base):

@@ -8,6 +8,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 from app.agent.prompts import AGENT_EMPTY_TEXT, AGENT_HANDOFF_TEXT
 from app.agent.react import AgentOutcome, run_react_agent
+from app.db.models import Ticket
 from app.tools.executor import ToolResult
 from tests.fakes_agent import (
     ScriptedChatModel,
@@ -219,6 +220,27 @@ async def test_empty_response_gets_a_fixed_fallback():
     assert [message.type for message in outcome.pending_messages] == ["ai"]
 
 
+async def test_preamble_then_empty_final_uses_last_tool_result():
+    """前一步说了「我查一下」、最后一步空回复：兜底要用工具结果，不能只留前言。"""
+    payload = json.dumps({"ok": True, "status": "已发货"}, ensure_ascii=False)
+    model = ScriptedChatModel(
+        script=[
+            tool_turn(
+                "query_order",
+                {"order_id": "1001"},
+                preamble="我帮您查一下。",
+            ),
+            empty_turn(),
+        ]
+    )
+    outcome, _ = await _run(model, executor=_executor({"query_order": payload}))
+
+    assert outcome.stop_reason == "empty_response"
+    assert "状态：已发货" in outcome.answer
+    assert outcome.pending_messages[-1].type == "ai"
+    assert "已发货" in outcome.pending_messages[-1].content
+
+
 async def test_reasoning_content_is_preserved_on_the_tool_call_message():
     model = ScriptedChatModel(
         script=[
@@ -247,3 +269,40 @@ async def test_status_is_emitted_before_the_tool_runs():
     kinds = [event["type"] for event in events]
     assert kinds.index("status") < kinds.index("token")
     assert events[kinds.index("status")]["tool"] == "query_order"
+
+
+async def test_unknown_tool_is_rejected_and_never_executed(
+    fake_repositories, empty_retriever, sqlite_session
+):
+    """模型编出 create_ticket 时，绝不能被 executor 按全局注册表执行。"""
+    called: list[str] = []
+
+    async def executor(name, args, **kwargs):
+        called.append(name)
+        return ToolResult(
+            tool=name, args=dict(args), ok=True, data="{}", error=None,
+            attempts=1, duration_ms=1,
+        )
+
+    model = ScriptedChatModel(
+        script=[
+            tool_turn("create_ticket", {"description": "偷偷建单", "ticket_type": "投诉",
+                                        "conversation_id": "s-evil"}, call_id="call_evil"),
+            text_turn("没有执行任何写操作。"),
+        ]
+    )
+    outcome = await run_react_agent(
+        model=model,
+        messages=_messages(),
+        repositories=fake_repositories,
+        retriever=empty_retriever,
+        include_faq=False,
+        evidence=(),
+        emit=lambda payload: None,
+        executor=executor,
+    )
+
+    assert called == [], "不在本轮工具集的工具名不得交给 executor"
+    assert outcome.tool_traces[0]["ok"] is False
+    assert "不在本轮可用工具内" in outcome.tool_records[0]["content"]
+    assert sqlite_session.query(Ticket).count() == 0

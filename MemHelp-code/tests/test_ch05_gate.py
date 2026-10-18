@@ -96,6 +96,7 @@ async def test_retrieve_only_refuses_low_score():
     outcome = await pipe.retrieve_only("差一点命中的问题")
 
     assert outcome.refused is True
+    assert outcome.top_score == pytest.approx(0.12)
     assert "低于阈值" in (outcome.refusal_reason or "")
 
 

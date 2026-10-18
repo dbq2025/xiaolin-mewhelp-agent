@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from app import main
 from tests.fakes import FailingChatModel
-from tests.fakes_agent import ScriptedChatModel, text_turn
+from tests.fakes_agent import ScriptedChatModel, text_turn, tool_turn
 
 
 def _intent(intent: str):
@@ -116,6 +116,48 @@ def test_messages_endpoint_returns_actions_after_refresh(test_settings):
         {"action": "transfer_human", "ticket_type": "投诉"},
         {"action": "create_ticket", "ticket_type": "投诉"},
     ]
+
+
+def test_tool_turn_restores_as_one_bot_bubble_with_badges(test_settings):
+    """工具轮的前言不能单独落成一条 bot 气泡；否则刷新后序号错位、按钮锁串位。"""
+    model = ScriptedChatModel(
+        script=[
+            _intent("logistics"),
+            tool_turn(
+                "query_logistics",
+                {"order_id": "1001"},
+                preamble="我帮您查一下。",
+            ),
+            text_turn("已发货，正在派送。"),
+            _intent("complaint"),
+        ]
+    )
+    client = _client(test_settings, model)
+    client.post(
+        "/api/chat/completions",
+        json={"session_id": "s-restore", "message": "订单 1001 的物流", "stream": False},
+    )
+    client.post(
+        "/api/chat/completions",
+        json={"session_id": "s-restore", "message": "我要投诉", "stream": False},
+    )
+
+    messages = client.post("/api/chat/sessions/s-restore/messages").json()["messages"]
+    # 与 web/app.js::restoreHistory 同一条过滤：空内容的工具申请单行不渲染。
+    visible = [
+        message
+        for message in messages
+        if not (
+            message["role"] == "ai"
+            and not (message.get("content") or "").strip()
+            and "tools" in message
+        )
+    ]
+    assistant_rows = [message for message in visible if message["role"] == "ai"]
+    assert len(assistant_rows) == 2, visible
+    assert assistant_rows[0]["content"] == "已发货，正在派送。"
+    assert [tool["name"] for tool in assistant_rows[0]["tools"]] == ["query_logistics"]
+    assert assistant_rows[1]["actions"]
 
 
 def test_upstream_failure_persists_only_the_user_turn(test_settings):

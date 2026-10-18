@@ -6,7 +6,8 @@ import json
 import uuid
 from pathlib import Path
 
-from langchain_core.messages import HumanMessage
+import pytest
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.agent.checkpoint import memory_checkpointer
 from app.agent.graph import build_agent_graph
@@ -59,7 +60,10 @@ def _intent_turn(intent: str, confidence: float = 0.9):
     return text_turn(json.dumps({"intent": intent, "confidence": confidence}, ensure_ascii=False))
 
 
-async def _run(graph, *, message, model, repositories, retriever, settings, session: str):
+async def _run(
+    graph, *, message, model, repositories, retriever, settings, session: str,
+    turn_id: str | None = None,
+):
     config = {
         "configurable": {
             "thread_id": session,
@@ -71,7 +75,11 @@ async def _run(graph, *, message, model, repositories, retriever, settings, sess
     }
     events: list[dict] = []
     async for chunk in graph.astream(
-        {"session_id": session, "turn_id": uuid.uuid4().hex, "user_message": message},
+        {
+            "session_id": session,
+            "turn_id": turn_id or uuid.uuid4().hex,
+            "user_message": message,
+        },
         config,
         stream_mode="custom",
     ):
@@ -109,6 +117,7 @@ async def test_policy_question_goes_through_retrieval_then_gate(
     assert values["retrieval_attempted"] is True
     assert values["gate_passed"] is True
     assert values["agent_steps"] == 0
+    assert values["llm_calls"] == 2  # 意图 1 次 + Agent 收敛 1 次
     assert "7 天无理由" in values["answer"]
     assert values["citations"][0]["n"] == 1
 
@@ -158,6 +167,7 @@ async def test_complaint_gives_two_actions_and_never_calls_agent(
     assert values["suggested_actions"] == ["transfer_human", "create_ticket"]
     assert values["ticket_type"] == "投诉"
     assert values["agent_steps"] == 0
+    assert values["llm_calls"] == 1  # 只有意图分类这一次
     assert len(model.state.calls) == 1
 
     cid = await fake_repositories.messages.find_conversation_id("s-complaint")
@@ -296,6 +306,117 @@ async def test_checkpointer_keeps_history_across_turns(
         for call in second_model.state.calls
         for message in call
     )
+
+
+async def test_same_turn_replay_uses_last_human_not_previous_ai(
+    test_settings, fake_repositories
+):
+    """同一 turn_id 重放：不能把上一轮的 AI 回答当成本轮问题。"""
+    graph = _graph()
+    first_model = ScriptedChatModel(
+        script=[_intent_turn("logistics"), text_turn("已发货。")]
+    )
+    await _run(
+        graph,
+        message="订单 1001 的物流",
+        model=first_model,
+        repositories=fake_repositories,
+        retriever=_Retriever(),
+        settings=test_settings,
+        session="s-replay",
+        turn_id="turn-replay",
+    )
+
+    replay_model = ScriptedChatModel(
+        script=[_intent_turn("logistics"), text_turn("重放也查到了。")]
+    )
+    await _run(
+        graph,
+        message="订单 1001 的物流",
+        model=replay_model,
+        repositories=fake_repositories,
+        retriever=_Retriever(),
+        settings=test_settings,
+        session="s-replay",
+        turn_id="turn-replay",
+    )
+
+    # 意图调用与 Agent 调用的最后一条都必须是 HumanMessage；
+    # 若 Agent 拿 messages[-1]，这里会出现 AIMessage("已发货。")。
+    assert replay_model.state.calls
+    for call in replay_model.state.calls:
+        assert not isinstance(call[-1], AIMessage), call[-1]
+
+
+async def test_trace_resets_per_turn(test_settings, fake_repositories):
+    graph = _graph()
+    first_model = ScriptedChatModel(
+        script=[_intent_turn("refund_return"), text_turn("退货政策 [1]。")]
+    )
+    first_values, _, _ = await _run(
+        graph,
+        message="退货政策是什么",
+        model=first_model,
+        repositories=fake_repositories,
+        retriever=_Retriever(evidence=_evidence()),
+        settings=test_settings,
+        session="s-trace-reset",
+    )
+    assert "knowledge_retrieve" in first_values["trace"]
+
+    # 第二轮闲聊：trace 必须重新开始，不能把上一轮的 knowledge_retrieve 带进来。
+    second_values, _, _ = await _run(
+        graph,
+        message="你好",
+        model=ScriptedChatModel(script=[]),
+        repositories=fake_repositories,
+        retriever=_Retriever(),
+        settings=test_settings,
+        session="s-trace-reset",
+    )
+    assert "knowledge_retrieve" not in second_values["trace"]
+    assert second_values["route"] == "chitchat"
+
+
+async def test_mid_agent_failure_leaves_only_user_turn_in_checkpoint(
+    test_settings, fake_repositories
+):
+    """上游在工具之后挂掉：checkpoint 里不能有半截 AI/Tool 消息。"""
+    graph = _graph()
+    model = ScriptedChatModel(
+        script=[
+            _intent_turn("logistics"),
+            tool_turn("query_logistics", {"order_id": "1001"}),
+            # 脚本到这里耗尽：Agent 下一次调用模型会抛错。
+        ]
+    )
+    config = {
+        "configurable": {
+            "thread_id": "s-checkpoint-fail",
+            "model": model,
+            "repositories": fake_repositories,
+            "retriever": _Retriever(),
+            "settings": test_settings,
+        }
+    }
+
+    with pytest.raises(Exception):
+        async for _ in graph.astream(
+            {
+                "session_id": "s-checkpoint-fail",
+                "turn_id": uuid.uuid4().hex,
+                "user_message": "订单 1001 的物流",
+            },
+            config,
+            stream_mode="custom",
+        ):
+            pass
+
+    snapshot = await graph.aget_state(config)
+    messages = snapshot.values.get("messages") or []
+    assert any(isinstance(message, HumanMessage) for message in messages)
+    assert not any(isinstance(message, AIMessage) for message in messages)
+    assert not any(isinstance(message, ToolMessage) for message in messages)
 
 
 async def test_turn_log_written_with_retrieval_trace(fake_repositories):

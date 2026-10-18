@@ -53,12 +53,17 @@ def _unwrap(chunk: Any) -> dict[str, Any] | None:
 def done_payload(values: dict[str, Any], *, session_id: str) -> dict[str, Any]:
     """把最终 state 压成 SSE `done` / 非流式响应用的摘要。"""
     context = values.get("context") or {}
+    stop_reason = values.get("stop_reason")
+    finish_reason = {
+        "max_steps": "length",
+        "token_budget": "length",
+    }.get(str(stop_reason), "stop")
     actions = [
         {"action": action, "ticket_type": values.get("ticket_type") or "售后"}
         for action in (values.get("suggested_actions") or [])
     ]
     return {
-        "finish_reason": "stop",
+        "finish_reason": finish_reason,
         "session_id": session_id,
         "trimmed": int(context.get("trimmed_messages") or 0),
         "kept": int(context.get("kept_messages") or 0),

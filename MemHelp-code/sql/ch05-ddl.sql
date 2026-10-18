@@ -27,3 +27,41 @@ SET @ddl := IF(
 PREPARE stmt FROM @ddl;
 EXECUTE stmt;
 DEALLOCATE PREPARE stmt;
+
+-- 同一份迁移的第二部分：tickets 的建单幂等键。
+-- 前端每次「建工单」按钮生成一个 key；重复提交返回同一张工单，
+-- 防止「服务端已成功、客户端超时后重试」建出两张。
+
+SET @ticket_col_exists := (
+  SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'tickets'
+    AND COLUMN_NAME = 'idempotency_key'
+);
+
+SET @ddl := IF(
+  @ticket_col_exists = 0,
+  'ALTER TABLE tickets ADD COLUMN idempotency_key VARCHAR(64) NULL AFTER status',
+  'SELECT 1'
+);
+
+PREPARE stmt FROM @ddl;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @ticket_idx_exists := (
+  SELECT COUNT(*) FROM information_schema.STATISTICS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'tickets'
+    AND INDEX_NAME = 'uq_tickets_idempotency_key'
+);
+
+SET @ddl := IF(
+  @ticket_idx_exists = 0,
+  'ALTER TABLE tickets ADD UNIQUE KEY uq_tickets_idempotency_key (idempotency_key)',
+  'SELECT 1'
+);
+
+PREPARE stmt FROM @ddl;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;

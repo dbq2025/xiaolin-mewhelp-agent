@@ -60,6 +60,7 @@ def retrieval_outcome(query: str, hits: Sequence[Any] = (), *, refused: bool = F
     return RetrievalOutcome(
         query=UnderstoodQuery(original=query, standard=query, bm25_text=query),
         evidence=build_evidence(chunks),
+        top_score=float(chunks[0].score) if chunks else 0.0,
         refused=refused,
         refusal_source="retrieval_low_conf" if refused else None,
         refusal_reason="测试里判定为低置信度" if refused else None,

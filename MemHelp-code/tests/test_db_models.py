@@ -102,6 +102,7 @@ def test_ticket_columns_match_ddl():
         "description",
         "ticket_type",
         "status",
+        "idempotency_key",
         "created_at",
     }
     assert Ticket.__table__.c.ticket_no.primary_key is True

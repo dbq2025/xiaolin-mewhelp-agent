@@ -591,7 +591,9 @@ TURN_LOG_PATH=logs/ch05-turns.jsonl
 
 ## 3. 真库迁移（只加一列）
 
-`messages` 表新增 `actions JSON NULL`（刷新后按钮还在靠它）。幂等脚本：
+`messages` 表新增 `actions JSON NULL`（刷新后按钮还在靠它）；`tickets` 表新增
+`idempotency_key VARCHAR(64)` + 唯一键（同一个按钮重复提交返回同一张工单）。
+幂等脚本：
 
 ```powershell
 & $uv run --directory MemHelp-code python scripts/apply_ch05_migration.py
@@ -676,6 +678,8 @@ TURN_LOG_PATH=logs/ch05-turns.jsonl
 - 点「转人工」：页面显示「已转接人工客服」，并出现「您好，我是客服小猫，请问有什么
   可以帮您的？」；**不发任何后端请求**；
 - 点「建工单」：才调 `POST /api/actions/create-ticket` 写 `tickets` 表；
+  前端带一个 `idempotency_key`，同一个按钮重复提交（超时重试/刷新后再点）
+  返回同一张工单；
 - 两个按钮互不绑定；都不点就继续发消息，正常走下一轮；
 - 刷新后按钮仍在（`messages.actions`），点击状态用 localStorage 一次性锁定。
 

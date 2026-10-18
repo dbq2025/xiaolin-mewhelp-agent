@@ -77,6 +77,9 @@ class RetrievalOutcome:
 
     query: UnderstoodQuery
     evidence: tuple[Evidence, ...]
+    #: 最高检索分。拒答时 evidence 可能为空，但分数仍要留给日志/低置信度池，
+    #: 否则「0 命中」与「差一点命中」在运维视角里长得一模一样。
+    top_score: float = 0.0
     refused: bool = False
     refusal_source: str | None = None
     refusal_reason: str | None = None
@@ -121,6 +124,7 @@ class RagPipeline:
     ) -> RetrievalOutcome:
         """理解 → 检索 → 两道闸 → 证据。不抛业务异常（空结果是正常结果）。"""
         understood, result, chunks = await self._retrieve(query, category=category)
+        top_score = float(chunks[0].score) if chunks else 0.0
 
         if not chunks:
             return self._refuse(
@@ -128,10 +132,10 @@ class RagPipeline:
                 source="retrieval_low_conf",
                 reason="检索没有命中任何知识块",
                 rerank_degraded=result.rerank_degraded,
+                top_score=0.0,
             )
 
         if self._strategy == ONLINE_STRATEGY and not result.rerank_degraded:
-            top_score = float(chunks[0].score)
             if top_score < self._min_score:
                 logger.info(
                     "检索层低置信：最高分 %.3f < %.3f（query=%r）",
@@ -147,6 +151,7 @@ class RagPipeline:
                         "证据相关性不足"
                     ),
                     rerank_degraded=result.rerank_degraded,
+                    top_score=top_score,
                 )
 
         evidence = build_evidence(chunks)
@@ -157,6 +162,7 @@ class RagPipeline:
             return RetrievalOutcome(
                 query=understood,
                 evidence=evidence,
+                top_score=top_score,
                 refused=True,
                 refusal_source="self_check",
                 refusal_reason=reason,
@@ -167,6 +173,7 @@ class RagPipeline:
         return RetrievalOutcome(
             query=understood,
             evidence=evidence,
+            top_score=top_score,
             refused=False,
             rerank_degraded=result.rerank_degraded,
             self_check_degraded=verdict.degraded,
@@ -182,6 +189,7 @@ class RagPipeline:
         问题都会多一次自评调用，而且 ch04 的正式自评会盖掉本章的最简阈值版。
         """
         understood, result, chunks = await self._retrieve(query, category=category)
+        top_score = float(chunks[0].score) if chunks else 0.0
 
         if not chunks:
             return self._refuse(
@@ -189,10 +197,10 @@ class RagPipeline:
                 source="retrieval_low_conf",
                 reason="检索没有命中任何知识块",
                 rerank_degraded=result.rerank_degraded,
+                top_score=0.0,
             )
 
         if self._strategy == ONLINE_STRATEGY and not result.rerank_degraded:
-            top_score = float(chunks[0].score)
             if top_score < self._min_score:
                 return self._refuse(
                     understood,
@@ -202,11 +210,13 @@ class RagPipeline:
                         "证据相关性不足"
                     ),
                     rerank_degraded=result.rerank_degraded,
+                    top_score=top_score,
                 )
 
         return RetrievalOutcome(
             query=understood,
             evidence=build_evidence(chunks),
+            top_score=top_score,
             refused=False,
             rerank_degraded=result.rerank_degraded,
         )
@@ -228,10 +238,12 @@ class RagPipeline:
         source: str,
         reason: str,
         rerank_degraded: bool,
+        top_score: float = 0.0,
     ) -> RetrievalOutcome:
         return RetrievalOutcome(
             query=understood,
             evidence=(),
+            top_score=top_score,
             refused=True,
             refusal_source=source,
             refusal_reason=reason,

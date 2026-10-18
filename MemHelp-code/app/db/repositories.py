@@ -903,12 +903,24 @@ class TicketRepository:
         )
 
     def _create(
-        self, conversation_id: int, description: str, ticket_type: str, day: date
+        self,
+        conversation_id: int,
+        description: str,
+        ticket_type: str,
+        day: date,
+        idempotency_key: str | None = None,
     ) -> str:
         if ticket_type not in _TICKET_TYPES:
             raise ValueError(
                 f"非法工单类型 {ticket_type!r}，只允许 {_TICKET_TYPES}（对应 DDL 的 ENUM）"
             )
+
+        if idempotency_key:
+            existing = self._session.scalar(
+                select(Ticket.ticket_no).where(Ticket.idempotency_key == idempotency_key)
+            )
+            if existing is not None:
+                return str(existing)
 
         ticket_no = f"T{day:%Y%m%d}{self._count_on(day) + 1:03d}"
         self._session.add(
@@ -917,6 +929,7 @@ class TicketRepository:
                 conversation_id=conversation_id,
                 description=description,
                 ticket_type=ticket_type,
+                idempotency_key=idempotency_key,
             )
         )
         self._session.commit()
@@ -929,16 +942,25 @@ class TicketRepository:
         ticket_type: str,
         *,
         day: date | None = None,
+        idempotency_key: str | None = None,
     ) -> str:
         """写入工单并返回工单号。
 
         ``day`` 可注入：测试要断言「同一天序号递增、换一天重新从 1 开始」，
         不能依赖跑测试当天是不是跨了零点。
 
+        ``idempotency_key`` 是 ch05 的防重：同一个键重复提交返回同一张工单，
+        不再生成新号。唯一索引是最后一道防线（并发下仍可能有一方失败）。
+
         :raises ValueError: ``ticket_type`` 不在 DDL 的 ENUM 取值内。
         """
         return await _run(
-            self._create, conversation_id, description, ticket_type, day or date.today()
+            self._create,
+            conversation_id,
+            description,
+            ticket_type,
+            day or date.today(),
+            idempotency_key,
         )
 
     def _count_created_on(self, day: date) -> int:

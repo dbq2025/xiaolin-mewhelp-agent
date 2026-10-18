@@ -32,6 +32,7 @@ class TicketCreateRepo(Protocol):
         ticket_type: str,
         *,
         day=None,
+        idempotency_key: str | None = None,
     ) -> str: ...
 
 
@@ -46,6 +47,7 @@ async def create_ticket(
     ticket_type: str,
     conversation_id: str,
     *,
+    idempotency_key: str | None = None,
     ticket_repo: TicketCreateRepo,
     conversation_repo: ConversationUpsertRepo,
 ) -> str:
@@ -54,6 +56,7 @@ async def create_ticket(
     :param description: 问题描述。
     :param ticket_type: 工单类型，必须是 ``TICKET_TYPES`` 之一。
     :param conversation_id: 当前的**对外会话标识**（字符串），不是数字外键。
+    :param idempotency_key: 可选的一次性键；同一个键重复提交返回同一张工单。
     :param ticket_repo: 工单仓库。
     :param conversation_repo: 会话仓库，用于把 session_id 换成数字 id。
     :return: JSON 字符串，含 ``ok`` / ``ticket_no`` / ``ticket_type`` / ``status``。
@@ -72,7 +75,9 @@ async def create_ticket(
         )
 
     numeric_id = await conversation_repo.upsert_by_session(conversation_id, "anonymous")
-    ticket_no = await ticket_repo.create(numeric_id, description, ticket_type)
+    ticket_no = await ticket_repo.create(
+        numeric_id, description, ticket_type, idempotency_key=idempotency_key
+    )
 
     return json.dumps(
         {

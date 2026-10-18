@@ -52,7 +52,9 @@ class FakeTicketRepo:
         self.created: list[tuple[int, str, str]] = []
         self._ticket_no = ticket_no
 
-    async def create(self, conversation_id, description, ticket_type, *, day=None):
+    async def create(
+        self, conversation_id, description, ticket_type, *, day=None, idempotency_key=None
+    ):
         self.created.append((conversation_id, description, ticket_type))
         return self._ticket_no
 
@@ -334,7 +336,9 @@ async def test_create_ticket_lets_repository_failure_propagate():
     """同上：基础设施故障必须让执行器分类，不能在这里被吞成「成功」。"""
 
     class Exploding:
-        async def create(self, conversation_id, description, ticket_type, *, day=None):
+        async def create(
+            self, conversation_id, description, ticket_type, *, day=None, idempotency_key=None
+        ):
             raise RuntimeError("disk full")
 
     with pytest.raises(RuntimeError):

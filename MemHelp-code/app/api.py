@@ -498,14 +498,15 @@ async def _db_session_messages_payload(
             "content": row.content or "",
         }
 
-        if row.role == "assistant" and row.tool_calls:
+        traces = getattr(row, "tool_traces", None)
+        if row.role == "assistant" and (row.tool_calls or traces is not None):
             # 优先用 ``tool_traces``（我们自己写的展示用数据，含耗时与成败）。
             # 它是 ch02 迁移新增的列，老行可能没有 —— 那样退化成从 ``tool_calls``
             # 与紧随其后的 ``tool`` 行推断，至少能还原 name/args/ok。
             #
             # ch05：`tool_traces == []` 是**有意义**的（只有 suggest_actions 的控制面
-            # 调用，不该显示徽章），不能再用 truthiness 回退去猜。
-            traces = getattr(row, "tool_traces", None)
+            # 调用，不该显示徽章），不能再用 truthiness 回退去猜。最终答案行也可能带
+            # 整轮的工具轨迹（ch05 把徽章从申请单行挪到了答案行）。
             item["tools"] = traces if traces is not None else _tool_traces(row.tool_calls, rows, index)
 
         # ch04：引用快照。与 ``tools`` 同理 —— 只在有引用时出现，
@@ -959,7 +960,14 @@ def create_app(
         """用户在前端点「建工单」时调用；复用第 2 章的 `create_ticket` 工具。"""
         description = (req.description or "").strip()
         if not description:
-            description = (await repositories_.messages.last_user_content(req.session_id) or "").strip()
+            try:
+                description = (
+                    await repositories_.messages.last_user_content(req.session_id) or ""
+                ).strip()
+            except Exception as exc:  # noqa: BLE001 - 必须映射成规范错误外壳
+                err = _as_upstream_error(exc)
+                status = 503 if err.type == "database_error" else 502
+                return _error(status, err.type, redact(str(err)))
         if not description:
             return _error(422, "validation_error", "工单描述为空：请补一句话说明你的诉求。")
 
@@ -969,6 +977,7 @@ def create_app(
                 "description": description,
                 "ticket_type": req.ticket_type,
                 "conversation_id": req.session_id,
+                "idempotency_key": req.idempotency_key,
             },
             repositories=repositories_,
             # 建单不需要检索器；传 None 避免为了一个 tickets 写入去构造 Milvus 客户端。
@@ -977,6 +986,8 @@ def create_app(
             max_retries=settings_.tool_max_retries,
         )
         if not result.ok:
+            if result.fault == "database":
+                return _error(503, "database_error", "数据库暂时不可用，请稍后重试。")
             return _error(
                 502,
                 "tool_error",

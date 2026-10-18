@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from pydantic import ValidationError
-from sqlalchemy.exc import InterfaceError, OperationalError
+from sqlalchemy.exc import InterfaceError, OperationalError, PendingRollbackError
 
 from app.db.repositories import Repositories
 from app.errors import redact
@@ -61,6 +61,9 @@ class ToolResult:
     duration_ms: int = 0
     #: 是否因为瞬时错误重试过（供留痕与调试）。
     retried: bool = False
+    #: 失败归类：``tool``（参数/业务/未知工具）或 ``database``（库不可用）。
+    #: HTTP 层据此把建单失败映射成 502 或 503，而不是一律 502。
+    fault: str | None = None
 
     def summary(self) -> dict[str, Any]:
         """给 SSE ``done.tools`` 与落库用的精简描述。"""
@@ -99,6 +102,18 @@ def is_transient(exc: BaseException) -> bool:
 
         current = current.__cause__ or current.__context__
 
+    return False
+
+
+def is_database_fault(exc: BaseException) -> bool:
+    """这个工具失败是不是数据库故障（用于把 502 tool_error 映射成 503）。"""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (OperationalError, InterfaceError, PendingRollbackError)):
+            return True
+        current = current.__cause__ or current.__context__
     return False
 
 
@@ -231,6 +246,7 @@ async def execute_tool(
             error=redact(f"工具 {name} 无法加载：{type(exc).__name__}: {exc}"),
             attempts=0,
             duration_ms=_elapsed_ms(),
+            fault="tool",
         )
 
     if tool is None:
@@ -242,6 +258,7 @@ async def execute_tool(
             error=redact(f"未知工具 {name!r}。可用工具：{', '.join(TOOL_NAMES)}"),
             attempts=0,
             duration_ms=_elapsed_ms(),
+            fault="tool",
         )
 
     # -- 2. 参数校验（不重试）---------------------------------------------
@@ -258,6 +275,7 @@ async def execute_tool(
                 error=redact(_validation_error_text(exc)),
                 attempts=1,
                 duration_ms=_elapsed_ms(),
+                fault="tool",
             )
         call_args = validated.model_dump()
     else:
@@ -309,4 +327,5 @@ async def execute_tool(
         attempts=attempts,
         duration_ms=_elapsed_ms(),
         retried=retried,
+        fault="database" if is_database_fault(last_error) else "tool",
     )

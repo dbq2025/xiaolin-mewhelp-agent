@@ -479,6 +479,8 @@
           session_id: sessionId,
           description: sourceText || '',
           ticket_type: ticketType || '售后',
+          // 同一个按钮位置重复提交（超时重试/刷新后再点）返回同一张工单。
+          idempotency_key: actionKey(index, 'create_ticket'),
         }),
       });
       const payload = await resp.json().catch(() => ({}));

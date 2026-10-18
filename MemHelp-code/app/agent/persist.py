@@ -45,10 +45,14 @@ def _rows_from_pending(
     actions: Sequence[dict[str, Any]] | None,
     tool_records: Sequence[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    traces_by_id = {
-        str(record.get("tool_call_id")): list(record.get("traces") or [])
+    # 一轮的工具轨迹统一挂到**最终答案行**：中间的工具调用申请单只用于模型历史，
+    # 不能同时变成一条带徽章的 bot 气泡。否则刷新后 bot 序号比实时多，
+    # localStorage 的 action/feedback 键会整体错位。
+    all_traces = [
+        trace
         for record in tool_records
-    }
+        for trace in (record.get("traces") or [])
+    ]
     rows: list[dict[str, Any]] = []
     last_answer_index: int | None = None
 
@@ -69,17 +73,15 @@ def _rows_from_pending(
             continue
 
         if message.tool_calls:
-            traces: list[dict[str, Any]] = []
-            for call in message.tool_calls:
-                traces.extend(traces_by_id.get(str(call.get("id")), []))
             rows.append(
                 {
                     "role": "assistant",
-                    "content": message.content or "",
+                    # 中间步骤的「我查一下」不单独落成气泡；最终答案才是用户看到的那条。
+                    "content": "",
                     "tool_calls": _tool_calls_payload(message),
-                    # 空列表而不是 None：`suggest_actions` 有 tool_call 但没有徽章，
-                    # 用 [] 明确告诉回读层「这一轮没有要展示的工具」，不要回退去猜。
-                    "tool_traces": traces,
+                    # 空列表而不是 None：明确告诉回读层「这一行不展示徽章」，
+                    # 否则它会回退到从 tool_calls 猜，又画出一条工具气泡。
+                    "tool_traces": [],
                 }
             )
             last_answer_index = None
@@ -92,11 +94,12 @@ def _rows_from_pending(
             )
             last_answer_index = len(rows) - 1
 
-    # 只把引用/动作挂在**最后一条纯文本 assistant** 上；挂到工具申请单行会让
-    # 「这一轮到底引了什么」变得含糊。
+    # 只把引用/动作/工具轨迹挂在**最后一条纯文本 assistant** 上；
+    # 挂到工具申请单行会让「这一轮到底引了什么」变得含糊。
     if last_answer_index is not None:
         rows[last_answer_index]["citations"] = list(citations) if citations else None
         rows[last_answer_index]["actions"] = list(actions) if actions else None
+        rows[last_answer_index]["tool_traces"] = all_traces
 
     return rows
 

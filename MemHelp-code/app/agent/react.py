@@ -44,6 +44,7 @@ from app.agent.evidence import citations_for_answer, evidence_from_tool_result
 from app.agent.prompts import AGENT_EMPTY_TEXT, AGENT_HANDOFF_TEXT
 from app.agent.tools import agent_tools
 from app.chat import _message_text
+from app.chat_tools import fallback_answer
 from app.knowledge.citations import Evidence
 from app.tools.executor import ToolResult, execute_tool, to_tool_message_content
 from app.tools.registry import TOOL_LABELS
@@ -173,6 +174,7 @@ async def run_react_agent(
     stop_reason = "final"
     faq_evidence: tuple[Evidence, ...] = ()
     query_faq_used = False
+    last_tool_result: ToolResult | None = None
 
     while True:
         if llm_calls >= max_steps + 1:
@@ -201,7 +203,10 @@ async def run_react_agent(
         calls = list(assistant.tool_calls or [])
 
         if not calls:
-            if "".join(answer_parts).strip():
+            # 看**这一步**的文本，而不是累计 answer_parts：前一步可能只说了
+            # 「我查一下」就调了工具；如果最后一步空回复，累计值会把它误判成 final。
+            current_text = _message_text(assistant).strip()
+            if current_text:
                 pending_messages.append(assistant)
                 stop_reason = "final"
             else:
@@ -229,6 +234,33 @@ async def run_react_agent(
         if name == "suggest_actions":
             content, record = await _run_suggest_actions(tools_by_name, args, call_id)
             tool_records.append(record)
+        elif name not in tools_by_name:
+            # 模型可能编出本轮**没有绑定**的工具名（最危险的是 create_ticket）。
+            # 绝不能把它交给全局 registry 的 execute_tool —— 那会绕过工具集过滤，
+            # 在没有用户点按钮的情况下真的写 tickets。
+            result = ToolResult(
+                tool=name,
+                args=args,
+                ok=False,
+                data=None,
+                error=(
+                    f"工具 {name!r} 不在本轮可用工具内。"
+                    f"可用工具：{', '.join(tools_by_name)}"
+                ),
+                attempts=0,
+                duration_ms=0,
+            )
+            tool_traces.append(result.summary())
+            content = to_tool_message_content(result)
+            tool_records.append(
+                {
+                    "name": name,
+                    "args": args,
+                    "tool_call_id": call_id,
+                    "content": content,
+                    "traces": [result.summary()],
+                }
+            )
         else:
             result = await run_tool(
                 name,
@@ -238,6 +270,7 @@ async def run_react_agent(
                 timeout=timeout,
                 max_retries=max_retries,
             )
+            last_tool_result = result
             tool_traces.append(result.summary())
             content = to_tool_message_content(result)
             tool_records.append(
@@ -267,7 +300,8 @@ async def run_react_agent(
             stop_reason = "token_budget"
             break
 
-    answer = "".join(answer_parts).strip()
+    preamble = "".join(answer_parts).strip()
+    answer = preamble
     suggested_actions: list[str] = list(record_actions)
 
     if stop_reason in {"max_steps", "token_budget"}:
@@ -279,9 +313,12 @@ async def run_react_agent(
             if action not in suggested_actions:
                 suggested_actions.append(action)
     elif stop_reason == "empty_response" or not answer:
-        answer = AGENT_EMPTY_TEXT
-        pending_messages.append(AIMessage(content=answer))
-        _emit(emit, {"type": "token", "delta": answer})
+        # 最后一步空回复时，优先用最后一条工具结果拼一句人话；
+        # 没有工具结果才用固定兜底。不要把「我查一下」当前言留在答案里。
+        fallback = fallback_answer(last_tool_result) if last_tool_result else AGENT_EMPTY_TEXT
+        answer = f"{preamble}\n\n{fallback}" if preamble else fallback
+        pending_messages.append(AIMessage(content=fallback))
+        _emit(emit, {"type": "token", "delta": ("\n\n" if preamble else "") + fallback})
         if "transfer_human" not in suggested_actions:
             suggested_actions.append("transfer_human")
         stop_reason = "empty_response"

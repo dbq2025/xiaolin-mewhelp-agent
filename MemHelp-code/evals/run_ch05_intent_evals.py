@@ -160,6 +160,9 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- 平均延迟：{report['avg_latency_ms']:.0f} ms",
         f"- 来源计数：`{report['sources']}`",
         "",
+        "> 口径说明：`INTENT_PROMPT` 的边界示例与部分标注用例（L01/O01/C01/C03/R01/H01）"
+        "高度重叠，56/56 里含一定的提示记忆；正式版应补 held-out 集。",
+        "",
         "## 每类 recall",
         "",
         "| 意图 | recall |",

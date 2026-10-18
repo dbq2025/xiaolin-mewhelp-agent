@@ -115,6 +115,14 @@ class CreateTicketArgs(_Args):
             "不要自己编造，否则人工客服无法倒查聊天记录。"
         ),
     )
+    idempotency_key: str | None = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "可选的一次性键。用户在前端点「建工单」时由前端生成；"
+            "同一个键重复提交应返回同一张工单，避免网络重试建出两张。"
+        ),
+    )
 
     _normalise_description = field_validator("description")(_reject_blank)
     _normalise_conversation_id = field_validator("conversation_id")(_reject_blank)

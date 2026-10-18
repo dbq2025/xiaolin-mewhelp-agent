@@ -120,7 +120,12 @@ def _make_tools(repositories: Repositories, retriever: AnswerContextLike | None)
         return await _query_faq(keyword, retriever=retriever)
 
     @tool("create_ticket", args_schema=CreateTicketArgs)
-    async def create_ticket(description: str, ticket_type: str, conversation_id: str) -> str:
+    async def create_ticket(
+        description: str,
+        ticket_type: str,
+        conversation_id: str,
+        idempotency_key: str | None = None,
+    ) -> str:
         """创建人工工单，转交人工客服跟进。
 
         **用户明确要求「建工单 / 提交投诉 / 转人工 / 申请售后」时，直接调本工具。**
@@ -134,12 +139,14 @@ def _make_tools(repositories: Repositories, retriever: AnswerContextLike | None)
         天气、闲聊、能直接答的规则问题**不要**建工单。
 
         conversation_id 必须原样使用系统提示中给出的会话 ID。
+        idempotency_key 由前端「建工单」按钮生成；同一个键重复提交返回同一张工单。
         """
         # 同上：底层 ``_create_ticket`` 是协程函数，必须 await。
         return await _create_ticket(
             description,
             ticket_type,
             conversation_id,
+            idempotency_key=idempotency_key,
             ticket_repo=repositories.tickets,
             conversation_repo=repositories.conversations,
         )

@@ -248,6 +248,12 @@ def _isolate_real_env_file(monkeypatch):
         "CHUNK_OVERLAP",
         "QA_BATCH_SIZE",
         "QA_DEDUPE_THRESHOLD",
+        # ch05 新增：不清掉的话，宿主机设了 CHECKPOINT_DB_PATH / AGENT_* 就会
+        # 让 test_settings_have_ch05_defaults 之类的用例依赖那台机器。
+        "CHECKPOINT_DB_PATH",
+        "AGENT_MAX_STEPS",
+        "AGENT_TOKEN_BUDGET",
+        "TURN_LOG_PATH",
     ):
         monkeypatch.delenv(name, raising=False)
 
