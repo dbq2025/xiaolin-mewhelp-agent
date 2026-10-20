@@ -37,6 +37,7 @@ from typing import Any, TypeVar
 import anyio
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -45,6 +46,7 @@ from app.db.models import (
     MESSAGE_ROLES,
     TICKET_TYPES as _TICKET_TYPES,
     Conversation,
+    ConversationSummary,
     FaithCase,
     Faq,
     KnowledgeChunk,
@@ -174,6 +176,68 @@ class SessionRow:
     status: str
 
 
+class SummarySegmentConflict(Exception):
+    """同一个 ``(conversation_id, segment_no)`` 已被别的写入方占了。
+
+    **必须是一个具名异常，不能让 ``IntegrityError`` 冒到调用方**：后台摘要任务
+    跑在独立 Task 里，它的失败没人 await，只能靠日志。抛出「数据库完整性错误」
+    这句话读起来像数据库故障，而真实含义是「另一个进程已经把这段压完了，放弃即可」。
+    把语义翻译在这一层，任务是放弃、不是报警。
+    """
+
+
+@dataclass(frozen=True)
+class AnchorRow:
+    """``conversations`` 上的两个锚点 + 主键。
+
+    单独一个数据类而不是把整行 ORM 对象递出去：调用方只需要两个整数，
+    递 ORM 对象会让它有机会 lazy-load 别的列（跨线程就是一个新的数据库往返）。
+    """
+
+    conversation_id: int
+    summary_upto_msg_id: int | None
+    layer1_from_msg_id: int | None
+
+
+@dataclass(frozen=True)
+class SummaryRow:
+    """``conversation_summaries`` 的一段梗概。"""
+
+    id: int
+    conversation_id: int
+    segment_no: int
+    from_msg_id: int
+    upto_msg_id: int
+    content: str
+    msg_count: int
+    source_tokens: int
+    model: str | None
+    elapsed_ms: int | None
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class ConversationListRow:
+    """会话侧栏的一行。
+
+    侧栏只要「切换 + 预览 + 是否已压过」，不需要整条会话历史，所以这里一次
+    查询就算好 ``message_count`` / ``preview`` / ``summary_segments``：
+    逐会话再查一次会变成 N+1 次数据库往返，而侧栏是**每次进聊天页都要加载**的。
+    """
+
+    id: int
+    session_id: str
+    user_id: str
+    status: str
+    preview: str
+    message_count: int
+    summary_segments: int
+    summary_upto_msg_id: int | None
+    layer1_from_msg_id: int | None
+    created_at: datetime
+    updated_at: datetime
+
+
 @dataclass(frozen=True)
 class LowConfidenceRow:
     """低置信度池里的一条。"""
@@ -278,6 +342,212 @@ class ConversationRepository:
         「是否已结束」，不需要把整个会话对象搬出来。
         """
         return await _run(self._list_sessions, limit)
+
+    # -- ch07：两个锚点 ----------------------------------------------------
+
+    def _get_anchors(self, conversation_id: int) -> AnchorRow | None:
+        row = self._session.execute(
+            select(
+                Conversation.id,
+                Conversation.summary_upto_msg_id,
+                Conversation.layer1_from_msg_id,
+            ).where(Conversation.id == conversation_id)
+        ).first()
+        if row is None:
+            return None
+        return AnchorRow(
+            conversation_id=int(row[0]),
+            summary_upto_msg_id=None if row[1] is None else int(row[1]),
+            layer1_from_msg_id=None if row[2] is None else int(row[2]),
+        )
+
+    async def get_anchors(self, conversation_id: int) -> AnchorRow | None:
+        """读两个锚点。会话不存在返回 ``None``。"""
+        return await _run(self._get_anchors, conversation_id)
+
+    def _set_anchors(
+        self,
+        conversation_id: int,
+        summary_upto_msg_id: int | None,
+        layer1_from_msg_id: int | None,
+        only_if_layer1_from: int | None,
+    ) -> bool:
+        """写两个锚点，带两条守卫：**单调**与**乐观并发**。
+
+        单调：两个锚点都只允许变大。降级是「把边界往前推」，推回去意味着曾经
+        被截短的消息又要变回原文、曾经被梗概覆盖的消息又要重进上下文 —— 那会让
+        同一事实既在梗概里又在原文里，也破坏「压完不回头重写」的承诺。
+
+        层 1 不得落进摘要区间：``layer1_from >= summary_upto + 1``。同一次调用里
+        ``summary_upto`` 追上来了，就把 ``layer1_from`` 一起顶上去，而不是放任
+        两个锚点交叉。
+
+        ``only_if_layer1_from``：后台任务读历史 → 调模型 → 落库，中间隔着一次
+        网络往返（几秒）。这期间用户可能又聊了几轮、锚点已被本轮拒绝降级推走。
+        落库前复核一次，对不上就返回 ``False`` 让任务放弃 —— **不重试**：重试会
+        压到一段已经变了的区间，而那段的梗概可能已经由本轮的写入方产出。
+        """
+        current = self._session.execute(
+            select(Conversation.summary_upto_msg_id, Conversation.layer1_from_msg_id).where(
+                Conversation.id == conversation_id
+            )
+        ).first()
+        if current is None:
+            return False
+        current_summary = None if current[0] is None else int(current[0])
+        current_layer1 = None if current[1] is None else int(current[1])
+
+        if only_if_layer1_from is not None and current_layer1 != only_if_layer1_from:
+            return False
+
+        next_summary = current_summary
+        if summary_upto_msg_id is not None:
+            next_summary = (
+                summary_upto_msg_id
+                if current_summary is None
+                else max(current_summary, summary_upto_msg_id)
+            )
+
+        next_layer1 = current_layer1
+        if layer1_from_msg_id is not None:
+            next_layer1 = (
+                layer1_from_msg_id
+                if current_layer1 is None
+                else max(current_layer1, layer1_from_msg_id)
+            )
+
+        # 层 1 不许落进摘要区间。摘要边界已知而层 1 更小 → 顶到摘要之后。
+        if next_summary is not None and (next_layer1 is None or next_layer1 <= next_summary):
+            next_layer1 = next_summary + 1
+
+        if next_summary == current_summary and next_layer1 == current_layer1:
+            return True
+
+        self._session.execute(
+            update(Conversation)
+            .where(Conversation.id == conversation_id)
+            .values(
+                summary_upto_msg_id=next_summary,
+                layer1_from_msg_id=next_layer1,
+            )
+        )
+        self._session.commit()
+        return True
+
+    async def set_anchors(
+        self,
+        *,
+        conversation_id: int,
+        summary_upto_msg_id: int | None = None,
+        layer1_from_msg_id: int | None = None,
+        only_if_layer1_from: int | None = None,
+    ) -> bool:
+        """推进锚点。返回值表示「写成功且未被并发守卫拦下」。
+
+        传 ``None`` 表示「这一项不动」（不是「置空」）：两个锚点一旦有了值就
+        只增不减，没有清空需求 —— 清空等于撤销摘要，而摘要段已经落库了。
+        """
+        return await _run(
+            self._set_anchors,
+            conversation_id,
+            summary_upto_msg_id,
+            layer1_from_msg_id,
+            only_if_layer1_from,
+        )
+
+    # -- ch07：会话侧栏 ----------------------------------------------------
+
+    def _list_for_user(self, user_id: str, limit: int) -> list[ConversationListRow]:
+        """一次查询算齐侧栏要的全部字段。
+
+        三次 ``func.count`` 走**相关子查询**而不是 JOIN + GROUP BY：一个会话可能
+        有多条消息、多段梗概，JOIN 会先做笛卡尔积再聚合，条数一多就退化。相关
+        子查询各自走 ``idx_conversation_id`` / ``idx_summary_conversation_id``。
+        """
+        message_count = (
+            select(func.count(Message.id))
+            .where(Message.conversation_id == Conversation.id)
+            .correlate(Conversation)
+            .scalar_subquery()
+        )
+        summary_segments = (
+            select(func.count(ConversationSummary.id))
+            .where(ConversationSummary.conversation_id == Conversation.id)
+            .correlate(Conversation)
+            .scalar_subquery()
+        )
+        # 预览取**首条 user 消息**：侧栏要回答「这个会话在聊什么」，用最新一句
+        # 会变成「好的」这种无信息量的东西。取最小 id 而不是最小 created_at ——
+        # 同一秒内连发两条时时间戳会并列，id 不会。
+        first_user_id = (
+            select(func.min(Message.id))
+            .where(Message.conversation_id == Conversation.id, Message.role == "user")
+            .correlate(Conversation)
+            .scalar_subquery()
+        )
+        preview = (
+            select(Message.content)
+            .where(Message.id == first_user_id)
+            .correlate(Conversation)
+            .scalar_subquery()
+        )
+
+        stmt = (
+            select(
+                Conversation.id,
+                Conversation.session_id,
+                Conversation.user_id,
+                Conversation.status,
+                preview,
+                message_count,
+                summary_segments,
+                Conversation.summary_upto_msg_id,
+                Conversation.layer1_from_msg_id,
+                Conversation.created_at,
+                Conversation.updated_at,
+            )
+            .where(Conversation.user_id == user_id)
+            .order_by(Conversation.id.desc())
+            .limit(limit)
+        )
+
+        return [
+            ConversationListRow(
+                id=int(row[0]),
+                session_id=str(row[1]),
+                user_id=str(row[2]),
+                status=str(row[3]),
+                preview=_preview_text(row[4]),
+                message_count=int(row[5] or 0),
+                summary_segments=int(row[6] or 0),
+                summary_upto_msg_id=None if row[7] is None else int(row[7]),
+                layer1_from_msg_id=None if row[8] is None else int(row[8]),
+                created_at=row[9],
+                updated_at=row[10],
+            )
+            for row in self._session.execute(stmt).all()
+        ]
+
+    async def list_for_user(self, *, user_id: str, limit: int = 50) -> list[ConversationListRow]:
+        """某个用户的全部会话，**新的在前**（侧栏顺序）。"""
+        return await _run(self._list_for_user, user_id, limit)
+
+
+#: 侧栏预览的最大字数。
+#:
+#: 60 而不是 20：中文客服场景里「我上周买的那个蓝牙耳机什么时候能到」这种
+#: 一句话就 20 字，截太短等于全部显示成同一个开头。60 字能装下两三句。
+PREVIEW_MAX_CHARS = 60
+
+
+def _preview_text(content: str | None) -> str:
+    """把首问压成一行预览：折叠空白、截断、补省略号。"""
+    if not content:
+        return ""
+    text = " ".join(str(content).split())
+    if len(text) <= PREVIEW_MAX_CHARS:
+        return text
+    return text[:PREVIEW_MAX_CHARS] + "…"
 
 
 # ---------------------------------------------------------------------------
@@ -485,6 +755,145 @@ def _row_to_message(row: MessageRow) -> BaseMessage:
             )
         return ToolMessage(content=row.content or "", tool_call_id=row.tool_call_id)
     raise ValueError(f"未知消息角色 {row.role!r}（id={row.id}）")
+
+
+# ---------------------------------------------------------------------------
+# 会话梗概
+# ---------------------------------------------------------------------------
+
+
+class ConversationSummaryRepository:
+    """``conversation_summaries`` 表的读写 —— 只追加，不更新、不删除。
+
+    没有任何 ``update`` / ``delete`` 方法不是遗漏：梗概是「历史被压过一次」的
+    证据链，改它等于篡改事实。要修正措辞只能**追加新段**（那会让同一区间被压两次，
+    由 ``UNIQUE(conversation_id, segment_no)`` 挡住）。
+    """
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def _append(
+        self,
+        conversation_id: int,
+        segment_no: int,
+        from_msg_id: int,
+        upto_msg_id: int,
+        content: str,
+        msg_count: int,
+        source_tokens: int,
+        model: str | None,
+        elapsed_ms: int | None,
+    ) -> int:
+        row = ConversationSummary(
+            conversation_id=conversation_id,
+            segment_no=segment_no,
+            from_msg_id=from_msg_id,
+            upto_msg_id=upto_msg_id,
+            content=content,
+            msg_count=msg_count,
+            source_tokens=source_tokens,
+            model=model,
+            elapsed_ms=elapsed_ms,
+        )
+        self._session.add(row)
+        try:
+            self._session.commit()
+        except IntegrityError as exc:
+            # 唯一键冲突 = 另一个进程已经把这段压完了。翻译成具名异常让任务
+            # 「安静放弃」，而不是让驱动错误一路冒到日志里显得像数据库故障。
+            self._session.rollback()
+            raise SummarySegmentConflict(
+                f"会话 {conversation_id} 的第 {segment_no} 段梗概已存在（并发写入）"
+            ) from exc
+        return int(row.id)
+
+    async def append(
+        self,
+        *,
+        conversation_id: int,
+        segment_no: int,
+        from_msg_id: int,
+        upto_msg_id: int,
+        content: str,
+        msg_count: int,
+        source_tokens: int,
+        model: str | None = None,
+        elapsed_ms: int | None = None,
+    ) -> int:
+        """追加一段梗概，返回行 id。段号冲突抛 :class:`SummarySegmentConflict`。"""
+        return await _run(
+            self._append,
+            conversation_id,
+            segment_no,
+            from_msg_id,
+            upto_msg_id,
+            content,
+            msg_count,
+            source_tokens,
+            model,
+            elapsed_ms,
+        )
+
+    def _list_for_conversation(self, conversation_id: int) -> list[SummaryRow]:
+        rows = self._session.scalars(
+            select(ConversationSummary)
+            .where(ConversationSummary.conversation_id == conversation_id)
+            .order_by(ConversationSummary.segment_no)
+        ).all()
+        return [
+            SummaryRow(
+                id=row.id,
+                conversation_id=row.conversation_id,
+                segment_no=row.segment_no,
+                from_msg_id=row.from_msg_id,
+                upto_msg_id=row.upto_msg_id,
+                content=row.content,
+                msg_count=row.msg_count,
+                source_tokens=row.source_tokens,
+                model=row.model,
+                elapsed_ms=row.elapsed_ms,
+                created_at=row.created_at,
+            )
+            for row in rows
+        ]
+
+    async def list_for_conversation(self, conversation_id: int) -> list[SummaryRow]:
+        """按 ``segment_no`` 升序取全部梗概（段号是权威顺序，不是插入顺序）。"""
+        return await _run(self._list_for_conversation, conversation_id)
+
+    def _next_segment_no(self, conversation_id: int) -> int:
+        current = self._session.scalar(
+            select(func.max(ConversationSummary.segment_no)).where(
+                ConversationSummary.conversation_id == conversation_id
+            )
+        )
+        return 1 if current is None else int(current) + 1
+
+    async def next_segment_no(self, conversation_id: int) -> int:
+        """下一段的段号。**只是建议值** —— 真正的收口是唯一键。"""
+        return await _run(self._next_segment_no, conversation_id)
+
+    def _latest_texts(self, conversation_id: int, limit: int | None) -> list[str]:
+        stmt = (
+            select(ConversationSummary.content)
+            .where(ConversationSummary.conversation_id == conversation_id)
+            .order_by(ConversationSummary.segment_no.desc())
+        )
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        # 先按段号**倒序**取最近 N 段，再翻回正序：直接正序 + LIMIT 拿到的是
+        # **最早**的 N 段，与「只喂最近的梗概」正好相反。
+        return [str(text) for text in reversed(self._session.scalars(stmt).all())]
+
+    async def latest_texts(self, conversation_id: int, limit: int | None = None) -> list[str]:
+        """最近的若干段梗概正文，**按段号升序**返回。
+
+        ``limit=None`` 取全部。有上限时取**最近**的 N 段：更早的段已经被后面的
+        段在语义上隐含覆盖（「用户先问耳机、后报订单号」读起来比「只有第一段」更全），
+        而把它们全喂进去只会挤占预算。
+        """
+        return await _run(self._latest_texts, conversation_id, limit)
 
 
 # ---------------------------------------------------------------------------
@@ -1259,6 +1668,8 @@ class Repositories:
     low_confidence: LowConfidenceQuestionRepository
     #: ch04：编造个案台账
     faith_cases: FaithCaseRepository
+    #: ch07：会话梗概（只追加）
+    summaries: ConversationSummaryRepository
 
     @classmethod
     def from_session(cls, session: Session) -> "Repositories":
@@ -1276,4 +1687,5 @@ class Repositories:
             qa_staging=QaStagingRepository(session),
             low_confidence=LowConfidenceQuestionRepository(session),
             faith_cases=FaithCaseRepository(session),
+            summaries=ConversationSummaryRepository(session),
         )
