@@ -12,7 +12,7 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import quote_plus
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 #: 项目根目录（``app/`` 的上一级）。
@@ -175,7 +175,14 @@ class Settings(BaseSettings):
         description="RRF 融合后送进重排的候选数。比 rerank_top_n 大，给重排留跨路候选。",
     )
     rag_rerank_top_n: int = Field(
-        default=10, ge=1, le=50, description="重排后保留、并作为证据编号的条数。"
+        default=10,
+        ge=1,
+        le=50,
+        validation_alias=AliasChoices("RAG_RERANK_TOP_N", "RERANK_TOP_K"),
+        description=(
+            "重排后保留、并作为证据编号的条数。ch07 起也叫 RERANK_TOP_K（预算里"
+            "按这个条数扣证据开销），两个环境变量名都能读。"
+        ),
     )
     rag_min_rerank_score: float = Field(
         default=0.3,
@@ -207,7 +214,12 @@ class Settings(BaseSettings):
         default=6,
         ge=1,
         le=12,
-        description="ReAct 最多执行几轮工具调用（不含最终收敛的那次模型调用）。",
+        validation_alias=AliasChoices("AGENT_MAX_STEPS", "MAX_AGENT_STEPS"),
+        description=(
+            "ReAct 最多执行几轮工具调用（不含最终收敛的那次模型调用）。"
+            "ch07 起也叫 MAX_AGENT_STEPS（预算里按这个步数扣单轮峰值），"
+            "两个环境变量名都能读；**默认值不变**，ch05 的既有断言依赖它。"
+        ),
     )
     agent_token_budget: int = Field(
         default=6000,
@@ -282,6 +294,149 @@ class Settings(BaseSettings):
         le=5,
         description="订单选择器候选数（按 session 确定性派生）。",
     )
+
+    # -- ch07：会话上下文管理（三层 + 预算倒推 + 异步摘要）------------------
+    model_context_window: int = Field(
+        default=32000,
+        ge=1000,
+        description=(
+            "模型上下文窗口（token）。默认 32000 要能装下 20 轮——验收要求"
+            "「默认窗口下聊二十轮不触发任何降级和摘要」。"
+        ),
+    )
+    max_output_tokens: int = Field(
+        default=4000,
+        ge=1,
+        description="输出预留：模型单次要往外吐的 token 上限，从窗口里先扣掉。",
+    )
+    max_user_input_tokens: int = Field(
+        default=2000,
+        ge=1,
+        description="单轮用户输入的瞬时峰值（含系统提示之外的注入）。",
+    )
+    tool_result_max_tokens: int = Field(
+        default=1200,
+        ge=1,
+        description="单次工具结果的峰值 token 数；乘以步数得到单轮 ReAct 峰值。",
+    )
+    safety_margin_ratio: float = Field(
+        default=0.10,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "安全余量占窗口的比例，用来吸收计数器误差与 chat template 差异。"
+            "取 0.10 表示窗口的十分之一定为不可动用。"
+        ),
+    )
+    system_prompt_reserve_tokens: int = Field(
+        default=1200,
+        ge=1,
+        description=(
+            "系统提示（人设 + 红线 + 工具定义）的固定估算。实测校准口径下"
+            "720 字符约 583 token，带 5 条证据约 711——1200 是含余量的保守值。"
+        ),
+    )
+    evidence_tokens_per_item: int = Field(
+        default=250,
+        ge=1,
+        description="每条检索证据的估算 token 数（合进「检索证据」这项固定开销）。",
+    )
+    summary_reserve_tokens: int = Field(
+        default=500,
+        ge=1,
+        description="注入的会话梗概（合成一条）的估算 token 数。",
+    )
+    history_desired_turns: int = Field(
+        default=20,
+        ge=1,
+        description="想留住的轮数。与「每轮稳态占用」相乘得到历史预算的上界。",
+    )
+    history_tokens_per_turn: int = Field(
+        default=400,
+        ge=1,
+        description=(
+            "每轮稳态占用的 tokens。既用来算「想留住多少」，也是启动自检里"
+            "「连一轮都装不下」的门槛。"
+        ),
+    )
+    layer1_ratio: float = Field(
+        default=0.7,
+        gt=0.0,
+        lt=1.0,
+        description="历史预算里层 1（原文滑窗）占的比例。",
+    )
+    layer2_ratio: float = Field(
+        default=0.3,
+        gt=0.0,
+        lt=1.0,
+        description="历史预算里层 2（规则截短）占的比例。与 layer1_ratio 之和必须是 1。",
+    )
+    assistant_preview_chars: int = Field(
+        default=60,
+        ge=1,
+        description="层 2 里客服答复只留开头多少字；用户原话一个字都不动。",
+    )
+    summary_enabled: bool = Field(
+        default=True,
+        description=(
+            "摘要总开关。关掉后层 2 超预算也不起后台任务——只降级不摘要，"
+            "方便做对照实验。"
+        ),
+    )
+    summary_model: str = Field(
+        default="",
+        description="摘要用的模型名；空串表示与主模型相同。",
+    )
+    summary_timeout_seconds: float = Field(
+        default=20.0,
+        gt=0,
+        description="单次摘要任务的上游超时（秒）。",
+    )
+    summary_max_tokens: int = Field(
+        default=300,
+        ge=1,
+        description="摘要输出上限；正文超出按它换算的字数截断。",
+    )
+    cjk_chars_per_token: float = Field(
+        default=1.0,
+        gt=0,
+        description=(
+            "几个 CJK 字符合成一个 token。**预算与计数器必须读同一个值**——"
+            "只改一个的净效果是反的。"
+        ),
+    )
+    other_chars_per_token: float = Field(
+        default=3.5,
+        gt=0,
+        description="几个非 CJK 字符合成一个 token。",
+    )
+    message_overhead_tokens: int = Field(
+        default=3,
+        ge=0,
+        description="每条消息的固定开销（角色标签、分隔符），与正文长度无关。",
+    )
+    app_log_path: str = Field(
+        default="log/app.log",
+        description=(
+            "上下文可观测日志（model_ctx / history_ctx / summary 五态）的落盘路径。"
+            "相对路径按项目根解析；空串表示只打 logger 不写文件。"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _layer_ratios_must_sum_to_one(self) -> "Settings":
+        """层 1 + 层 2 必须刚好把历史预算分完。
+
+        允许 1e-6 的浮点误差：``0.7 + 0.3`` 在二进制浮点里未必精确等于 1，
+        这不影响 ``round()`` 的取整结果。
+        """
+        total = self.layer1_ratio + self.layer2_ratio
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(
+                f"LAYER1_RATIO + LAYER2_RATIO 必须等于 1，当前 {self.layer1_ratio} + "
+                f"{self.layer2_ratio} = {total}"
+            )
+        return self
 
     def require_embedding_key(self) -> str:
         """返回嵌入服务密钥；没配就抛可读错误。

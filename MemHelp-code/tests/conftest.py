@@ -268,6 +268,31 @@ def _isolate_real_env_file(monkeypatch):
         "QUERY_EXPANSION_TIMEOUT",
         "QUERY_EXPANSION_MAX_QUERIES",
         "REFUND_ORDER_COUNT",
+        # ch07 新增：宿主机设了这些键时，「默认窗口下不触发压缩」之类的用例
+        # 会变成依赖那台机器。别名两个名字都要清。
+        "MODEL_CONTEXT_WINDOW",
+        "MAX_OUTPUT_TOKENS",
+        "MAX_USER_INPUT_TOKENS",
+        "TOOL_RESULT_MAX_TOKENS",
+        "MAX_AGENT_STEPS",
+        "RERANK_TOP_K",
+        "SAFETY_MARGIN_RATIO",
+        "SYSTEM_PROMPT_RESERVE_TOKENS",
+        "EVIDENCE_TOKENS_PER_ITEM",
+        "SUMMARY_RESERVE_TOKENS",
+        "HISTORY_DESIRED_TURNS",
+        "HISTORY_TOKENS_PER_TURN",
+        "LAYER1_RATIO",
+        "LAYER2_RATIO",
+        "ASSISTANT_PREVIEW_CHARS",
+        "SUMMARY_ENABLED",
+        "SUMMARY_MODEL",
+        "SUMMARY_TIMEOUT_SECONDS",
+        "SUMMARY_MAX_TOKENS",
+        "CJK_CHARS_PER_TOKEN",
+        "OTHER_CHARS_PER_TOKEN",
+        "MESSAGE_OVERHEAD_TOKENS",
+        "APP_LOG_PATH",
     ):
         monkeypatch.delenv(name, raising=False)
 
