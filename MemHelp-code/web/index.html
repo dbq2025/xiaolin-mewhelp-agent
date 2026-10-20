@@ -28,7 +28,19 @@
     </div>
   </header>
 
-  <main class="messages" id="messages" aria-live="polite"></main>
+  <div class="body">
+    <aside class="sidebar" id="sidebar" aria-label="会话列表">
+      <div class="sidebar-head">
+        <span class="sidebar-title">会话</span>
+        <button class="btn-ghost" id="btn-new-chat" type="button">新对话</button>
+      </div>
+      <ul class="sidebar-list" id="sidebar-list"></ul>
+    </aside>
+
+    <main class="messages" id="messages" aria-live="polite"></main>
+  </div>
+
+  <button class="sidebar-toggle" id="sidebar-toggle" type="button" aria-label="会话列表">☰</button>
 
   <footer class="composer">
     <div class="composer-inner">

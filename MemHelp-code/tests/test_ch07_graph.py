@@ -269,6 +269,12 @@ async def test_summary_is_scheduled_but_not_awaited(test_settings, fake_reposito
         assert job["conversation_id"] > 0
         assert job["layer2_budget"] == compute_budget(settings).layer2_budget
         assert job["plan"].summary_due is True
+        # 乐观并发要挡的是「别的进程在我算完之后又挪了锚点」，不是我们自己
+        # 刚刚那次降级。传规划前的旧锚点，后台任务复核时永远看到
+        # 「anchor moved」，每轮 skip，摘要一次也不会落 —— 演示脚本就是这么
+        # 抓到的：layer1 降级一行不少，summary trigger 也打得对，但
+        # summary done 永远不出现。
+        assert job["expected_layer1_from"] == job["plan"].layer1_from_msg_id
     finally:
         shutil.rmtree(log_dir, ignore_errors=True)
 

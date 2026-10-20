@@ -809,8 +809,25 @@ async def _run_agent_node(
                 conversation_id=conversation_id,
                 layer1_from_msg_id=ctx.layer1_from_msg_id,
             )
+            # 这一行是验收第 2 条的抓手：`grep "layer1 降级"` 就能看到
+            # 「层 1 从哪条挪到哪条、丢掉几行、预算是多少」。
+            # 只打预算表的话，日志里看不出边界到底动没动。
+            #
+            # 同时落 `log/app.log`：验收要求「日志里能看到完整级联」，
+            # 而级联的其余几环（model_ctx / summary trigger / summary done）
+            # 都写在那个文件里。只走 stdlib logger 的话，grep 同一个文件
+            # 只能看到摘要那两环，降级那一环永远「未命中」。
+            detail = (
+                f"ch07 layer1 降级 {layer1_from if layer1_from is not None else '-'}"
+                f"→{ctx.layer1_from_msg_id} session={state.get('session_id') or ''}"
+                f" turn={state.get('turn_id') or ''}"
+                f" dropped={plan.dropped_layer1_rows}"
+                f" layer1_tokens={plan.layer1_tokens}"
+                f" layer1_budget={budget.layer1_budget}"
+            )
             logger.info(
-                "ch07 降级 %s",
+                "%s 预算表 %s",
+                detail,
                 format_budget_report_parts(
                     window=budget.model_context_window,
                     overhead=budget.overhead,
@@ -819,6 +836,7 @@ async def _run_agent_node(
                     layer2=budget.layer2_budget,
                 ),
             )
+            ctx_logger.write(detail)
 
     # ---- 层 2 超预算：调度后台摘要，**不 await** ----
     # 顺序很重要：调度放在调模型之前，摘要任务才有机会与本轮回复并行跑。
@@ -831,12 +849,22 @@ async def _run_agent_node(
         and summarizer is not None
         and conversation_id is not None
     ):
+        # ``expected_layer1_from`` 必须是**本次降级落库之后**的锚点。
+        #
+        # 这里踩过一次：上面刚把 `ctx.layer1_from_msg_id` 写进库，这里却传了
+        # 规划之前的旧值 `layer1_from`，于是后台任务复核时**永远**看到
+        # 「anchor moved: expected 57 now 59」，每轮都 skip，摘要一次也不会落。
+        # 乐观并发要挡的是「别的进程在我算完之后又挪了锚点」，不是我们自己
+        # 刚刚那次降级。
+        expected_anchor = (
+            ctx.layer1_from_msg_id if ctx.layer1_from_msg_id else layer1_from
+        )
         summarizer.schedule(
             session_id=str(state.get("session_id") or ""),
             conversation_id=conversation_id,
             plan=plan,
             layer2_budget=budget.layer2_budget,
-            expected_layer1_from=layer1_from,
+            expected_layer1_from=expected_anchor,
             background="\n".join(summary_texts),
         )
 

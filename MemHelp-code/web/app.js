@@ -23,6 +23,9 @@
 
   const API = '/api/chat/completions';
   const SESSION_KEY = 'mewhelp.session_id';
+  const CONVERSATION_KEY = 'mewhelp.conversation_id';
+  const CONVERSATIONS_API = '/api/conversations';
+  const USER_ID = 'anonymous';
 
   const els = {
     messages: document.getElementById('messages'),
@@ -32,9 +35,21 @@
     stats: document.getElementById('show-stats'),
     status: document.getElementById('status'),
     statusText: document.getElementById('status-text'),
+    sidebar: document.getElementById('sidebar'),
+    sidebarList: document.getElementById('sidebar-list'),
+    sidebarToggle: document.getElementById('sidebar-toggle'),
+    newChat: document.getElementById('btn-new-chat'),
   };
 
   let sessionId = sessionStorage.getItem(SESSION_KEY) || null;
+  /* 侧栏当前高亮的会话行（``conversations.id``）。**与 sessionId 是两个 id**：
+     列表给的是主键，聊天用 session_id，切换时要同时换掉两个，否则「点的是 A、
+     说的话却落进 B」（Review Focus 5）。 */
+  let conversationId = (() => {
+    const raw = sessionStorage.getItem(CONVERSATION_KEY);
+    const n = raw == null ? NaN : Number(raw);
+    return Number.isFinite(n) ? n : null;
+  })();
   let busy = false;
   let stickToBottom = true;   // 用户往上翻时不要强行拉回底部
 
@@ -1001,8 +1016,181 @@
   /* 后端把角色叫 human / ai / tool，前端气泡只分「我」和「客服」两类。
    * tool 行不单独渲染成气泡 —— 它的内容已经体现在徽章里了，再画一个气泡
    * 会让用户看到一坨 JSON。 */
+  // ------------------------------------------------------ 会话侧栏（ch07）
+
+  function rememberConversation(id) {
+    conversationId = id;
+    try {
+      if (id == null) sessionStorage.removeItem(CONVERSATION_KEY);
+      else sessionStorage.setItem(CONVERSATION_KEY, String(id));
+    } catch { /* 隐私模式下 storage 可能抛，功能不该因此失效 */ }
+  }
+
+  function formatSidebarTime(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    const pad = (n) => String(n).padStart(2, '0');
+    const now = new Date();
+    const sameDay = d.toDateString() === now.toDateString();
+    if (sameDay) return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    return `${d.getMonth() + 1}月${d.getDate()}日`;
+  }
+
+  function markActiveSidebarItem() {
+    if (!els.sidebarList) return;
+    els.sidebarList.querySelectorAll('.sidebar-item').forEach((node) => {
+      const id = Number(node.dataset.conversationId);
+      node.classList.toggle('is-active', conversationId != null && id === conversationId);
+    });
+  }
+
+  function renderConversations(rows) {
+    if (!els.sidebarList) return;
+    els.sidebarList.innerHTML = '';
+    if (!rows.length) {
+      const empty = el('li', 'sidebar-empty', '还没有会话，说句话就开一个。');
+      els.sidebarList.appendChild(empty);
+      return;
+    }
+    rows.forEach((row) => {
+      const item = el('li', 'sidebar-item');
+      item.dataset.conversationId = String(row.id);
+      if (row.summary_segments > 0) item.classList.add('is-summarized');
+      if (conversationId != null && row.id === conversationId) item.classList.add('is-active');
+
+      const preview = el('div', 'sidebar-preview', row.preview || '（空会话）');
+      preview.title = row.preview || '（空会话）';
+      const meta = el('div', 'sidebar-meta');
+      meta.appendChild(el('span', null, formatSidebarTime(row.updated_at || row.created_at)));
+      if (row.message_count) meta.appendChild(el('span', null, `${row.message_count} 条`));
+
+      item.appendChild(preview);
+      item.appendChild(meta);
+      item.addEventListener('click', () => {
+        switchConversation(row.id, row.session_id);
+      });
+      els.sidebarList.appendChild(item);
+    });
+  }
+
+  /* 拉侧栏。**整个函数体包在 try/catch 里**：侧栏是增强，列表挂了也必须能聊天，
+     所以失败只清空列表，不弹提示、不改顶栏状态（静默降级）。 */
+  async function loadConversations() {
+    try {
+      const resp = await fetch(
+        `${CONVERSATIONS_API}?user_id=${encodeURIComponent(USER_ID)}&limit=50`,
+        { method: 'GET' },
+      );
+      if (!resp.ok) {
+        els.sidebarList.innerHTML = '';
+        return;
+      }
+      const data = await resp.json();
+      renderConversations(Array.isArray(data.conversations) ? data.conversations : []);
+    } catch {
+      if (els.sidebarList) els.sidebarList.innerHTML = '';
+    }
+  }
+
+  function closeSidebarDrawer() {
+    if (els.sidebar) els.sidebar.classList.remove('is-open');
+  }
+
+  /* 切到某个会话：先按主键取历史，成功之后才动视图与两个 id。
+     先换 id 再取历史的话，取失败就变成「视图还是旧会话的，id 已经指向新会话」，
+     下一句话会落进另一个会话里。 */
+  async function switchConversation(id, nextSessionId) {
+    if (busy) return;
+    els.messages.innerHTML = '';
+    welcome();
+    let messages = [];
+    try {
+      const resp = await fetch(`${CONVERSATIONS_API}/${id}/messages`, { method: 'GET' });
+      if (resp.ok) {
+        const data = await resp.json();
+        messages = Array.isArray(data.messages) ? data.messages : [];
+      }
+    } catch {
+      /* 取不到就当空会话打开，不阻断聊天 */
+    }
+
+    sessionId = nextSessionId || null;
+    rememberConversation(id);
+    try {
+      if (sessionId) sessionStorage.setItem(SESSION_KEY, sessionId);
+      else sessionStorage.removeItem(SESSION_KEY);
+    } catch { /* 同上 */ }
+
+    els.messages.innerHTML = '';
+    if (!messages.length) {
+      welcome();
+    } else {
+      paintHistory(messages);
+    }
+    markActiveSidebarItem();
+    closeSidebarDrawer();
+    els.input.focus();
+  }
+
+  /* 「新对话」只开一个新会话：清视图 + 丢掉两个 id，**不删任何旧会话** ——
+     旧会话仍在侧栏里，随时可以点回去。 */
+  function newConversation() {
+    els.messages.innerHTML = '';
+    sessionId = null;
+    rememberConversation(null);
+    try { sessionStorage.removeItem(SESSION_KEY); } catch { /* 同上 */ }
+    welcome();
+    markActiveSidebarItem();
+    closeSidebarDrawer();
+    els.input.focus();
+  }
+
+  if (els.sidebarToggle) {
+    els.sidebarToggle.addEventListener('click', () => {
+      if (els.sidebar) els.sidebar.classList.toggle('is-open');
+    });
+  }
+  if (els.newChat) els.newChat.addEventListener('click', newConversation);
+
   function roleToRow(role) {
     return role === 'human' ? 'user' : 'bot';
+  }
+
+  /* 把一屏历史画出来。侧栏回载与首屏恢复共用这一段 —— 两套渲染会漂：
+     徽章、引用、反馈、建议动作这些细节，只要有一处忘了还原就是「刷新后少了东西」。 */
+  function paintHistory(all) {
+    const messages = (all || []).filter((m) => {
+      if (m.role === 'tool') return false;          // 工具结果已体现在徽章里，不单独画气泡
+      // 带工具调用但正文为空的那条 assistant，是「申请单」而不是回答 ——
+      // 它渲染出来会变成一个多余的「（客服没有返回内容）」空气泡。
+      if (m.role === 'assistant' && !(m.content || '').trim() && m.tools) return false;
+      return roleToRow(m.role) != null;
+    });
+    if (!messages.length) return;
+
+    clearWelcome();
+    let lastUserText = '';
+    messages.forEach((m) => {
+      const role = roleToRow(m.role);
+      const row = addRow(role);
+      if (role === 'user') {
+        lastUserText = m.content || '';
+        row.body.textContent = m.content || '';
+      } else {
+        row.body.innerHTML = m.content
+          ? renderMarkdown(m.content)
+          : '<span style="color:#9aa2af">（客服没有返回内容）</span>';
+        // 工具记录随历史一起还原 —— 这正是「刷新后记录还在」的实现。
+        setToolRecords(row, m.tools);
+        // 引用与反馈同理：刷新后角标仍可点、已反馈仍是已反馈
+        decorateCitations(row.body, m.citations);
+        attachFeedback(row);
+        // ch05：建议动作也随历史还原；建单描述回退到上一条用户消息。
+        attachActions(row, m.actions, { sourceText: lastUserText });
+      }
+    });
+    scrollToBottom(true);
   }
 
   async function restoreHistory() {
@@ -1011,37 +1199,7 @@
       const resp = await fetch(`/api/chat/sessions/${sessionId}/messages`, { method: 'POST' });
       if (!resp.ok) return;
       const data = await resp.json();
-      const messages = (data.messages || []).filter((m) => {
-        if (m.role === 'tool') return false;          // 工具结果已体现在徽章里，不单独画气泡
-        // 带工具调用但正文为空的那条 assistant，是「申请单」而不是回答 ——
-        // 它渲染出来会变成一个多余的「（客服没有返回内容）」空气泡。
-        if (m.role === 'assistant' && !(m.content || '').trim() && m.tools) return false;
-        return roleToRow(m.role) != null;
-      });
-      if (!messages.length) return;
-
-      clearWelcome();
-      let lastUserText = '';
-      messages.forEach((m) => {
-        const role = roleToRow(m.role);
-        const row = addRow(role);
-        if (role === 'user') {
-          lastUserText = m.content || '';
-          row.body.textContent = m.content || '';
-        } else {
-          row.body.innerHTML = m.content
-            ? renderMarkdown(m.content)
-            : '<span style="color:#9aa2af">（客服没有返回内容）</span>';
-          // 工具记录随历史一起还原 —— 这正是「刷新后记录还在」的实现。
-          setToolRecords(row, m.tools);
-          // 引用与反馈同理：刷新后角标仍可点、已反馈仍是已反馈
-          decorateCitations(row.body, m.citations);
-          attachFeedback(row);
-          // ch05：建议动作也随历史还原；建单描述回退到上一条用户消息。
-          attachActions(row, m.actions, { sourceText: lastUserText });
-        }
-      });
-      scrollToBottom(true);
+      paintHistory(data.messages);
     } catch {
       /* 回读失败不该挡住聊天：静默退化成空白页，用户发一句就恢复正常 */
     }
@@ -1134,6 +1292,9 @@
       bot.body.innerHTML = '';         // 清掉三点等待
       await consumeStream(resp, ctx);
       ctx.finish();
+      // 这一轮可能新建了一个会话，也可能刚刚被后台摘要任务压过（✂ 标记）。
+      // 失败静默：侧栏刷新不该影响刚拿到手的回复。
+      loadConversations();
     } catch (err) {
       failRunningTools(bot, '连接中断，未拿到工具结果');
       if (!acc) bot.row.remove();
@@ -1168,13 +1329,10 @@
 
   els.send.addEventListener('click', send);
 
-  els.clear.addEventListener('click', () => {
-    els.messages.innerHTML = '';
-    sessionStorage.removeItem(SESSION_KEY);
-    sessionId = null;
-    welcome();
-    els.input.focus();
-  });
+  /* 顶栏「清空」与侧栏「新对话」是同一件事：只开新会话，不删旧会话。
+     以前这里只清视图不换 id 的话，下一句话会继续追加进上一个会话 —— 用户看到
+     「清空」但历史还在侧栏里变长。 */
+  els.clear.addEventListener('click', newConversation);
 
   els.messages.addEventListener('scroll', () => {
     stickToBottom = atBottom();
@@ -1184,6 +1342,9 @@
 
   els.input.focus();
   welcome();
+
+  // 侧栏：拉列表 + 恢复上次会话。列表加载失败静默降级，聊天照常可用。
+  loadConversations();
 
   // 恢复上次会话（同一浏览器会话内）。徽章也一并还原 —— 因为 /messages 会
   // 把每轮的工具轨迹一起返回，见 app/api.py 的 _db_session_messages_payload。
