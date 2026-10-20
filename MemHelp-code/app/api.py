@@ -45,7 +45,9 @@ from app.agent.runner import (
     complete_turn,
     pending_interrupt,
 )
+from app.agent.summarizer import ContextSummarizer
 from app.config import PROJECT_ROOT, Settings, get_settings
+from app.context.budget import compute_budget, format_budget_report
 from app.db.repositories import Repositories
 from app.db.session import create_engine_from, ping, session_factory
 from app.errors import (
@@ -77,6 +79,8 @@ from app.schemas import (
     ChatRequest,
     ChatResponse,
     ContextStats,
+    ConversationListResponse,
+    ConversationSummaryOut,
     CreateRefundRequest,
     CreateRefundResponse,
     CreateTicketRequest,
@@ -202,6 +206,26 @@ def get_store(request: Request) -> InMemorySessionStore:
     return store if store is not None else get_session_store()
 
 
+def _ensure_database(app: FastAPI, settings: Settings) -> tuple[object, Engine]:
+    """取（或首次创建）**进程内共享**的 ``(sessionmaker, engine)``。
+
+    与 ``app.state._database`` 同一份缓存：``/healthz``、每条聊天请求、后台摘要任务
+    都必须拿到**同一个**引擎。三条路径各自建一个 = 三个连接池，而且都以为自己是
+    唯一的那个（Review I3 的教训：修了一处漏了另一处）。
+
+    放在模块级而不是嵌在 ``_database_for`` 里，是因为后台摘要任务没有 ``Request``
+    可用 —— 它只有 ``app``。共用一个函数，这类「两处各建一个」就不会复发。
+    """
+    cached = getattr(app.state, "_database", None)
+    if cached is not None:
+        return cached
+    engine = create_engine_from(settings)
+    factory = session_factory(engine)
+    database = (factory, engine)
+    app.state._database = database  # noqa: SLF001 - 进程级共享
+    return database
+
+
 def _database_for(request: Request) -> tuple[object, Engine]:
     """取（或首次创建）**进程内共享**的 ``(sessionmaker, engine)``。
 
@@ -236,16 +260,11 @@ def _database_for(request: Request) -> tuple[object, Engine]:
         ) from exc
 
     try:
-        engine = create_engine_from(current)
-        factory = session_factory(engine)
+        return _ensure_database(request.app, current)
     except Exception as exc:  # noqa: BLE001
         raise UpstreamError(
             redact(f"数据库配置非法：{exc}"), type_="configuration_error"
         ) from exc
-
-    database = (factory, engine)
-    request.app.state._database = database  # noqa: SLF001 - 进程级共享
-    return database
 
 
 async def get_repositories(request: Request):
@@ -703,6 +722,7 @@ async def _chat_stream_body(
     retriever: AnswerContextLike | None = None,
     intent_model: BaseChatModel | None = None,
     intent_cheap_model: BaseChatModel | None = None,
+    summarizer: Any = None,
 ) -> AsyncIterable[str]:
     """SSE 响应体：``meta`` → ``status``? → ``token``* → ``tools``? →
     ``citations``? → ``done``。
@@ -723,6 +743,7 @@ async def _chat_stream_body(
             repositories=repositories,
             retriever=retriever,
             settings=settings,
+            summarizer=summarizer,
         ):
             frame = _sse_event(event)
             if frame is not None:
@@ -761,6 +782,7 @@ async def _refund_resume_body(
     repositories: Repositories,
     graph: Any,
     retriever: AnswerContextLike | None = None,
+    summarizer: Any = None,
     *,
     release_session: str | None = None,
     recover_message: str = "",
@@ -779,6 +801,7 @@ async def _refund_resume_body(
             repositories=repositories,
             retriever=retriever,
             settings=settings,
+            summarizer=summarizer,
         ):
             frame = _sse_event(event)
             if frame is not None:
@@ -812,6 +835,78 @@ async def _refund_resume_body(
 # ---------------------------------------------------------------------------
 
 
+def _check_context_budget(settings: Settings) -> None:
+    """启动自检：把倒推出来的预算打一行，装不下就打 ERROR（**不阻断**）。
+
+    为什么要在启动时算一遍：预算公式里有七个固定开销项，任何一项配错
+    （比如 ``MAX_OUTPUT_TOKENS`` 比窗口还大、``MAX_AGENT_STEPS`` 填了 12）
+    都会让历史预算归零，而症状是「聊到第三轮就忘事」—— 那时候已经很难
+    反推到某一个环境变量上。启动日志是唯一能把它一次说清的位置。
+
+    ``compute_budget`` 本身不抛；这里的 ``try`` 只兜「配置对象缺属性」这类
+    意外，因为启动阶段不该为一句日志而失败。
+    """
+    try:
+        report = compute_budget(settings)
+    except Exception:  # noqa: BLE001 - 自检失败不该阻断启动
+        logger.warning("ch07 上下文预算自检失败（已忽略）", exc_info=True)
+        return
+    if report.ok:
+        logger.info("ch07 上下文预算 %s", format_budget_report(report))
+    else:
+        logger.error("%s", report.reason)
+
+
+def _attach_summarizer(app: FastAPI, settings: Settings) -> None:
+    """把后台摘要器挂到 ``app.state.summarizer``，供图依赖读取。
+
+    **每次开一个新 Session**（``repositories_factory``）：摘要任务跑在独立的
+    ``asyncio.Task`` 里，请求那个 Session 在响应结束时就被关了 —— 借用它会得到
+    ``This session is provisioning a new connection; concurrent operations are not permitted``
+    这类难查的错。
+
+    没有数据库配置（``configuration_error``）时**不挂**：宁可让层 2 只记账不压缩，
+    也不要为了摘要去启动一个连不上的连接池。
+    """
+    if getattr(app.state, "summarizer", None) is not None:
+        return
+    if not getattr(settings, "summary_enabled", True):
+        logger.info("ch07 后台摘要已关闭（SUMMARY_ENABLED=false）")
+        return
+
+    factory_holder: dict[str, Any] = {}
+
+    def _factory() -> Repositories:
+        factory = factory_holder.get("factory")
+        if factory is None:
+            raise RuntimeError("摘要任务拿不到数据库会话工厂：启动时未能建立连接池")
+        return Repositories.from_session(factory())
+
+    try:
+        _factory_of, _engine = _ensure_database(app, settings)
+        factory_holder["factory"] = _factory_of
+    except Exception:  # noqa: BLE001 - 摘要装不上就只记账，聊天不受影响
+        logger.warning("ch07 后台摘要器未启用（数据库配置不可用）", exc_info=True)
+        return
+
+    try:
+        summary_model = (
+            get_chat_model(settings, settings.summary_model)
+            if str(getattr(settings, "summary_model", "") or "")
+            else app.state.chat_model
+        )
+        if summary_model is None:
+            summary_model = get_chat_model(settings)
+        app.state.summarizer = ContextSummarizer(
+            model=summary_model,
+            repositories_factory=_factory,
+            settings=settings,
+        )
+        logger.info("ch07 后台摘要器已就绪（model=%s）", getattr(settings, "summary_model", "") or settings.openai_model)
+    except Exception:  # noqa: BLE001 - 同上，失败只降级
+        logger.warning("ch07 后台摘要器初始化失败（层 2 将只记账不压缩）", exc_info=True)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     """启动预热（ch03）：发一次真实嵌入请求 + 确保 Milvus 集合存在。
@@ -828,13 +923,23 @@ async def _lifespan(app: FastAPI):
     """
     stack = AsyncExitStack()
     try:
+        # ch07：预算自检 + 后台摘要器。
+        #
+        # 自检放在最前面：它只读配置，不依赖图与数据库，而且是「这个实例到底
+        # 能不能装下上下文」的唯一一处喊话机会。**绝不阻断启动** —— 装不下是
+        # 容量问题，不是缺陷，把服务关掉只会让人连日志都看不到。
+        current_settings = None
+        try:
+            current_settings = app.state.settings or get_settings()
+        except Exception:  # noqa: BLE001 - 配置缺失时聊天会 503，不该启动即崩
+            current_settings = None
+        if current_settings is not None:
+            _check_context_budget(current_settings)
+            _attach_summarizer(app, current_settings)
+
         # ch05：编译图。生产开 SQLite checkpointer；测试注入 InMemorySaver。
         if getattr(app.state, "agent_graph", None) is None:
-            try:
-                current = app.state.settings or get_settings()
-            except Exception:  # noqa: BLE001 - 配置缺失时聊天会返回 503，不该启动即崩
-                current = None
-                logger.warning("配置缺失：Agent 图未初始化，聊天接口将返回 503")
+            current = current_settings
             if current is not None:
                 try:
                     if getattr(app.state, "checkpointer", None) is not None:
@@ -874,6 +979,14 @@ async def _lifespan(app: FastAPI):
 
         yield
     finally:
+        # ch07：先等后台摘要任务收敛。放在最前面 —— 它们还要写库，
+        # 而后面几步会关掉需要的东西（checkpointer、嵌入客户端）。
+        try:
+            summarizer = getattr(app.state, "summarizer", None)
+            if summarizer is not None and hasattr(summarizer, "aclose"):
+                await summarizer.aclose()
+        except Exception:  # noqa: BLE001 - 退出路径不该再抛
+            logger.debug("关闭后台摘要器失败（已忽略）", exc_info=True)
         # 评估重跑是子进程；应用退出时先收掉它，避免留下孤儿进程。
         try:
             runner = getattr(app.state, "rag_eval_runner", None)
@@ -949,6 +1062,9 @@ def create_app(
     # ch05：图与 checkpointer。测试注入 InMemorySaver；生产在 lifespan 里开 SQLite。
     app.state.checkpointer = checkpointer
     app.state.agent_graph = agent_graph
+    # ch07：后台摘要器由 lifespan 建（测试可注入）。显式置 None 而不是不赋值，
+    # 是为了让 `getattr(state, "summarizer", None)` 与「属性根本不存在」可区分。
+    app.state.summarizer = None
     # 注入 checkpointer 时**立即编译**：TestClient 不进入 context manager 也不会跑
     # lifespan，而测试仍然要能聊天。生产路径（checkpointer=None）仍由 lifespan 管
     # AsyncSqliteSaver 的开关。
@@ -1041,6 +1157,7 @@ def create_app(
     )
     async def chat_completions(
         req: ChatRequest,
+        request: Request,
         settings_: Settings = Depends(get_app_settings),
         model_: BaseChatModel = Depends(get_model),
         intent_model_: BaseChatModel = Depends(get_intent_model),
@@ -1072,6 +1189,7 @@ def create_app(
                     retriever_,
                     intent_model_,
                     intent_cheap_model_,
+                    getattr(request.app.state, "summarizer", None),
                 ),
                 media_type=SSE_MEDIA_TYPE,
             )
@@ -1087,6 +1205,7 @@ def create_app(
                 repositories=repositories_,
                 retriever=retriever_,
                 settings=settings_,
+                summarizer=getattr(request.app.state, "summarizer", None),
             )
         except Exception as exc:  # noqa: BLE001
             try:
@@ -1153,6 +1272,76 @@ def create_app(
         ch02 起不再读内存存储 —— 这样徽章在**刷新页面后仍然在**，
         而且重启服务后历史不会凭空消失。
         """
+        return await _db_session_messages_payload(session_id, repositories_)
+
+    # -- ch07：会话侧栏（两个只读接口）------------------------------------
+
+    @app.get(
+        "/api/conversations",
+        response_model=ConversationListResponse,
+        responses={200: {"description": "该用户的会话列表，新在前"}},
+    )
+    async def list_conversations(
+        user_id: str = "anonymous",
+        limit: int = 50,
+        repositories_: Repositories = Depends(get_repositories),
+    ) -> ConversationListResponse:
+        """侧栏用：一个用户看自己的全部会话。
+
+        为什么现在固定 ``anonymous``：本章只管「当前会话」，没有账号体系。
+        参数仍留着并透传给仓库 —— 等真的接入登录时，改的是调用方传什么，
+        而不是这个接口的签名。
+
+        ``limit`` 给个上界是为了不让某天一个演示账号攒下几百个会话时
+        把侧栏首屏拖成一次全表扫描。
+        """
+        rows = await repositories_.conversations.list_for_user(
+            user_id=user_id, limit=max(1, min(int(limit), 200))
+        )
+        return ConversationListResponse(
+            conversations=[
+                ConversationSummaryOut(
+                    id=row.id,
+                    session_id=row.session_id,
+                    user_id=row.user_id,
+                    preview=row.preview,
+                    message_count=row.message_count,
+                    summarized=row.summary_segments > 0,
+                    summary_segments=row.summary_segments,
+                    summary_upto_msg_id=row.summary_upto_msg_id,
+                    layer1_from_msg_id=row.layer1_from_msg_id,
+                    created_at=row.created_at.isoformat() if row.created_at else None,
+                    updated_at=row.updated_at.isoformat() if row.updated_at else None,
+                )
+                for row in rows
+            ]
+        )
+
+    @app.get(
+        "/api/conversations/{conversation_id}/messages",
+        response_model=SessionMessagesResponse,
+        responses={
+            200: {"description": "该会话已保存的历史"},
+            404: {"model": ErrorResponse, "description": "会话不存在"},
+        },
+    )
+    async def conversation_messages(
+        conversation_id: int,
+        repositories_: Repositories = Depends(get_repositories),
+    ) -> SessionMessagesResponse | JSONResponse:
+        """点侧栏某条会话时回载历史原文。
+
+        **``{conversation_id}`` 是 ``conversations.id``，不是 ``session_id``**。
+        两者都是「会话的标识」，混用不会立刻报错（一个数字一个字符串，
+        写错了只会 404），但前端拿列表里的 ``id`` 就必须配这个接口。
+
+        实现上先 id → session_id 再复用 ``_db_session_messages_payload``：
+        回载逻辑只有一份（含工具轨迹、引用、动作的还原），两个入口不可能给出
+        不同的历史。
+        """
+        session_id = await repositories_.conversations.find_session_id(conversation_id)
+        if not session_id:
+            return _error(404, "not_found", f"没有 id 为 {conversation_id} 的会话。")
         return await _db_session_messages_payload(session_id, repositories_)
 
     # -- ch05：用户点「建工单」才走这里 ---------------------------------

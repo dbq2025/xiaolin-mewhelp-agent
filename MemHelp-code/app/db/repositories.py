@@ -326,6 +326,20 @@ class ConversationRepository:
     async def find_id(self, session_id: str) -> int | None:
         return await _run(self._find_id, session_id)
 
+    def _find_session_id(self, conversation_id: int) -> str | None:
+        found = self._session.scalar(
+            select(Conversation.session_id).where(Conversation.id == conversation_id)
+        )
+        return str(found) if found is not None else None
+
+    async def find_session_id(self, conversation_id: int) -> str | None:
+        """``find_id`` 的反向：``conversations.id`` → ``session_id``。
+
+        侧栏列的是 ``id``（数字，详情接口按它取数），聊天用的是 ``session_id``。
+        回载历史要复用「按 session_id 取消息」那唯一一份实现，就得先转一道。
+        """
+        return await _run(self._find_session_id, conversation_id)
+
     def _list_sessions(self, limit: int | None) -> list[SessionRow]:
         stmt = select(Conversation.session_id, Conversation.status).order_by(Conversation.id)
         if limit is not None:

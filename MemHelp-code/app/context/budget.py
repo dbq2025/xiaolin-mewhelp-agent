@@ -286,4 +286,5 @@ __all__ = [
     "compute_budget",
     "format_budget_report",
     "format_budget_report_parts",
+    "legacy_history_cap",
 ]

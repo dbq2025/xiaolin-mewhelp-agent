@@ -188,6 +188,43 @@ class SessionMessagesResponse(BaseModel):
 
 
 # --------------------------------------------------------------------------
+# ch07：会话侧栏
+# --------------------------------------------------------------------------
+
+
+class ConversationSummaryOut(BaseModel):
+    """侧栏里的一条会话。
+
+    ``id`` 是 ``conversations.id``，**不是** ``session_id`` —— 详情接口按前者
+    取数，「回载历史接着聊」用的是后者。两个字段都给了，前端不要混用。
+    """
+
+    id: int = Field(description="``conversations.id``，详情接口用它。")
+    session_id: str = Field(description="会话 ID，聊天与回载历史用它。")
+    user_id: str = Field(default="anonymous", description="所属用户。")
+    preview: str = Field(default="", description="首条用户消息的预览（截断到 60 字）。")
+    message_count: int = Field(default=0, description="该会话的消息条数。")
+    summarized: bool = Field(default=False, description="是否已被摘要压缩过。")
+    summary_segments: int = Field(default=0, description="已有几段梗概。")
+    summary_upto_msg_id: int | None = Field(
+        default=None, description="摘要已覆盖到的消息 id。"
+    )
+    layer1_from_msg_id: int | None = Field(
+        default=None, description="层 1 的起始消息 id。"
+    )
+    created_at: str | None = Field(default=None, description="创建时间（ISO 8601）。")
+    updated_at: str | None = Field(default=None, description="最后更新时间（ISO 8601）。")
+
+
+class ConversationListResponse(BaseModel):
+    """``GET /api/conversations`` 的响应。"""
+
+    conversations: list[ConversationSummaryOut] = Field(
+        default_factory=list, description="该用户的会话，新在前。"
+    )
+
+
+# --------------------------------------------------------------------------
 # ch05：建议动作（建工单端点）
 # --------------------------------------------------------------------------
 
