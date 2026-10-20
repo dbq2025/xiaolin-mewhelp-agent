@@ -245,6 +245,47 @@ def format_turns(summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _real_retriever(settings: Settings, model: Any, repositories: Any) -> Any:
+    """按**生产路径**造检索管线（``RagPipeline``）。
+
+    为什么不能像首版那样直接传 ``None``：``--real`` 跑的是真图，问题里只要有
+    「耳机有降噪吗」这种知识类问句，就会走到 ``knowledge_retrieve`` 节点并
+    ``retriever.retrieve_only(...)``，``None`` 当场 ``AttributeError`` —— 那是
+    脚本没接好，不是业务缺陷，但会让「二十轮压测」只能跑全是 business 路由的
+    会话，等于没验到真实分布。
+
+    这里刻意复用 ``app.api`` 的两个装配辅助（``_vector_store_for`` /
+    ``_understander_for``），而不是就地再拼一套：那两处带着进程内复用缓存
+    （Milvus 客户端、Query 理解器），另拼一套会绕开缓存、也让线上与脚本的检索
+    参数各走各的。
+    """
+    from app.api import _understander_for, _vector_store_for
+    from app.knowledge.embedder import get_embedder
+    from app.knowledge.hybrid import HybridRetriever
+    from app.knowledge.pipeline import RagPipeline
+    from app.knowledge.rerank import get_reranker
+    from app.knowledge.sufficiency import SufficiencyJudge
+
+    store = _vector_store_for(
+        settings.milvus_uri, settings.milvus_collection, settings.embedding_dim
+    )
+    return RagPipeline(
+        understander=_understander_for(settings, model),
+        retriever=HybridRetriever(
+            embedder=get_embedder(settings),
+            vector_store=store,
+            reranker=get_reranker(settings),
+            chunk_repo=repositories.knowledge,
+            hybrid_top_k=settings.rag_hybrid_top_k,
+            candidate_k=settings.rag_candidate_k,
+            rerank_top_n=settings.rag_rerank_top_n,
+        ),
+        sufficiency=SufficiencyJudge(model, timeout=settings.rag_rewrite_timeout),
+        min_score=settings.rag_min_rerank_score,
+        top_n=settings.rag_rerank_top_n,
+    )
+
+
 async def _run_real(turns: int, *, demo_window: bool) -> dict[str, Any]:
     """跑真图：真模型、真落库。慢，用于人工复核，不进 CI。"""
     from app.agent.checkpoint import memory_checkpointer
@@ -278,20 +319,21 @@ async def _run_real(turns: int, *, demo_window: bool) -> dict[str, Any]:
         repositories_factory=lambda: Repositories.from_session(session),
         settings=settings,
     )
+    retriever = _real_retriever(settings, model, repositories)
     graph = build_agent_graph(checkpointer=memory_checkpointer())
     config = {
         "configurable": {
             "thread_id": "s-20",
             "model": model,
             "repositories": repositories,
-            "retriever": None,
+            "retriever": retriever,
             "settings": settings,
             "summarizer": summarizer,
         }
     }
 
     stats: list[TurnStat] = []
-    layers: list[tuple[int, int, bool, bool]] = []
+    layers: list[tuple[int, int, bool, bool, int, int]] = []
     try:
         for turn in range(1, turns + 1):
             payload = {
@@ -309,6 +351,8 @@ async def _run_real(turns: int, *, demo_window: bool) -> dict[str, Any]:
                     int(ctx.get("layer2_messages") or 0),
                     bool(ctx.get("degraded")),
                     bool(ctx.get("summary_due")),
+                    int(ctx.get("layer1_tokens") or 0),
+                    int(ctx.get("layer2_tokens") or 0),
                 )
             )
             await asyncio.sleep(0.1)
@@ -323,8 +367,8 @@ async def _run_real(turns: int, *, demo_window: bool) -> dict[str, Any]:
                     turn=turn,
                     layer1_messages=layers[-1][0],
                     layer2_messages=layers[-1][1],
-                    layer1_tokens=0,
-                    layer2_tokens=0,
+                    layer1_tokens=layers[-1][4],
+                    layer2_tokens=layers[-1][5],
                     degraded=layers[-1][2],
                     summary_due=layers[-1][3],
                     layer1_from=anchors.layer1_from_msg_id if anchors else None,
@@ -341,8 +385,8 @@ async def _run_real(turns: int, *, demo_window: bool) -> dict[str, Any]:
         "turns": stats,
         "degraded": degraded_any,
         "summary_due": summary_any,
-        "max_layer1_tokens": 0,
-        "max_layer2_tokens": 0,
+        "max_layer1_tokens": max((item[4] for item in layers), default=0),
+        "max_layer2_tokens": max((item[5] for item in layers), default=0),
         "layer1_budget": budget.layer1_budget,
         "layer2_budget": budget.layer2_budget,
         "budget": budget,
@@ -403,6 +447,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not summary["ok"]:
         print("  ✗ 预算本身就不足，先调窗口，别调别的")
         return 1
+
+    if args.real:
+        # ``--real`` 验的是**验收 1**（连着聊二十轮以上，token 不爆、系统不崩），
+        # 不是验收 3。真模型的答复长度不受控（实测单条 300–600 字，比离线脚本
+        # 钉死的 200 字长一倍多），默认窗口下二十多轮本来就该压缩 —— 拿
+        # 「不许压缩」去卡它会得出「实现坏了」的错误结论。
+        # 这里卡的是不变量：每轮层 1 不超自己的预算，且超了就一定有降级标记。
+        over = [
+            stat
+            for stat in summary["turns"]
+            if stat.layer1_tokens > summary["layer1_budget"]
+            and not stat.degraded
+        ]
+        if over:
+            for stat in over:
+                print(
+                    f"  ✗ 第 {stat.turn} 轮层 1 用了 {stat.layer1_tokens} token，"
+                    f"预算 {summary['layer1_budget']}，却没有降级标记"
+                )
+            return 1
+        print(
+            f"  ✓ 跑了 {len(summary['turns'])} 轮没崩；"
+            f"层 1 峰值 {summary['max_layer1_tokens']} / {summary['layer1_budget']}，"
+            f"层 2 峰值 {summary['max_layer2_tokens']} / {summary['layer2_budget']}"
+        )
+        compressed = summary["degraded"] or summary["summary_due"]
+        print(f"  发生过压缩：{compressed}（真模型答复更长，默认窗口下压了也正常）")
+        return 0
 
     if args.demo_window:
         compressed = summary["degraded"] or summary["summary_due"]
