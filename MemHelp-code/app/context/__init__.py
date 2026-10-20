@@ -1,6 +1,6 @@
 """上下文裁剪 —— 全项目**唯一**知道 token 预算的地方。
 
-本模块不碰网络、不碰磁盘，所以可以完全离线测试。
+本包不碰网络、不碰磁盘，所以可以完全离线测试。
 
 ## 顺序是算法的一部分
 
@@ -15,6 +15,16 @@
 ``budget_tokens`` **只统计历史消息**，不含 System Prompt，也不含本轮问题。
 理由：System Prompt 是固定的角色设定，本轮问题必须保留，两者都没有裁剪空间；
 拿它们去挤历史只会让语义更差。
+
+## 包结构
+
+- ``tokens``：校准的「字数折 token」口径（ch07）
+- ``budget``：从模型窗口倒推三层预算（ch07）
+- ``layers``：三层划分与规则截短（ch07）
+- ``assemble``：固定顺序拼装（ch07）
+
+``build_context`` 保留在本模块，是 ch01–ch06 的**兼容外壳**：行为逐字节不变，
+内部转成单层规划。新代码走 ``assemble.assemble_context``。
 """
 
 from dataclasses import dataclass
@@ -30,6 +40,9 @@ class ContextResult:
 
     统计字段是刻意暴露的：它让「模型到底收到了多少历史」可被断言，也是后续接
     Langfuse 埋点时要上报的指标。
+
+    ch07 追加的字段全部带默认值，所以位置参数构造（含 ``tests/test_context.py``
+    与旧调用方）一个都不用改。
     """
 
     messages: list[BaseMessage]
@@ -50,6 +63,29 @@ class ContextResult:
     system_prompt_tokens: int
     """System Prompt 的近似 token 数（不计入预算，仅作观测）。"""
 
+    # ---- ch07 追加（都有默认值，旧调用方不受影响）----
+
+    summary_tokens: int = 0
+    """注入的会话梗概占用（条数无关，按 token 计）。"""
+
+    layer2_messages: int = 0
+    """层 2（规则截短）的消息条数。"""
+
+    layer1_messages: int = 0
+    """层 1（原文滑窗）的消息条数。"""
+
+    layer1_from_msg_id: int | None = None
+    """层 1 起点锚点（数据库 Message.id）。``None`` = 全部算层 1。"""
+
+    summary_upto_msg_id: int | None = None
+    """摘要覆盖到哪条（数据库 Message.id）。``None`` = 还没有摘要。"""
+
+    degraded: bool = False
+    """层 1 是否因超预算而被降级过（锚点前移）。"""
+
+    summary_due: bool = False
+    """层 2 是否已超预算、需要起一次后台摘要。"""
+
 
 def build_context(
     history: Sequence[BaseMessage],
@@ -62,32 +98,21 @@ def build_context(
     只做裁剪与拼装，**不构造消息内容** —— 模板渲染是 ``app.prompts`` 的职责
     （``build_chat_messages``），这里接收已渲染好的 SystemMessage 与本轮
     HumanMessage。这样 Prompt 只有一处定义，不会在两个模块里各写一份。
+
+    **这是 ch01–ch06 的兼容外壳**（ch07 起）。它走单层规划、只用 approx 口径、
+    不碰锚点、不触发摘要：``tests/test_context.py`` 的 13 条用例钉的就是这个行为。
+    新代码（图里的 Agent 节点）走 ``app.context.assemble.assemble_context``。
     """
     history = list(history)
 
-    kept = trim_messages(
-        history,
-        max_tokens=budget_tokens,
-        # 官方推荐用于热路径的近似计数：按字符估算，中文场景偏保守（估多），
-        # 安全方向；不为它引入 tiktoken 依赖。
-        token_counter="approximate",
-        # 保留最近的消息，丢最旧的。
-        strategy="last",
-        # 历史里如果有 system 消息（例如将来的压缩摘要）也保留。
-        include_system=True,
-        # 保证保留的历史从 human 开始，避免以 ai 消息开头。
-        start_on="human",
-        # 不切半条消息：宁可少留一条，也不要把一句话截断成半个。
-        allow_partial=False,
-    )
+    from app.context.assemble import build_legacy_context
 
-    messages: list[BaseMessage] = [system_message, *kept, question]
-
-    return ContextResult(
-        messages=messages,
-        kept_messages=len(kept),
-        trimmed_messages=len(history) - len(kept),
+    return build_legacy_context(
+        history=history,
+        question=question,
+        system_message=system_message,
         budget_tokens=budget_tokens,
-        used_tokens=count_tokens_approximately(kept),
-        system_prompt_tokens=count_tokens_approximately([system_message]),
     )
+
+
+__all__ = ["ContextResult", "build_context"]
