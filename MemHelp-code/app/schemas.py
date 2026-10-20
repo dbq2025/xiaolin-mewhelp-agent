@@ -120,6 +120,15 @@ class ContextStats(BaseModel):
     budget_tokens: int = Field(default=0, description="历史消息的 token 预算。")
     used_tokens: int = Field(default=0, description="保留的历史消息实际占用的近似 token 数。")
     system_prompt_tokens: int = Field(default=0, description="System Prompt 的近似 token 数（不计入预算）。")
+    #: ch07：三层结构与两个锚点。默认值让 ch01–ch06 的调用方不必改。
+    summary_tokens: int = Field(default=0, description="注入的会话梗概占用的 token 数。")
+    layer1_messages: int = Field(default=0, description="层 1（原文）的消息条数。")
+    layer2_messages: int = Field(default=0, description="层 2（规则截短）的消息条数。")
+    summary_messages: int = Field(default=0, description="本次注入的梗概段数。")
+    layer1_from_msg_id: int | None = Field(default=None, description="层 1 的起始消息 id（null 表示还没降级过）。")
+    summary_upto_msg_id: int | None = Field(default=None, description="摘要已覆盖到的消息 id（null 表示还没有梗概）。")
+    degraded: bool = Field(default=False, description="本轮是否发生了层 1 降级。")
+    summary_due: bool = Field(default=False, description="层 2 是否已超预算、需要起后台摘要。")
 
 
 class ChatResponse(BaseModel):

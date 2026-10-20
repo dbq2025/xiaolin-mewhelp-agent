@@ -218,6 +218,14 @@ def _first_user_index(rows: Sequence[MessageRow]) -> int | None:
     return None
 
 
+def _last_turn_start(rows: Sequence[MessageRow]) -> int:
+    """最后一轮的起点下标（最后一条 user 所在位置）；没有 user 行时返回 0。"""
+    for idx in range(len(rows) - 1, -1, -1):
+        if rows[idx].role == "user":
+            return idx
+    return 0
+
+
 def plan_layers(
     rows: Sequence[MessageRow],
     *,
@@ -304,9 +312,14 @@ def plan_layers(
             degraded = dropped > 0
             layer1 = kept_rows
         else:
-            # 一整轮都装不下：留着，宁可超预算也不能让模型看不见刚发生的事。
+            # 连**最后一整轮**都装不下：只留它，宁可超预算也不能让模型看不见
+            # 刚发生的事。注意这里不能「保留全部层 1」——历史攒了五轮、预算只
+            # 够半轮时，保留全部等于什么都没降级，dropped 会是 0，调用方据此
+            # 报给前端的 trimmed 也是 0，降级在日志里彻底不可见。
+            last = _last_turn_start(layer1)
+            dropped = last
+            layer1 = layer1[last:]
             degraded = True
-            dropped = 0
         layer1_tokens = count(_to_messages(layer1))
 
     # 按整轮切：起点必须是 user。trim_messages 已经用 start_on="human" 保证了这点，

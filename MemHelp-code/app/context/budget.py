@@ -47,6 +47,34 @@ from typing import Any
 #: ``BudgetReport.reason`` 的前缀。验收要 grep 这句话，所以它是契约的一部分。
 INSUFFICIENT_BUDGET_PREFIX = "上下文预算不足"
 
+#: ch01–ch06 的遗留开关（``CONTEXT_TOKEN_BUDGET``）及其默认值。
+#:
+#: 它在 ch07 之后**不再**是历史预算的来源（预算改为从窗口倒推），但把用户坑住
+#: 的地方在于：如果有人显式把它调到别的值，说明他确实想要一个更小的历史预算
+#: （``tests/test_api_chat.py::test_context_stats_reflect_trimming`` 就是拿 40 验的）。
+#: 所以规则是「与默认值不同才生效」，见 :func:`legacy_history_cap`。
+LEGACY_HISTORY_BUDGET_DEFAULT = 2000
+
+
+def legacy_history_cap(settings: Any) -> int | None:
+    """把遗留的 ``CONTEXT_TOKEN_BUDGET`` 翻译成「历史预算硬上限」。
+
+    为什么不是「永远生效」：默认值 2000 远小于窗口匀得出来的 5650～8000，
+    永远生效等于把 ch07 的倒推逻辑废掉，验收第 3 条（默认窗口下 20 轮不压缩）
+    直接失败。
+
+    为什么不是「永远不生效」：那 ch01 起的那个开关就成了死开关，
+    ``test_context_stats_reflect_trimming`` 会红，而且运维把它调小以省钱时
+    毫无作用 —— 死开关比没开关更糟。
+    """
+    value = getattr(settings, "context_token_budget", LEGACY_HISTORY_BUDGET_DEFAULT)
+    if value is None:
+        return None
+    value = int(value)
+    if value == LEGACY_HISTORY_BUDGET_DEFAULT:
+        return None
+    return max(value, 0)
+
 
 @dataclass(frozen=True)
 class BudgetReport:
@@ -152,6 +180,15 @@ def compute_budget(settings: Any) -> BudgetReport:
     desired_history = desired_turns * tokens_per_turn
     history_budget = min(window_available, desired_history)
 
+    # 遗留开关：显式设过（与默认值不同）就当成历史预算的硬上限。
+    cap = legacy_history_cap(settings)
+    floor = tokens_per_turn
+    if cap is not None:
+        history_budget = min(history_budget, cap)
+        # 上限比「一轮稳态占用」还小时，按上限算门槛 —— 否则用户主动调小预算
+        # 会被判成「预算不足」，而他本来就只想要这么点历史。
+        floor = min(tokens_per_turn, cap)
+
     # 窗口被固定开销吃光：历史空间是负数，任何裁剪都无从谈起。
     if window_available <= 0:
         return BudgetReport(
@@ -179,7 +216,7 @@ def compute_budget(settings: Any) -> BudgetReport:
         )
 
     # 匀得出空间，但连一轮都装不下 —— 滑窗会归零，等于每轮都只能看当前这句。
-    if history_budget < tokens_per_turn:
+    if history_budget < floor:
         return BudgetReport(
             model_context_window=window,
             output_reserve=output_reserve,

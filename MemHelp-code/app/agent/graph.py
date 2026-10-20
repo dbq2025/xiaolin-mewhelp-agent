@@ -32,7 +32,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, replace
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
@@ -43,6 +43,7 @@ from langgraph.types import StreamWriter, interrupt
 
 from app.agent.checkpoint import memory_checkpointer
 from app.agent.coref import CorefResolver
+from app.agent.ctxlog import AppLogger, log_model_ctx
 from app.agent.gate import evaluate_gate
 from app.agent.intent import IntentClassifier
 from app.agent.logging import TurnLogger, build_turn_log
@@ -62,7 +63,11 @@ from app.agent.refund_orders import (
 )
 from app.agent.state import AgentState, route_for
 from app.chat import _message_text
-from app.context import build_context
+from app.context import assemble_context
+from app.context.assemble import build_legacy_context
+from app.context.budget import compute_budget, format_budget_report_parts
+from app.context.layers import plan_layers, row_to_message
+from app.context.tokens import counter_from_settings
 from app.knowledge.citations import (
     Evidence,
     evidence_from_payload,
@@ -89,6 +94,14 @@ class GraphDeps:
     repositories: Any
     retriever: Any
     settings: Any
+    summarizer: Any = None
+    """后台摘要任务（``app.agent.summarizer.ContextSummarizer``）。
+
+    默认 ``None``：ch07 之前的图测试与 ``app/chat.py`` 的调用点都只传六个依赖，
+    加一个必填字段会让它们全部 TypeError。为 ``None`` 时层 2 只记账不压缩，
+    ``summary_due`` 照样会出现在 ``state["context"]`` 里 —— 可观测性不能因为
+    没接摘要器就消失。
+    """
 
 
 def _deps(config: RunnableConfig) -> GraphDeps:
@@ -100,6 +113,7 @@ def _deps(config: RunnableConfig) -> GraphDeps:
         repositories=configurable.get("repositories"),
         retriever=configurable.get("retriever"),
         settings=configurable.get("settings"),
+        summarizer=configurable.get("summarizer"),
     )
 
 
@@ -596,6 +610,58 @@ async def _refund_retrieve_policies(
     }
 
 
+async def _load_rows_and_anchors(
+    state: AgentState, repositories: Any
+) -> tuple[list[Any], int | None, int | None, int | None]:
+    """取「带数据库 id 的历史行」与两个锚点。
+
+    返回 ``(rows, conversation_id, summary_upto, layer1_from)``。
+
+    为什么非要走数据库：三层划分的边界是两个 ``messages.id``，而
+    ``state["messages"]`` 里的 ``BaseMessage`` 只有内容没有 id。拿不到 id 就
+    无从判断某条属于哪一层，只能整段算层 1（那就是 ch01 的行为）。
+
+    库里查不到会话（首轮、或 State 里有但还没落库）时返回空 rows，调用方
+    退回 ``state["messages"]`` + legacy 裁剪：**宁可少压，不能把上下文弄丢**。
+    """
+    session_id = str(state.get("session_id") or "")
+    if not session_id:
+        return [], None, None, None
+    conversation_id = await repositories.conversations.find_id(session_id)
+    if conversation_id is None:
+        return [], None, None, None
+    rows = await repositories.messages.list_for_conversation(conversation_id)
+    anchors = await repositories.conversations.get_anchors(conversation_id)
+    if anchors is None:
+        return list(rows), conversation_id, None, None
+    return list(rows), conversation_id, anchors.summary_upto_msg_id, anchors.layer1_from_msg_id
+
+
+async def _current_question(state: Mapping[str, Any]) -> str:
+    """本轮要发给模型的问题文本（已做指代消解）。"""
+    messages = list(state.get("messages") or [])
+    question = next(
+        (
+            message
+            for message in reversed(messages)
+            if isinstance(message, HumanMessage)
+        ),
+        None,
+    )
+    if question is None:
+        return str(state.get("user_message") or "")
+    return str(state.get("resolved_message") or _message_text(question))
+
+
+def _state_history_messages(state: Mapping[str, Any]) -> list[Any]:
+    """``state["messages"]`` 里当前问题之前的消息（无 id 的兜底历史）。"""
+    messages = list(state.get("messages") or [])
+    for index in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[index], HumanMessage):
+            return messages[:index]
+    return messages[:-1] if messages else []
+
+
 async def _run_agent_node(
     state: AgentState, config: RunnableConfig, *, refund_mode: bool
 ) -> dict[str, Any]:
@@ -604,23 +670,12 @@ async def _run_agent_node(
     repositories = deps.repositories
     retriever = deps.retriever
     settings = deps.settings
+    summarizer = deps.summarizer
     messages = list(state.get("messages") or [])
     if not messages:
         raise RuntimeError("agent 节点没有可用的消息历史")
 
-    # 取**最后一条 HumanMessage**，不要假设它在列表末尾：同一 turn_id 重放时
-    # `begin_turn` 不会再追加用户消息，messages[-1] 会是上一轮的 AI 回答。
-    question_index = next(
-        (
-            index
-            for index in range(len(messages) - 1, -1, -1)
-            if isinstance(messages[index], HumanMessage)
-        ),
-        len(messages) - 1,
-    )
-    question = messages[question_index]
-    history = messages[:question_index]
-    resolved_question = state.get("resolved_message") or _message_text(question)
+    resolved_question = await _current_question(state)
     model_question = HumanMessage(content=resolved_question)
 
     evidence = evidence_from_payload(state.get("evidence") or [])
@@ -638,12 +693,107 @@ async def _run_agent_node(
             ),
         )
     )
-    ctx = build_context(
-        history=history,
-        question=model_question,
-        system_message=system,
-        budget_tokens=int(getattr(settings, "context_token_budget", 2000)),
+
+    budget = compute_budget(settings)
+    counter = counter_from_settings(settings)
+    rows, conversation_id, summary_upto, layer1_from = await _load_rows_and_anchors(
+        state, repositories
     )
+    summary_texts: list[str] = []
+    if conversation_id is not None:
+        summary_texts = await repositories.summaries.latest_texts(conversation_id)
+
+    if rows:
+        plan = plan_layers(
+            rows,
+            summary_upto=summary_upto,
+            layer1_from=layer1_from,
+            layer1_budget=budget.layer1_budget,
+            layer2_budget=budget.layer2_budget,
+            assistant_preview_chars=int(
+                getattr(settings, "assistant_preview_chars", 60)
+            ),
+            counter=counter,
+        )
+        ctx = assemble_context(
+            system_message=system,
+            question=model_question,
+            layer2=[row_to_message(row) for row in plan.layer2],
+            layer1=[row_to_message(row) for row in plan.layer1],
+            summary_text="\n".join(summary_texts),
+            budget_tokens=budget.history_budget,
+            counter=counter,
+            summary_upto_msg_id=plan.summary_upto_msg_id,
+            layer1_from_msg_id=plan.layer1_from_msg_id,
+            degraded=plan.degraded,
+            summary_due=plan.summary_due,
+            trimmed_messages=plan.dropped_layer1_rows,
+        )
+    else:
+        # 库里没有带 id 的历史：退回 ch01 的单层裁剪。这条路径**不触发摘要**
+        # （没有 id 就没有边界），但统计字段仍然如实填。
+        plan = None
+        legacy_history = _state_history_messages(state)
+        ctx = build_legacy_context(
+            history=legacy_history,
+            question=model_question,
+            system_message=system,
+            budget_tokens=int(getattr(settings, "context_token_budget", 2000)),
+        )
+
+    # ---- 可观测：调模型前把实际发出去的上下文原样落盘 ----
+    ctx_logger = AppLogger(getattr(settings, "app_log_path", "log/app.log"))
+    log_model_ctx(
+        logger=ctx_logger,
+        session_id=str(state.get("session_id") or ""),
+        turn=str(state.get("turn_id") or ""),
+        messages=ctx.messages,
+        layer1_from_msg_id=ctx.layer1_from_msg_id,
+        summary_upto_msg_id=ctx.summary_upto_msg_id,
+        budget=budget,
+        layer1_tokens=plan.layer1_tokens if plan is not None else ctx.used_tokens,
+        layer2_tokens=plan.layer2_tokens if plan is not None else 0,
+        summary_texts=summary_texts,
+    )
+
+    # 降级了就把锚点落库：下一轮直接按新边界取历史，不用重新算一遍。
+    # 只前进不后退由 repositories.set_anchors 的守卫强制。
+    if plan is not None and conversation_id is not None and ctx.layer1_from_msg_id:
+        if ctx.layer1_from_msg_id != layer1_from:
+            await repositories.conversations.set_anchors(
+                conversation_id=conversation_id,
+                layer1_from_msg_id=ctx.layer1_from_msg_id,
+            )
+            logger.info(
+                "ch07 降级 %s",
+                format_budget_report_parts(
+                    window=budget.model_context_window,
+                    overhead=budget.overhead,
+                    history=budget.history_budget,
+                    layer1=budget.layer1_budget,
+                    layer2=budget.layer2_budget,
+                ),
+            )
+
+    # ---- 层 2 超预算：调度后台摘要，**不 await** ----
+    # 顺序很重要：调度放在调模型之前，摘要任务才有机会与本轮回复并行跑。
+    # 失败只吞掉留痕 —— 摘要晚一轮不影响这一轮的回答。
+    # 先判 `summary_due` 再调：不该压缩时连任务都不该建，否则每轮都留一条
+    # trigger 日志，日志里就分不出「真的超了」和「每轮例行公事」。
+    if (
+        plan is not None
+        and plan.summary_due
+        and summarizer is not None
+        and conversation_id is not None
+    ):
+        summarizer.schedule(
+            session_id=str(state.get("session_id") or ""),
+            conversation_id=conversation_id,
+            plan=plan,
+            layer2_budget=budget.layer2_budget,
+            expected_layer1_from=layer1_from,
+            background="\n".join(summary_texts),
+        )
 
     outcome = await run_react_agent(
         model=model,
@@ -677,6 +827,14 @@ async def _run_agent_node(
             "budget_tokens": ctx.budget_tokens,
             "used_tokens": ctx.used_tokens,
             "system_prompt_tokens": ctx.system_prompt_tokens,
+            "summary_tokens": ctx.summary_tokens,
+            "layer1_messages": ctx.layer1_messages,
+            "layer2_messages": ctx.layer2_messages,
+            "summary_messages": len(summary_texts),
+            "layer1_from_msg_id": ctx.layer1_from_msg_id,
+            "summary_upto_msg_id": ctx.summary_upto_msg_id,
+            "degraded": ctx.degraded,
+            "summary_due": ctx.summary_due,
         },
         "trace": _trace(state, "refund_agent" if refund_mode else "agent"),
     }

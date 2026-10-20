@@ -42,6 +42,7 @@ def _config(
     settings: Any,
     intent_model: Any = None,
     intent_cheap_model: Any = None,
+    summarizer: Any = None,
 ) -> dict[str, Any]:
     return {
         "configurable": {
@@ -52,6 +53,8 @@ def _config(
             "repositories": repositories,
             "retriever": retriever,
             "settings": settings,
+            # ch07：后台摘要器。不传就是 None，图里层 2 只记账不压缩。
+            "summarizer": summarizer,
         }
     }
 
@@ -112,6 +115,15 @@ def done_payload(values: dict[str, Any], *, session_id: str) -> dict[str, Any]:
         "session_id": session_id,
         "trimmed": int(context.get("trimmed_messages") or 0),
         "kept": int(context.get("kept_messages") or 0),
+        # ch07：三层结构的可观测字段。全部带默认值，ch01–ch06 的调用方
+        # 不读这些键也不受影响。
+        "layer1_messages": int(context.get("layer1_messages") or 0),
+        "layer2_messages": int(context.get("layer2_messages") or 0),
+        "summary_messages": int(context.get("summary_messages") or 0),
+        "layer1_from_msg_id": context.get("layer1_from_msg_id"),
+        "summary_upto_msg_id": context.get("summary_upto_msg_id"),
+        "degraded": bool(context.get("degraded")),
+        "summary_due": bool(context.get("summary_due")),
         "tools": list(values.get("tool_traces") or []),
         "citations": list(values.get("citations") or []),
         "actions": actions,
@@ -193,6 +205,7 @@ async def astream_turn(
     intent_model: Any = None,
     intent_cheap_model: Any = None,
     turn_id: str | None = None,
+    summarizer: Any = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """跑一轮图，逐条产出 token/status/tools/citations/done 事件。"""
     config = _config(
@@ -203,6 +216,7 @@ async def astream_turn(
         repositories=repositories,
         retriever=retriever,
         settings=settings,
+        summarizer=summarizer,
     )
 
     # 同一 thread 还在等订单选择时，不要把新消息塞进暂停中的图：
@@ -256,6 +270,7 @@ async def astream_resume(
     settings: Any,
     intent_model: Any = None,
     intent_cheap_model: Any = None,
+    summarizer: Any = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """从退款子流程的中断点续跑；不重新跑 begin_turn。"""
     config = _config(
@@ -266,6 +281,7 @@ async def astream_resume(
         repositories=repositories,
         retriever=retriever,
         settings=settings,
+        summarizer=summarizer,
     )
     resumed = Command(resume={"order_id": order_id})
     async for event in _stream_events(graph, resumed, config):
@@ -286,6 +302,7 @@ async def complete_turn(
     intent_model: Any = None,
     intent_cheap_model: Any = None,
     turn_id: str | None = None,
+    summarizer: Any = None,
 ) -> tuple[str, dict[str, Any]]:
     """非流式：收齐 token 事件，返回完整回复与 done 摘要。"""
     parts: list[str] = []
@@ -302,6 +319,7 @@ async def complete_turn(
         intent_model=intent_model,
         intent_cheap_model=intent_cheap_model,
         turn_id=turn_id,
+        summarizer=summarizer,
     ):
         if event.get("type") == "token":
             parts.append(str(event.get("delta") or ""))

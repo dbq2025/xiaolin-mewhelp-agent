@@ -33,6 +33,7 @@ htmlcov/
 # ---- 日志与运行时数据 ----
 *.log
 logs/
+log/
 data/
 uploads/
 

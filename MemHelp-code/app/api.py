@@ -1111,7 +1111,18 @@ def create_app(
                 context=ContextStats(
                     kept_messages=int(done.get("kept") or 0),
                     trimmed_messages=int(done.get("trimmed") or 0),
+                    # 这个字段 ch01 起就是 ``CONTEXT_TOKEN_BUDGET`` 的回显，
+                    # `tests/test_api_tools.py` 与 `test_api_chat.py` 钉住了它；
+                    # ch07 倒推出来的历史预算放在 layer1/layer2 两项里表达，
+                    # 不去改这个既有字段的含义。
                     budget_tokens=settings_.context_token_budget,
+                    layer1_messages=int(done.get("layer1_messages") or 0),
+                    layer2_messages=int(done.get("layer2_messages") or 0),
+                    summary_messages=int(done.get("summary_messages") or 0),
+                    layer1_from_msg_id=done.get("layer1_from_msg_id"),
+                    summary_upto_msg_id=done.get("summary_upto_msg_id"),
+                    degraded=bool(done.get("degraded")),
+                    summary_due=bool(done.get("summary_due")),
                 ),
                 tools=list(done.get("tools") or []),
                 citations=list(done.get("citations") or []),

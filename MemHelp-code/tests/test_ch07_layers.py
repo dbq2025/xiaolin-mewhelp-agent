@@ -216,6 +216,25 @@ def test_single_turn_that_does_not_fit_is_kept_and_flagged():
     assert [r.id for r in plan.layer1] == [1, 2]
 
 
+def test_multiple_turns_that_do_not_fit_keep_the_last_turn_and_report_drops():
+    """预算连最后一整轮都装不下时：只留最后一轮，且 dropped 必须如实计数。
+
+    这条守的是可观测性：如果这里「保留全部层 1」并让 dropped=0，调用方报给
+    前端的 trimmed 会恒为 0，降级在日志和界面上都彻底不可见。
+    """
+    rows = _turns(10)  # 10 轮 / 20 条，每条都远超预算
+    plan = plan_layers(
+        rows, summary_upto=None, layer1_from=None, layer1_budget=10, layer2_budget=99999
+    )
+    assert plan.degraded is True
+    assert plan.dropped_layer1_rows > 0
+    # 只留最后一轮：从最后一条 user 开始
+    assert plan.layer1[0].role == "user"
+    assert plan.layer1[-1].id == rows[-1].id
+    assert len(plan.layer1) == len(rows) - plan.dropped_layer1_rows
+
+
+
 def test_layer1_within_budget_is_not_degraded():
     rows = _turns(3)
     plan = plan_layers(
