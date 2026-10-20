@@ -148,6 +148,9 @@ class AgentState(TypedDict, total=False):
     token_usage: dict[str, int]
     stop_reason: str
     context: dict[str, Any]
+    #: ch07：``history_ctx`` 已为哪个 turn 写过。coref 与 intent 共用同一份
+    #: 历史，按 turn 去重，避免一轮写两条。
+    history_ctx_logged_turn: str
 
     # -- 可观测 -----------------------------------------------------------
     trace: list[str]

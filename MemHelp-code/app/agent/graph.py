@@ -43,7 +43,7 @@ from langgraph.types import StreamWriter, interrupt
 
 from app.agent.checkpoint import memory_checkpointer
 from app.agent.coref import CorefResolver
-from app.agent.ctxlog import AppLogger, log_model_ctx
+from app.agent.ctxlog import AppLogger, log_history_ctx, log_model_ctx
 from app.agent.gate import evaluate_gate
 from app.agent.intent import IntentClassifier
 from app.agent.logging import TurnLogger, build_turn_log
@@ -188,6 +188,7 @@ def _reset_turn(state: Mapping[str, Any], node: str) -> dict[str, Any]:
         "gate_passed": False,
         "gate_reason": "",
         "context": {},
+        "history_ctx_logged_turn": "",
         "turn_log": {},
         "error": None,
     }
@@ -218,6 +219,45 @@ def _history_before_current(state: Mapping[str, Any]) -> list[Any]:
     return messages
 
 
+async def _log_history_ctx(
+    state: AgentState, config: RunnableConfig, history: Sequence[Any]
+) -> dict[str, Any]:
+    """把前置节点（指代消解 / 意图识别）看到的历史原样留痕。
+
+    为什么单独一条而不是复用 ``model_ctx``：``model_ctx`` 只在真正进 ``agent``
+    节点的轮次才有，闲聊、投诉、兜底这些固定回复轮根本不调主力模型。可指代消解
+    与意图识别是**每轮都跑**的，它们看到的历史同样决定这一轮怎么走 —— 只记
+    ``model_ctx`` 的话，闲聊轮「模型看到了什么」就成了黑洞。
+
+    同一轮只写一条：两个节点读的是同一份历史，写两遍只会把日志读花。按
+    ``turn_id`` 去重，而不是按节点名。
+    """
+    settings = _deps(config).settings
+    turn_id = str(state.get("turn_id") or "")
+    if turn_id and state.get("history_ctx_logged_turn") == turn_id:
+        return {}
+    log_history_ctx(
+        logger=AppLogger(getattr(settings, "app_log_path", "log/app.log")),
+        session_id=str(state.get("session_id") or ""),
+        turn=turn_id,
+        summary_texts=await _summary_texts(state, config),
+        messages=history,
+    )
+    return {"history_ctx_logged_turn": turn_id}
+
+
+async def _summary_texts(state: AgentState, config: RunnableConfig) -> list[str]:
+    """该会话已有的全部梗概正文（按段号升序）。读不到就当没有。"""
+    repositories = _deps(config).repositories
+    session_id = str(state.get("session_id") or "")
+    if not session_id:
+        return []
+    conversation_id = await repositories.conversations.find_id(session_id)
+    if conversation_id is None:
+        return []
+    return list(await repositories.summaries.latest_texts(conversation_id))
+
+
 async def _resolve_coref(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     deps = _deps(config)
     settings = deps.settings
@@ -227,9 +267,10 @@ async def _resolve_coref(state: AgentState, config: RunnableConfig) -> dict[str,
         history_limit=int(getattr(settings, "coref_history_messages", 8)),
         enabled=bool(getattr(settings, "coref_enabled", True)),
     )
-    result = await resolver.resolve(
-        state["user_message"], _history_before_current(state)
-    )
+    history = _history_before_current(state)
+    # 先把历史留痕，再调模型：即使本轮后面超时/抛错，日志里也有迹可循。
+    ctx_patch = await _log_history_ctx(state, config, history)
+    result = await resolver.resolve(state["user_message"], history)
     _emit(
         _stream_writer(),
         {
@@ -242,6 +283,7 @@ async def _resolve_coref(state: AgentState, config: RunnableConfig) -> dict[str,
     # 只要真的发过模型调用就计 1：fallback 也可能是超时/坏 JSON，计 0 会低估成本。
     calls = 1 if result.raw else 0
     return {
+        **ctx_patch,
         "resolved_message": result.resolved,
         "coref_changed": result.changed,
         "coref_raw": result.raw,
@@ -280,6 +322,9 @@ async def _classify_intent(state: AgentState, config: RunnableConfig) -> dict[st
     )
     total_calls = int(state.get("coref_llm_calls") or 0) + result.llm_calls
     return {
+        # 兜底去重：正常情况下 coref 已经写过这一轮了，这里返回空补丁。
+        # 但「coref 被关掉又只跑了意图」这种配置下，这一句保证仍然有痕迹。
+        **(await _log_history_ctx(state, config, _history_before_current(state))),
         "intent": result.intent,
         "intent_confidence": result.confidence,
         "intent_raw": result.raw,
