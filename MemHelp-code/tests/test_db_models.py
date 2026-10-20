@@ -10,11 +10,12 @@
 """
 
 
-def test_metadata_has_exactly_eight_tables():
+def test_metadata_has_exactly_nine_tables():
     """多一张少一张都要红 —— 表名漂移会让 compose 灌好的数据白费。
 
     ch03 新增 `knowledge_chunks` / `qa_extraction_staging`（六张）；
-    ch04 新增 `low_confidence_questions` / `faith_cases`（八张）。
+    ch04 新增 `low_confidence_questions` / `faith_cases`（八张）；
+    ch07 新增 `conversation_summaries`（九张）。
     """
     import app.db.models  # noqa: F401 - 必须先 import 才会注册进 metadata
     from app.db.base import Base
@@ -28,6 +29,7 @@ def test_metadata_has_exactly_eight_tables():
         "qa_extraction_staging",
         "low_confidence_questions",
         "faith_cases",
+        "conversation_summaries",
     }
 
 
@@ -87,9 +89,55 @@ def test_conversation_columns_match_ddl():
         "session_id",
         "user_id",
         "status",
+        # ch07：三层结构的两个锚点。
+        "summary_upto_msg_id",
+        "layer1_from_msg_id",
         "created_at",
         "updated_at",
     }
+
+
+def test_conversation_summary_columns_match_ddl():
+    from app.db.models import ConversationSummary
+
+    assert set(ConversationSummary.__table__.c.keys()) == {
+        "id",
+        "conversation_id",
+        "segment_no",
+        "from_msg_id",
+        "upto_msg_id",
+        "content",
+        "msg_count",
+        "source_tokens",
+        "model",
+        "elapsed_ms",
+        "created_at",
+    }
+
+
+def test_conversation_summary_segment_no_is_unique_per_conversation():
+    """Review Focus 2 的兜底：多进程重复压同一段时靠这个唯一键收口。"""
+    from app.db.models import ConversationSummary
+
+    names = {
+        c.name for c in ConversationSummary.__table__.constraints if getattr(c, "name", None)
+    }
+    assert "uq_summary_segment" in names
+
+
+def test_summary_table_is_not_messages():
+    """摘要不进 messages 表 —— 否则 history_as_messages 会把它当成一条真实消息。"""
+    from app.db.models import ConversationSummary
+
+    assert ConversationSummary.__tablename__ == "conversation_summaries"
+
+
+def test_anchors_are_nullable_by_default():
+    """新会话还没摘要过、也没降级过，两个锚点必须是 NULL 而不是 0。"""
+    from app.db.models import Conversation
+
+    assert Conversation.__table__.c.summary_upto_msg_id.nullable is True
+    assert Conversation.__table__.c.layer1_from_msg_id.nullable is True
 
 
 def test_ticket_columns_match_ddl():

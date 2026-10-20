@@ -46,8 +46,15 @@ from app.db.models import Base
 #: 也让分歧变化时（比如又加了列）测试能立刻反映出来。
 KNOWN_SCHEMA_DIVERGENCES: dict[str, dict[str, object]] = {
     "conversations": {
-        "extra_columns": {"summary", "summary_upto_msg_id"},
-        "note": "后续章节加的会话摘要字段；两列都可空，不影响本章 ORM 的插入",
+        # 跑完 ``sql/ch07-ddl.sql`` 之后，真库相对 ORM 只多这一列：它是更早一版
+        # "把整坨摘要塞进 conversations" 的遗留。新代码一行都不读它，迁移脚本
+        # 也刻意不 DROP（留着重跑旧版本还能用）。两个新的锚点列 ORM 已经映射，
+        # 所以**不**算分歧。
+        "extra_columns": {"summary"},
+        "note": (
+            "``summary`` 是旧双层方案的遗留列，ch07 起由 ``conversation_summaries`` "
+            "表取代；留着不碍事，也无害于插入（可空）"
+        ),
     },
     "tickets": {
         "extra_enum_values": {"退款"},

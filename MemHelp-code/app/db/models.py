@@ -108,6 +108,17 @@ class Conversation(Base):
         nullable=False,
         server_default=CONVERSATION_STATUSES[0],
     )
+    #: ch07：梗概覆盖到哪条 ``messages.id``（含）。``NULL`` = 还没有任何梗概。
+    #:
+    #: 两个锚点是**三层结构的唯一边界**：降级/摘要只改这两个整数，不搬一行数据。
+    #: 这样「历史分层」是一次纯读操作，不受搬数据的中断影响 —— 改到一半崩了，
+    #: 大不了下次重算，绝不会出现「消息在两张表里各有一半」。
+    summary_upto_msg_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    #: ch07：层 1（原文区）从哪条 ``messages.id`` 起（含）。``NULL`` = 还没降级过。
+    #:
+    #: 恒有 ``layer1_from_msg_id >= summary_upto_msg_id + 1``（层 1 不落进摘要区间）。
+    #: 这条不变式由 ``ConversationRepository.set_anchors`` 在应用侧强制。
+    layer1_from_msg_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     #: 由**数据库**填时间，不用应用进程的时钟：容器里两边时钟可能不同步，
     #: 混用会让「按时间排序」出现负间隔。
     created_at: Mapped[datetime] = mapped_column(
@@ -165,6 +176,70 @@ class Message(Base):
     )
 
     __table_args__ = (Index("idx_conversation_id", "conversation_id"),)
+
+
+class ConversationSummary(Base):
+    """ch07：会话梗概，**一段一行**。
+
+    ## 为什么单开一张表
+
+    三层结构的第三层是「早期历史压成一段段梗概」。这些梗概有三个性质，决定了
+    它们既不能塞进 ``conversations`` 的一列、也不能塞进 ``messages``：
+
+    1. **只追加**。每次后台摘要任务把一批消息压成**新的一段**，旧段一个字不改。
+       塞进 ``conversations.summary`` 一列就只剩最后一次结果，旧段被覆盖 —— 而
+       旧段恰恰是「这个事实已经被有损压过一次」的证据，丢了它就无法解释
+       「为什么模型只记得订单号、不记得原话」。
+    2. **不参与合并**。新段只总结**待压缩的那批消息**，旧段只作为背景给模型看。
+       若每轮把「旧梗概 + 新消息」再压一次，同一个事实会被反复有损压缩，最后
+       退化成一句「用户有售后需求」—— 订单号、手机号全丢。
+    3. **不是对话消息**。``messages`` 表的每一行都会被
+       ``MessageRepository.history_as_messages`` 回灌成 ``BaseMessage``；把梗概
+       写进去，模型会把梗概当成「自己刚说过的话」，且 ``role`` 枚举里也没有
+       一个诚实的取值可用。
+
+    ## 字段职责
+
+    ``segment_no`` 从 1 起、按会话内递增，配 ``UNIQUE(conversation_id, segment_no)``
+    是**多进程并发写**的兜底：应用侧的 in-flight 集合只在单进程内有效，两个进程
+    同时压同一段时，数据库唯一键才是真正收口的地方（冲突方放弃并留痕，不重试改号）。
+
+    ``source_tokens`` 记录压之前那批消息的 token 估算，``elapsed_ms`` 记录本次
+    耗时 —— 这两个数是「摘要没阻塞用户回复」在日志之外的第二份证据。
+    """
+
+    __tablename__ = "conversation_summaries"
+
+    id: Mapped[int] = mapped_column(_AUTOINC_PK, primary_key=True, autoincrement=True)
+    conversation_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("conversations.id"), nullable=False
+    )
+    #: 段号，会话内从 1 递增。
+    segment_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: 本段覆盖的消息区间 ``[from_msg_id, upto_msg_id]``（闭区间，对应 ``messages.id``）。
+    from_msg_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    upto_msg_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    #: 梗概正文。目标长度几十到一两百字，只写事实与诉求。
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    #: 本段压了多少条消息。
+    msg_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    #: 压之前的 token 估算（用与预算同一套校准口径）。
+    source_tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    #: 生成本段的模型名。``NULL`` = 用了默认模型或未记录。
+    model: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: 后台任务的耗时（毫秒）。用来证明摘要确实没有挡在用户回复的路径上。
+    elapsed_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("conversation_id", "segment_no", name="uq_summary_segment"),
+        # 索引名必须**全库唯一**：MySQL 的索引名是按表隔离的，但 SQLite 是
+        # 按 database 隔离 —— 与 messages 表重名时 ``create_all`` 直接报
+        # ``index idx_conversation_id already exists``。所以这里带 ``summary_`` 前缀。
+        Index("idx_summary_conversation_id", "conversation_id", "segment_no"),
+    )
 
 
 class Faq(Base):
