@@ -115,4 +115,23 @@ def build_context(
     )
 
 
-__all__ = ["ContextResult", "build_context"]
+def __getattr__(name: str):
+    """``assemble_context`` / ``build_reference_block`` 按需从 ``assemble`` 导入。
+
+    为什么不用模块顶部 ``from app.context.assemble import ...``：``assemble`` 需要
+    ``from app.context import ContextResult``，模块顶部互相导入会循环。用
+    ``__getattr__``（PEP 562）推迟到第一次访问，两边都能拿到干净的名字。
+    """
+    if name in {"assemble_context", "build_reference_block", "build_legacy_context"}:
+        from app.context import assemble as _assemble
+
+        return getattr(_assemble, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+__all__ = [
+    "ContextResult",
+    "assemble_context",
+    "build_context",
+    "build_reference_block",
+]
