@@ -187,3 +187,76 @@ def test_layer1_is_kept_verbatim_in_output():
         question=HumanMessage("当前"),
     )
     assert out.messages[1].content == long_text
+
+
+# ---- 梗概注入的预算上限（select_summary_texts）----
+
+
+def test_summary_texts_within_budget_are_all_used():
+    from app.context.assemble import select_summary_texts
+
+    kept, dropped = select_summary_texts(["第一段", "第二段"], budget_tokens=500)
+    assert kept == ["第一段", "第二段"]
+    assert dropped == 0
+
+
+def test_summary_texts_keep_head_and_tail_and_drop_the_middle():
+    """最早那段记着最早的事实，最近那段接着现在的对话，中间的多半是过程。"""
+    from app.context.assemble import select_summary_texts
+
+    texts = [f"第{i}段" + "内容" * 40 for i in range(1, 7)]
+    kept, dropped = select_summary_texts(texts, budget_tokens=200)
+
+    assert dropped > 0
+    assert kept[0] == texts[0]
+    assert kept[-1] == texts[-1]
+    assert kept == [texts[0], *texts[len(texts) - (len(kept) - 1):]]
+    assert len(kept) + dropped == len(texts)
+
+
+def test_single_oversized_summary_is_truncated_not_dropped():
+    """只有一段且超预算时截短它 —— 宁可少几个字，也不能把唯一早期事实丢掉。"""
+    from app.context.assemble import select_summary_texts
+
+    kept, dropped = select_summary_texts(["订" * 2000], budget_tokens=100)
+
+    assert dropped == 0
+    assert len(kept) == 1
+    assert kept[0].endswith("…")
+    assert len(kept[0]) < 2000
+
+
+def test_summary_texts_respect_the_budget_after_selection():
+    from app.context.assemble import select_summary_texts
+    from app.context.tokens import count_tokens
+
+    texts = [f"第{i}段" + "内容" * 60 for i in range(1, 9)]
+    kept, _ = select_summary_texts(texts, budget_tokens=300)
+    total = count_tokens([HumanMessage(content="\n".join(kept))])
+
+    assert total <= 300
+
+
+def test_empty_summary_texts_select_nothing():
+    from app.context.assemble import select_summary_texts
+
+    assert select_summary_texts([], budget_tokens=500) == ([], 0)
+    assert select_summary_texts(["", "   "], budget_tokens=500) == ([], 0)
+
+
+def test_zero_budget_drops_everything_rather_than_injecting_free_text():
+    from app.context.assemble import select_summary_texts
+
+    kept, dropped = select_summary_texts(["第一段", "第二段"], budget_tokens=0)
+    assert kept == []
+    assert dropped == 2
+
+
+def test_assemble_reports_dropped_summary_segments():
+    out = assemble_context(
+        system_message=SystemMessage(SYSTEM),
+        question=HumanMessage("当前"),
+        summary_text="梗概",
+        summary_dropped_segments=2,
+    )
+    assert out.summary_dropped_segments == 2

@@ -68,6 +68,13 @@ class ContextResult:
     summary_tokens: int = 0
     """注入的会话梗概占用（条数无关，按 token 计）。"""
 
+    summary_dropped_segments: int = 0
+    """因超出 ``SUMMARY_RESERVE_TOKENS`` 而没注入的梗概段数。
+
+    非 0 说明这个会话的梗概总量已经超过固定预留 —— 预算表里的 500 被低估了。
+    留这个数字是为了让「超了」可被观测，而不是悄悄丢段。
+    """
+
     layer2_messages: int = 0
     """层 2（规则截短）的消息条数。"""
 
@@ -122,7 +129,12 @@ def __getattr__(name: str):
     ``from app.context import ContextResult``，模块顶部互相导入会循环。用
     ``__getattr__``（PEP 562）推迟到第一次访问，两边都能拿到干净的名字。
     """
-    if name in {"assemble_context", "build_reference_block", "build_legacy_context"}:
+    if name in {
+        "assemble_context",
+        "build_legacy_context",
+        "build_reference_block",
+        "select_summary_texts",
+    }:
         from app.context import assemble as _assemble
 
         return getattr(_assemble, name)
@@ -134,4 +146,5 @@ __all__ = [
     "assemble_context",
     "build_context",
     "build_reference_block",
+    "select_summary_texts",
 ]

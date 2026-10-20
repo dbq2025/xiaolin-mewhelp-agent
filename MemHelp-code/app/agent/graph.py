@@ -63,7 +63,7 @@ from app.agent.refund_orders import (
 )
 from app.agent.state import AgentState, route_for
 from app.chat import _message_text
-from app.context import assemble_context
+from app.context import assemble_context, select_summary_texts
 from app.context.assemble import build_legacy_context
 from app.context.budget import compute_budget, format_budget_report_parts
 from app.context.layers import plan_layers, row_to_message
@@ -748,6 +748,15 @@ async def _run_agent_node(
     if conversation_id is not None:
         summary_texts = await repositories.summaries.latest_texts(conversation_id)
 
+    # 梗概是「一段段攒」的，而预算里的 ``SUMMARY_RESERVE_TOKENS`` 是固定值。
+    # 攒够几段就会超出那份预留，历史预算却仍按 500 算 —— 总量会悄悄突破窗口。
+    # 这里按预留截一遍：头尾都留、丢中间，丢了几段如实记账。
+    summary_texts, summary_dropped = select_summary_texts(
+        summary_texts,
+        budget_tokens=budget.summary_reserve,
+        counter=counter,
+    )
+
     if rows:
         plan = plan_layers(
             rows,
@@ -773,6 +782,7 @@ async def _run_agent_node(
             degraded=plan.degraded,
             summary_due=plan.summary_due,
             trimmed_messages=plan.dropped_layer1_rows,
+            summary_dropped_segments=summary_dropped,
         )
     else:
         # 库里没有带 id 的历史：退回 ch01 的单层裁剪。这条路径**不触发摘要**

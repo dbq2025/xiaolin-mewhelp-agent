@@ -228,3 +228,129 @@ $env:MEMHELP_TEST_MYSQL=1   → tests/test_db_mysql.py 33 passed
 - 重排服务不可用时降级为 RRF 序（`rerank_degraded=true` 进报告），此时检索层阈值闸不生效。
 - `faith_cases` 只提供最小查询/处置端点，没有管理页面。
 - 👎 只做纯前端采集（localStorage），不上报后端。
+
+---
+
+# 第七章「三层上下文管理」交付总结
+
+> 数字全部来自本机实测：演示配置（18000/2000/2000/3/1200/5）+ 真实模型 22 轮 + Milvus 真检索 + CDP 驱动真浏览器。
+
+## 1. 交付物
+
+| 项 | 位置 |
+|---|---|
+| 设计 | `docs/superpowers/specs/2026-10-20-ch07-context-management-design.md` |
+| 计划 | `docs/superpowers/plans/2026-10-20-ch07-context-management-plan.md` |
+| 留痕 | `dev-notes/ch07.md`（阶段 0–17，逐阶段含用户原话 / 产出 / 纠偏 / 翻车） |
+| 验收原始输出 | `dev-notes/ch07-acceptance-output.txt`（4 段，各带 `EXIT=`） |
+| 真机截图 | `dev-notes/ch07-sidebar.png`、`dev-notes/ch07-sidebar-after.png` |
+| 预算与口径 | `app/context/budget.py`、`app/context/tokens.py` |
+| 三层划分 | `app/context/layers.py`（`plan_layers` / `rule_trim_row` / `classify`） |
+| 固定顺序拼装 | `app/context/assemble.py`（`assemble_context` / `build_reference_block`） |
+| 后台摘要 | `app/agent/summarizer.py`（`ContextSummarizer`） |
+| 上下文日志 | `app/agent/ctxlog.py`（`model_ctx` / `history_ctx` / `summary` 五态） |
+| 数据 | `sql/ch07-ddl.sql`（幂等迁移）、`app/db/{models,repositories}.py` |
+| 接口 | `app/api.py`：`GET /api/conversations`、`GET /api/conversations/{id}/messages` |
+| 前端 | `web/{index.html,app.js,style.css}`（会话侧栏 + 回载 + 续聊） |
+| 演示 | `scripts/demo_ch07.py`、`scripts/ch07_twenty_turns.py`、`scripts/ch07_ui_check.py` |
+
+## 2. 功能演示命令
+
+```powershell
+cd MemHelp-code
+
+# 0) 装依赖（本机 uv 不在 PATH）
+$env:UV_CACHE_DIR = "F:\DeepSeek-Harness\memhelp-code-myself\.uv-cache"
+& "C:\Users\dbq\.local\bin\uv.exe" sync
+
+# 1) 数据库迁移（幂等，可重复跑）
+& "E:\develop\mysql-8.0.34-winx64\bin\mysql.exe" `
+  '--host=127.0.0.1' '--port=3306' '--user=root' '--password=root' `
+  '--database=mewhelp' '--default-character-set=utf8mb4' `
+  '--execute=source sql/ch07-ddl.sql'
+#    注意：短选项 -h127.0.0.1 会被 PowerShell 拆成 host=127，必须用长选项。
+
+# 2) 验收 2：演示配置下的完整级联（预算 → 层 1 降级 → 层 2 超预算 →
+#    后台摘要落段 → 下一轮从梗概召回订单号），全离线，不触网
+.\.venv\Scripts\python.exe scripts\demo_ch07.py --log log\app.log
+
+# 3) 验收 3：默认窗口下 20 轮不该触发任何降级与摘要
+.\.venv\Scripts\python.exe scripts\ch07_twenty_turns.py --turns 20
+
+# 4) 反面对照：演示窗口下 20 轮必须压（否则「永不压缩」也能假绿）
+.\.venv\Scripts\python.exe scripts\ch07_twenty_turns.py --turns 20 --demo-window
+
+# 5) 验收 1：22 轮真模型 + Milvus 真检索（慢，需 .env）
+.\.venv\Scripts\python.exe scripts\ch07_twenty_turns.py --turns 22 --real
+
+# 6) 验收 5：起服务后用 CDP 驱动真浏览器走一遍侧栏
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000   # 另开一个终端
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" `
+  --headless=new --remote-debugging-port=9222 --user-data-dir=$env:TEMP\ch07-cdp
+.\.venv\Scripts\python.exe scripts\ch07_ui_check.py
+
+# 7) 验收 4：日志里直接看每轮发给模型的摘要与滑窗
+Select-String -Path log\app.log -Pattern "model_ctx|history_ctx|summary trigger|summary done|layer1 降级"
+```
+
+## 3. 测试结果
+
+```
+$ .\.venv\Scripts\python.exe -m pytest -q --color=no
+1050 passed, 40 skipped in 35.71s
+```
+
+真库用例（`MEMHELP_TEST_MYSQL=1`）另算：`989 passed, 6 skipped`（Task 5 迁移后实测）。
+
+ch07 新增测试文件（共 188 条，`pytest --collect-only` 实测）：
+
+| 文件 | 条数 | 钉住什么 |
+|---|---|---|
+| `tests/test_ch07_tokens.py` | 14 | 中文按字折算的校准口径，与 `chars_per_token=4` 的低估划清 |
+| `tests/test_ch07_budget.py` | 10 | 演示配置逐项复现 12350 / 5650 / 3954 / 1695；两类「装不下一轮」 |
+| `tests/test_ch07_config.py` | 17 | 新配置键默认值、别名（`MAX_AGENT_STEPS` / `RERANK_TOP_K`）、比例和必须为 1 |
+| `tests/test_ch07_layers.py` | 32 | 三层划分、规则截短、降级只前进、边界修正到整轮 |
+| `tests/test_ch07_assemble.py` | 21 | 固定顺序、永不出现第二条 SystemMessage、梗概注入上限、兼容外壳 |
+| `tests/test_ch07_ddl.py` | 7 | 幂等迁移、不许 DROP、引号成对、`SET NAMES utf8mb4` |
+| `tests/test_ch07_repositories.py` | 24 | 锚点单调、乐观并发、段号唯一、侧栏查询 |
+| `tests/test_ch07_ctxlog.py` | 21 | `model_ctx` / `history_ctx` / `summary` 五态的行格式 |
+| `tests/test_ch07_summarizer.py` | 19 | 不阻塞、in-flight 去重、先 append 再推锚点、旧段只作背景 |
+| `tests/test_ch07_graph.py` | 5 | 三层装配进图、单一 system、调度不 await、无 id 兜底 |
+| `tests/test_ch07_history_ctx.py` | 5 | 每轮必打（含投诉/兜底/闲聊轮）、一轮只写一条 |
+| `tests/test_ch07_api.py` | 8 | 两个只读接口 + 启动预算自检 |
+| `tests/test_ch07_demo.py` | 5 | 演示脚本的纯函数（不发网络） |
+
+## 4. 五条验收标准（实测）
+
+| # | 标准 | 证据 |
+|---|---|---|
+| 1 | 连聊 20 轮以上，token 不爆、系统不崩 | `--turns 22 --real`：**EXIT=0**，层 1 峰值 **3071 / 5599**、层 2 峰值 **0 / 2400**，全程未触发压缩。输出见 `dev-notes/ch07-acceptance-output.txt` 第 4 段 |
+| 2 | 演示配置复现滑窗 5650 / 层 1 3954 / 层 2 1695，并看到完整级联 | `demo_ch07.py`：预算逐项对上（`验收要求 (5650, 3954, 1695) / 实际 (5650, 3954, 1695)`）；`layer1 降级 47→49`；`summary trigger session=s-demo layer2_tokens=1722 > budget=1695 msgs=46`；`summary done ... seg=1 ... upto_msg_id=46 ... stored=True`；最后问「最开始那个订单后来怎么说」，`model_ctx` 里 `[user] [会话梗概] 用户咨询订单 20240115001 的物流与退换…` → 召回 True |
+| 3 | 默认窗口下聊 20 轮，不该触发任何降级和摘要 | `ch07_twenty_turns.py --turns 20`：`降级：False 摘要：False`，层 1 峰值 **4224 / 5599**，`✓ 二十轮全程未压缩：装得下就不压`。反面对照 `--demo-window` 同一脚本 `压缩发生过：True`，防「永不压缩」假绿 |
+| 4 | 日志能看到后台摘要痕迹，且摘要没阻塞该轮回复；`grep model_ctx / history_ctx` 能直接看到每轮内容 | `log/app.log`（跑完全部演示与真机验收后 2.0 MB）：`model_ctx` 324 条、`history_ctx` 422 条、`summary` 3 条、`ch07 layer1 降级` 74 条。`summary start` → `summary done elapsed_ms=19` 与同轮 `model_ctx` 并列，回复 SSE 已先返回（`_FakeSummarizer.schedule` 是**同步**方法，任何 `await` 都会 TypeError —— `test_ch07_graph.py` 用它钉住「不 await」） |
+| 5 | 侧栏能开多个会话对照、切回旧会话历史完整回载、能接着聊 | `scripts/ch07_ui_check.py`：**EXIT=0**、`js errors: []`。截图 `ch07-sidebar.png`（两个会话并列、当前项高亮、`✂` 标记）/ `ch07-sidebar-after.png`（拦掉侧栏接口后 0 项、仍能聊）。回查：会话 258 共 10 行含续聊句、会话 259 未串入 |
+
+## 5. 架构要点
+
+- **三层 + 两个锚点**：`summary_upto_msg_id` 标梗概覆盖到哪条、`layer1_from_msg_id` 标层 1 从哪条起，两者都是 `messages.id`。降级只挪这两个整数，不搬数据。
+- **层 2 的语义不是「中间那段」**：`classify` 里 `layer1_from is None` 一律算层 1。层 2 只存在于两个锚点之间，即「曾经是层 1、被降级推出去的那段」—— 否则还没降级时最近几轮就被截短，「最近留原文」直接失效。
+- **预算从窗口倒推**，不与计数器各改一半：`window − 输出预留 − 单轮 ReAct 峰值 − 安全余量 − 系统提示 − 检索证据 − 注入梗概` 才是历史预算；`min(匀得, 想留住的轮数×每轮占用)` 定上限，层 1 拿七成、层 2 拿三成。
+- **梗概单开一张表**：三大理由 —— 只追加不覆盖（塞 `conversations` 一列会把上一段干掉）、不参与合并（反复有损压缩会退化成「用户有售后需求」丢掉订单号手机号）、不是对话消息（`history_as_messages` 会把 `messages` 每行回灌成 `BaseMessage`，梗概会被当成模型自己说过的话）。
+- **拼装顺序**：`system` 打头且全程只有这一条 → 层 2 截短 → 层 1 原文 → 用户当前这句 → 梗概与证据合成的**一条** `HumanMessage`。第二条 `SystemMessage` 会让上游把 system 上提合并，工具定义被挤到可变内容之后，前缀缓存整段作废。
+- **完整历史与精简版各走各的**：`state["messages"]` 挂 `add_messages`，各节点只吐新消息；`checkpoint` 留着完整历史；调模型前另算一份裁过的。`_run_agent_node` 只读不写。
+- **后台摘要不阻塞**：`asyncio.create_task` 立刻返回；会话级 `_inflight` 去重；落库前重读锚点做乐观并发；**先 append 再推锚点**（反了会让一段历史永久消失：既不进层 2、也没梗概）。
+- **梗概注入有上限**：`SUMMARY_RESERVE_TOKENS` 是算预算时已扣掉的固定开销，而梗概一段段攒 —— 攒够四段就超了。`select_summary_texts` 按预留截一遍：头尾都留、丢中间（最早那段记着最早的订单号，最近那段接着现在），只有一段且它自己超预算时截短而不丢；丢了几段记在 `ContextResult.summary_dropped_segments`，不悄悄少注入。
+
+## 6. 已知限制
+
+- 语义检索捞历史、主题重要度留关键事实这两层**按 spec 不做**（`本章不做`）。滑窗 + 摘要够本课量级。
+- 跨会话长期记忆、用户画像不做。
+- 摘要是**异步**的：触发那一轮的梗概还看不到，要下一轮才进上下文（本轮靠层 2 截短顶着）。
+- 多进程部署时 `_inflight` 去重失效，兜底是 `UNIQUE(conversation_id, segment_no)`：冲突即放弃并留痕，**不重试改号**。
+- `log/app.log` 单文件无轮转（`log/` 已在 `.gitignore`）。长时间跑要外部 logrotate。
+
+## 7. 原始输出留档
+
+- 验收演示五段（各带 `EXIT=`；第 5 段是补上梗概注入上限之后的重跑）：`dev-notes/ch07-acceptance-output.txt`
+- 逐阶段开发留痕（含所有纠偏与翻车）：`dev-notes/ch07.md`
+- 真机截图：`dev-notes/ch07-sidebar.png`、`dev-notes/ch07-sidebar-after.png`

@@ -70,6 +70,7 @@ def assemble_context(
     degraded: bool = False,
     summary_due: bool = False,
     trimmed_messages: int = 0,
+    summary_dropped_segments: int = 0,
 ) -> ContextResult:
     """按固定顺序拼出「这一轮发给模型的列表」。
 
@@ -103,6 +104,7 @@ def assemble_context(
         used_tokens=counter(kept),
         system_prompt_tokens=counter([system_message]),
         summary_tokens=counter([HumanMessage(content=reference)]) if reference else 0,
+        summary_dropped_segments=summary_dropped_segments,
         layer2_messages=len(layer2),
         layer1_messages=len(layer1),
         layer1_from_msg_id=layer1_from_msg_id,
@@ -110,6 +112,94 @@ def assemble_context(
         degraded=degraded,
         summary_due=summary_due,
     )
+
+
+def _truncate_to_tokens(
+    text: str,
+    *,
+    budget_tokens: int,
+    counter: Callable[[Sequence[BaseMessage]], int],
+) -> str:
+    """把一段文字按 token 预算截短（二分字符数，末尾补 ``…``）。
+
+    为什么二分而不是「估算每字多少 token 再乘」：校准口径里中文与 ASCII 的
+    折算率不同，一段中英混排的文字按字数乘系数必然偏。二分只依赖计数器本身，
+    口径改了也不会失配。
+    """
+    if budget_tokens <= 0:
+        return ""
+    if counter([HumanMessage(content=text)]) <= budget_tokens:
+        return text
+
+    low, high = 0, len(text)
+    best = ""
+    while low <= high:
+        middle = (low + high) // 2
+        candidate = text[:middle]
+        if counter([HumanMessage(content=candidate)]) <= budget_tokens:
+            best = candidate
+            low = middle + 1
+        else:
+            high = middle - 1
+    return f"{best.rstrip()}…" if best else ""
+
+
+def select_summary_texts(
+    texts: Sequence[str],
+    *,
+    budget_tokens: int,
+    counter: Callable[[Sequence[BaseMessage]], int] = count_tokens,
+) -> tuple[list[str], int]:
+    """按 token 预算挑选要注入的梗概段，返回 ``(选中的段, 丢掉的段数)``。
+
+    ## 为什么必须有个上限
+
+    ``SUMMARY_RESERVE_TOKENS``（默认 500）是**固定开销**，算预算时已经从窗口里
+    扣掉了。而梗概是**一段段攒**的：一段 150 字上下，攒够四段就 600 token，
+    超出的部分没有任何预算兜着 —— 历史预算按「梗概只占 500」算出来的，
+    实际注入更多，总量就会突破窗口。这个错误不会报错，只会让上游偶发 400。
+
+    ## 为什么丢中间而不是只留最近
+
+    梗概的价值分布是两头高：最早那段记着「最开始那个订单号是多少」，
+    最近那段接着现在的对话。中间那些多半是过程性的。所以：**头尾都留，
+    丢中间**，按时间顺序拼回去。只有一段时若它自己就超预算，就截短它
+    （宁可少几个字，也不能把唯一的早期事实整段丢掉）。
+    """
+    items = [str(text) for text in texts if str(text or "").strip()]
+    if not items:
+        return [], 0
+    if budget_tokens <= 0:
+        return [], len(items)
+
+    def cost(selected: Sequence[str]) -> int:
+        return counter([HumanMessage(content="\n".join(selected))])
+
+    if cost(items) <= budget_tokens:
+        return items, 0
+
+    if len(items) == 1:
+        truncated = _truncate_to_tokens(
+            items[0], budget_tokens=budget_tokens, counter=counter
+        )
+        return ([truncated] if truncated else []), (0 if truncated else 1)
+
+    head = [items[0]]
+    if cost(head) > budget_tokens:
+        truncated = _truncate_to_tokens(
+            items[0], budget_tokens=budget_tokens, counter=counter
+        )
+        return ([truncated] if truncated else []), len(items) - (1 if truncated else 0)
+
+    # 头保住了，再从最新往回塞，能塞几段塞几段。
+    tail: list[str] = []
+    for text in reversed(items[1:]):
+        candidate = head + [text, *tail]
+        if cost(candidate) > budget_tokens:
+            break
+        tail.insert(0, text)
+    kept = head + tail
+    return kept, len(items) - len(kept)
 
 
 def build_legacy_context(
