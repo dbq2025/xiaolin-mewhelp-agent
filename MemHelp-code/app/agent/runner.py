@@ -46,6 +46,7 @@ def _config(
     intent_cheap_model: Any = None,
     summarizer: Any = None,
     mcp_provider: Any = None,
+    flywheel: Any = None,
 ) -> dict[str, Any]:
     return {
         "configurable": {
@@ -60,6 +61,8 @@ def _config(
             "summarizer": summarizer,
             # ch08：MCP 工具发现器。None 表示本实例不接 MCP。
             "mcp_provider": mcp_provider,
+            # ch09：数据飞轮。None 表示入池后不自动标准化/查重。
+            "flywheel": flywheel,
         }
     }
 
@@ -234,6 +237,7 @@ async def astream_turn(
     turn_id: str | None = None,
     summarizer: Any = None,
     mcp_provider: Any = None,
+    flywheel: Any = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """跑一轮图，逐条产出 token/status/tools/citations/done 事件。"""
     config = _config(
@@ -246,6 +250,7 @@ async def astream_turn(
         settings=settings,
         summarizer=summarizer,
         mcp_provider=mcp_provider,
+        flywheel=flywheel,
     )
 
     # 同一 thread 还在等订单选择时，不要把新消息塞进暂停中的图：
@@ -307,6 +312,7 @@ async def astream_resume(
     summarizer: Any = None,
     mcp_provider: Any = None,
     resume_value: Any = None,
+    flywheel: Any = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """从中断点续跑；不重新跑 begin_turn。
 
@@ -323,6 +329,7 @@ async def astream_resume(
         settings=settings,
         summarizer=summarizer,
         mcp_provider=mcp_provider,
+        flywheel=flywheel,
     )
     resumed = Command(
         resume=resume_value if resume_value is not None else {"order_id": order_id}
@@ -356,6 +363,7 @@ async def complete_turn(
     turn_id: str | None = None,
     summarizer: Any = None,
     mcp_provider: Any = None,
+    flywheel: Any = None,
 ) -> tuple[str, dict[str, Any]]:
     """非流式：收齐 token 事件，返回完整回复与 done 摘要。"""
     parts: list[str] = []
@@ -374,6 +382,7 @@ async def complete_turn(
         turn_id=turn_id,
         summarizer=summarizer,
         mcp_provider=mcp_provider,
+        flywheel=flywheel,
     ):
         if event.get("type") == "token":
             parts.append(str(event.get("delta") or ""))

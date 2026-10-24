@@ -60,6 +60,7 @@ from app.errors import (
 from app.extract import ExtractionError, extract_request
 from app.knowledge.embedder import get_embedder
 from app.knowledge.hybrid import HybridRetriever
+from app.flywheel.service import FlywheelService
 from app.knowledge.pipeline import RagPipeline
 from app.knowledge.query import LlmRewriter, QueryUnderstander
 from app.knowledge.rerank import get_reranker
@@ -750,6 +751,7 @@ async def _chat_stream_body(
             settings=settings,
             summarizer=summarizer,
             mcp_provider=mcp_provider,
+            flywheel=FlywheelService(repositories, model, settings),
         ):
             frame = _sse_event(event)
             if frame is not None:
@@ -810,6 +812,7 @@ async def _refund_resume_body(
             settings=settings,
             summarizer=summarizer,
             mcp_provider=mcp_provider,
+            flywheel=FlywheelService(repositories, model, settings),
         ):
             frame = _sse_event(event)
             if frame is not None:
@@ -872,6 +875,7 @@ async def _ticket_resume_body(
             settings=settings,
             summarizer=summarizer,
             mcp_provider=mcp_provider,
+            flywheel=FlywheelService(repositories, model, settings),
         ):
             frame = _sse_event(event)
             if frame is not None:
@@ -1308,6 +1312,7 @@ def create_app(
                 settings=settings_,
                 summarizer=getattr(request.app.state, "summarizer", None),
                 mcp_provider=getattr(request.app.state, "mcp_provider", None),
+                flywheel=FlywheelService(repositories_, model_, settings_),
             )
         except Exception as exc:  # noqa: BLE001
             try:
