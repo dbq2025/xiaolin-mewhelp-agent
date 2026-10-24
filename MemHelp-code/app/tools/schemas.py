@@ -20,7 +20,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 __all__ = [
     "CreateTicketArgs",
     "QueryFaqArgs",
-    "QueryLogisticsArgs",
     "QueryOrderArgs",
     "QueryProductArgs",
 ]
@@ -62,14 +61,6 @@ class QueryProductArgs(_Args):
     product_id: str = Field(..., description="商品编号，例如 P2001。")
 
     _normalise = field_validator("product_id")(_reject_blank)
-
-
-class QueryLogisticsArgs(_Args):
-    """``query_logistics`` 的参数。"""
-
-    order_id: str = Field(..., description="要查物流的订单号，例如 1001。")
-
-    _normalise = field_validator("order_id")(_reject_blank)
 
 
 class QueryFaqArgs(_Args):

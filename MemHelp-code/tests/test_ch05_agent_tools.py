@@ -10,6 +10,7 @@ import pytest
 from app.agent.evidence import citations_for_answer, evidence_from_tool_result
 from app.agent.tools import agent_tools, make_suggest_actions_tool
 from app.tools.executor import ToolResult
+from app.tools.registry import build_registry
 
 
 class _KnowledgeRepo:
@@ -37,14 +38,19 @@ def _tool_result(items, *, ok=True) -> ToolResult:
     )
 
 
-def test_agent_tools_never_include_create_ticket(fake_repositories, empty_retriever):
+def test_agent_tools_include_create_ticket_for_confirmation_flow(
+    fake_repositories, empty_retriever
+):
+    """ch08：create_ticket 回到工具集，由 ReAct 拦截后转前端确认，不再直接执行。"""
     names = [
         tool.name
         for tool in agent_tools(
-            fake_repositories, empty_retriever, include_faq=True, record_actions=[]
+            build_registry(fake_repositories, empty_retriever),
+            include_faq=True,
+            record_actions=[],
         )
     ]
-    assert "create_ticket" not in names
+    assert "create_ticket" in names
     assert "suggest_actions" in names
 
 
@@ -52,26 +58,27 @@ def test_knowledge_tools_drop_query_faq(fake_repositories, empty_retriever):
     names = [
         tool.name
         for tool in agent_tools(
-            fake_repositories, empty_retriever, include_faq=False, record_actions=[]
+            build_registry(fake_repositories, empty_retriever),
+            include_faq=False,
+            record_actions=[],
         )
     ]
     assert "query_faq" not in names
-    assert {"query_order", "query_product", "query_logistics", "suggest_actions"} <= set(names)
+    assert {"query_order", "query_product", "suggest_actions"} <= set(names)
 
 
 def test_refund_tools_lock_the_order(fake_repositories, empty_retriever):
     names = [
         tool.name
         for tool in agent_tools(
-            fake_repositories,
-            empty_retriever,
+            build_registry(fake_repositories, empty_retriever),
             include_faq=False,
             include_order=False,
             record_actions=[],
         )
     ]
     assert "query_order" not in names
-    assert "query_logistics" not in names
+    assert "track_shipment" not in names
     assert "query_product" in names
     assert "suggest_actions" in names
 
@@ -80,7 +87,9 @@ def test_business_tools_keep_query_faq(fake_repositories, empty_retriever):
     names = [
         tool.name
         for tool in agent_tools(
-            fake_repositories, empty_retriever, include_faq=True, record_actions=[]
+            build_registry(fake_repositories, empty_retriever),
+            include_faq=True,
+            record_actions=[],
         )
     ]
     assert "query_faq" in names

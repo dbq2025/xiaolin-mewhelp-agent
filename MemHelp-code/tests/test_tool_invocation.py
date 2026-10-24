@@ -127,14 +127,6 @@ async def test_query_order_returns_parsable_json(repos):
     assert payload["order_id"] == "1001"
 
 
-async def test_query_logistics_returns_parsable_json(repos):
-    tool = get_tool("query_logistics", repos)
-    payload = json.loads(await tool.ainvoke({"order_id": "1001"}))
-
-    assert payload["carrier"]
-    assert payload["traces"]
-
-
 async def test_query_product_returns_parsable_json(repos):
     tool = get_tool("query_product", repos)
     payload = json.loads(await tool.ainvoke({"product_id": "P2001"}))
@@ -161,14 +153,13 @@ async def test_tool_arguments_are_validated_by_the_real_tool(repos, name, args):
 
 
 async def test_every_registered_tool_returns_a_string(repos, empty_retriever):
-    """把五个工具都真调一遍，逐个断言返回类型。
+    """把内置工具都真调一遍，逐个断言返回类型。
 
     这条是**兜底**：以后有人再加工具、又在包装层忘了 await，这里会红。
     """
     cases = [
         ("query_order", {"order_id": "1001"}),
         ("query_product", {"product_id": "P1"}),
-        ("query_logistics", {"order_id": "1001"}),
         ("query_faq", {"keyword": "测试"}),
         ("create_ticket", {"description": "描述", "ticket_type": "咨询", "conversation_id": "s1"}),
     ]

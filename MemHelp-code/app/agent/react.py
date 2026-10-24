@@ -48,7 +48,7 @@ from app.chat import _message_text
 from app.chat_tools import fallback_answer
 from app.knowledge.citations import Evidence
 from app.tools.executor import ToolResult, execute_tool, to_tool_message_content
-from app.tools.registry import TOOL_LABELS
+from app.tools.registry import TOOL_LABELS, build_registry
 
 logger = logging.getLogger(__name__)
 
@@ -160,9 +160,11 @@ async def run_react_agent(
 ) -> AgentOutcome:
     """跑一轮 ReAct，返回可落库的完整产物。"""
     record_actions: list[str] = []
+    # ch08：工具表每轮构造（内置闭包绑当轮仓库）。Task 10 会把 registry 提到图里、
+    # 在进入本函数前刷新 MCP 清单；这里先构造一次保证行为不变。
+    registry = build_registry(repositories, retriever)
     tools = agent_tools(
-        repositories,
-        retriever,
+        registry,
         include_faq=include_faq,
         include_order=include_order,
         record_actions=record_actions,  # type: ignore[arg-type]

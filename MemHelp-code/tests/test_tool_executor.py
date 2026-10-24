@@ -178,7 +178,7 @@ async def test_unknown_tool_error_lists_available_names(repos):
     )
 
     assert "query_order" in result.error
-    assert "query_logistics" in result.error
+    assert "query_faq" in result.error
 
 
 # ---------------------------------------------------------------------------

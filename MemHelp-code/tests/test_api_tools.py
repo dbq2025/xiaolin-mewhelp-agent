@@ -21,7 +21,7 @@ from app.agent.prompts import AGENT_EMPTY_TEXT
 from tests.fakes import FakeChatModel
 
 
-def _tool_call(name="query_logistics", args=None, call_id="call_1"):
+def _tool_call(name="query_order", args=None, call_id="call_1"):
     return {
         "name": name,
         "args": args if args is not None else {"order_id": "1001"},
@@ -142,7 +142,7 @@ def test_status_frame_payload_is_complete(test_settings, fake_repositories):
     )
     status = next(d for n, d in events if n == "status") or {}
 
-    assert status["tool"] == "query_logistics"
+    assert status["tool"] == "query_order"
     assert status["args"] == {"order_id": "1001"}
     assert status["label"].endswith("…")
     assert status["call_id"] == "call_1"
@@ -176,7 +176,7 @@ def test_tool_result_frame_updates_the_running_tool_immediately(
     assert "tool_result" in names
     assert names.index("status") < names.index("tool_result")
     assert result["call_id"] == "call_1"
-    assert result["tool"]["name"] == "query_logistics"
+    assert result["tool"]["name"] == "query_order"
     assert result["tool"]["ok"] is True
     assert result["tool"]["started_at"]
     assert result["tool"]["result"]
@@ -191,7 +191,7 @@ def test_done_frame_carries_the_tools_array(test_settings, fake_repositories):
     done = next(d for n, d in events if n == "done") or {}
 
     assert isinstance(done["tools"], list)
-    assert done["tools"][0]["name"] == "query_logistics"
+    assert done["tools"][0]["name"] == "query_order"
     assert done["tools"][0]["ok"] is True
     assert "duration_ms" in done["tools"][0]
     assert done["tools"][0]["started_at"]
@@ -253,7 +253,7 @@ def test_messages_exposes_tools_for_each_assistant_row(test_settings, fake_repos
     rows = client.post("/api/chat/sessions/s1/messages").json()["messages"]
     tool_turn = next(r for r in rows if r.get("tools"))
 
-    assert tool_turn["tools"][0]["name"] == "query_logistics"
+    assert tool_turn["tools"][0]["name"] == "query_order"
     assert tool_turn["tools"][0]["ok"] is True
 
 
