@@ -74,6 +74,7 @@ from app.knowledge.citations import (
     evidence_payload,
 )
 from app.prompts import REFUSAL_TEXT
+from app.tools.registry import build_registry
 from app.tools.business import query_order, query_product
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,12 @@ class GraphDeps:
     没接摘要器就消失。
     """
 
+    mcp_provider: Any = None
+    """进程级 MCP 工具发现器（``app.tools.mcp_client.McpToolProvider``）。
+
+    默认 ``None`` 表示本实例不接 MCP：图只登记内置工具，行为与 ch07 一致。
+    """
+
 
 def _deps(config: RunnableConfig) -> GraphDeps:
     configurable = (config or {}).get("configurable") or {}
@@ -114,7 +121,26 @@ def _deps(config: RunnableConfig) -> GraphDeps:
         retriever=configurable.get("retriever"),
         settings=configurable.get("settings"),
         summarizer=configurable.get("summarizer"),
+        mcp_provider=configurable.get("mcp_provider"),
     )
+
+
+async def _turn_registry(deps: GraphDeps, repositories: Any, retriever: Any) -> Any:
+    """构造本轮工具表并刷新 MCP 清单。
+
+    ``mcp_provider`` 为 ``None``（未接 MCP / 测试注入）时只登记内置工具，
+    ``refresh_mcp`` 是空操作。MCP 发现失败由 provider 兜住，最坏退回旧清单，
+    绝不会让这一轮聊天失败。
+    """
+    provider = deps.mcp_provider
+    registry = build_registry(
+        repositories,
+        retriever,
+        mcp_provider=provider,
+        enable_mcp=provider is not None,
+    )
+    await registry.refresh_mcp()
+    return registry
 
 
 def _trace(state: Mapping[str, Any], node: str) -> list[str]:
@@ -891,6 +917,7 @@ async def _run_agent_node(
         timeout=float(getattr(settings, "tool_timeout_seconds", 3.0)),
         max_retries=int(getattr(settings, "tool_max_retries", 1)),
         emit=lambda payload: _emit(_stream_writer(), payload),
+        registry=await _turn_registry(deps, repositories, retriever),
     )
 
     payload: dict[str, Any] = {

@@ -118,10 +118,13 @@ class ToolRegistry:
         if provider is None:
             return
         try:
-            specs = await provider.discover()  # type: ignore[attr-defined]
+            await provider.discover()  # type: ignore[attr-defined]
         except Exception as exc:  # provider 自己也不该抛，这里再兜一层
             logger.warning("ch08 MCP 工具刷新失败，沿用旧清单：%s", exc)
             return
+        # 只认 provider 的缓存：它按 Server 裁决成功/失败，失败的 Server 会
+        # 保留旧清单，``discover()`` 的返回值不承担这个语义。
+        specs = getattr(provider, "cached_specs", lambda: ())()
         async with self._lock:
             self._merge_mcp(specs)
 

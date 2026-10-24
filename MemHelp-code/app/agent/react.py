@@ -157,12 +157,16 @@ async def run_react_agent(
     max_retries: int = 1,
     emit: Callable[[dict[str, Any]], None] | None = None,
     executor: Callable[..., Any] | None = None,
+    registry: Any | None = None,
 ) -> AgentOutcome:
-    """跑一轮 ReAct，返回可落库的完整产物。"""
+    """跑一轮 ReAct，返回可落库的完整产物。
+
+    ``registry`` 由调用方（图节点）传入已刷新 MCP 清单的工具表；不传时内部
+    构造一张只含内置工具的表，保持旧调用点与测试可用。
+    """
     record_actions: list[str] = []
-    # ch08：工具表每轮构造（内置闭包绑当轮仓库）。Task 10 会把 registry 提到图里、
-    # 在进入本函数前刷新 MCP 清单；这里先构造一次保证行为不变。
-    registry = build_registry(repositories, retriever)
+    if registry is None:
+        registry = build_registry(repositories, retriever)
     tools = agent_tools(
         registry,
         include_faq=include_faq,

@@ -724,6 +724,7 @@ async def _chat_stream_body(
     intent_model: BaseChatModel | None = None,
     intent_cheap_model: BaseChatModel | None = None,
     summarizer: Any = None,
+    mcp_provider: Any = None,
 ) -> AsyncIterable[str]:
     """SSE 响应体：``meta`` → ``status``? → ``token``* → ``tools``? →
     ``citations``? → ``done``。
@@ -745,6 +746,7 @@ async def _chat_stream_body(
             retriever=retriever,
             settings=settings,
             summarizer=summarizer,
+            mcp_provider=mcp_provider,
         ):
             frame = _sse_event(event)
             if frame is not None:
@@ -784,6 +786,7 @@ async def _refund_resume_body(
     graph: Any,
     retriever: AnswerContextLike | None = None,
     summarizer: Any = None,
+    mcp_provider: Any = None,
     *,
     release_session: str | None = None,
     recover_message: str = "",
@@ -803,6 +806,7 @@ async def _refund_resume_body(
             retriever=retriever,
             settings=settings,
             summarizer=summarizer,
+            mcp_provider=mcp_provider,
         ):
             frame = _sse_event(event)
             if frame is not None:
@@ -908,6 +912,38 @@ def _attach_summarizer(app: FastAPI, settings: Settings) -> None:
         logger.warning("ch07 后台摘要器初始化失败（层 2 将只记账不压缩）", exc_info=True)
 
 
+def _attach_mcp_provider(app: FastAPI, settings: Settings) -> None:
+    """按配置建 MCP 工具发现器，挂到 ``app.state.mcp_provider``。
+
+    **建了不连**：构造只解析配置，真正的发现发生在每轮对话前的
+    ``ToolRegistry.refresh_mcp()``。MCP Server 没起时启动不受影响，聊天退回
+    只用内置工具 —— 外部系统可用性不该决定客服系统能不能启动。
+    """
+    if getattr(app.state, "mcp_provider", None) is not None:
+        return
+    if not getattr(settings, "mcp_enabled", True):
+        logger.info("ch08 MCP 接入已关闭（MCP_ENABLED=false）")
+        return
+    try:
+        from app.tools.mcp_client import (
+            McpToolProvider,
+            connections_from_settings,
+            readonly_servers_from_settings,
+        )
+
+        connections = connections_from_settings(settings)
+        if not connections:
+            return
+        app.state.mcp_provider = McpToolProvider(
+            connections,
+            read_only_servers=readonly_servers_from_settings(settings),
+            timeout=float(getattr(settings, "mcp_timeout_seconds", 3.0)),
+        )
+        logger.info("ch08 MCP 工具发现器已就绪（servers=%s）", ",".join(sorted(connections)))
+    except Exception:  # noqa: BLE001 - 接不上 MCP 不影响内置工具与聊天
+        logger.warning("ch08 MCP 工具发现器初始化失败（仅使用内置工具）", exc_info=True)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     """启动预热（ch03）：发一次真实嵌入请求 + 确保 Milvus 集合存在。
@@ -937,6 +973,7 @@ async def _lifespan(app: FastAPI):
         if current_settings is not None:
             _check_context_budget(current_settings)
             _attach_summarizer(app, current_settings)
+            _attach_mcp_provider(app, current_settings)
 
         # ch05：编译图。生产开 SQLite checkpointer；测试注入 InMemorySaver。
         if getattr(app.state, "agent_graph", None) is None:
@@ -1066,6 +1103,8 @@ def create_app(
     # ch07：后台摘要器由 lifespan 建（测试可注入）。显式置 None 而不是不赋值，
     # 是为了让 `getattr(state, "summarizer", None)` 与「属性根本不存在」可区分。
     app.state.summarizer = None
+    # ch08：MCP 工具发现器。lifespan 按配置建；测试可用 ``None`` 表示不接 MCP。
+    app.state.mcp_provider = None
     # 注入 checkpointer 时**立即编译**：TestClient 不进入 context manager 也不会跑
     # lifespan，而测试仍然要能聊天。生产路径（checkpointer=None）仍由 lifespan 管
     # AsyncSqliteSaver 的开关。
@@ -1191,6 +1230,7 @@ def create_app(
                     intent_model_,
                     intent_cheap_model_,
                     getattr(request.app.state, "summarizer", None),
+                    getattr(request.app.state, "mcp_provider", None),
                 ),
                 media_type=SSE_MEDIA_TYPE,
             )
@@ -1207,6 +1247,7 @@ def create_app(
                 retriever=retriever_,
                 settings=settings_,
                 summarizer=getattr(request.app.state, "summarizer", None),
+                mcp_provider=getattr(request.app.state, "mcp_provider", None),
             )
         except Exception as exc:  # noqa: BLE001
             try:
@@ -1432,6 +1473,7 @@ def create_app(
     )
     async def refund_select(
         req: RefundSelectRequest,
+        request: Request,
         settings_: Settings = Depends(get_app_settings),
         model_: BaseChatModel = Depends(get_model),
         intent_model_: BaseChatModel = Depends(get_intent_model),
@@ -1486,6 +1528,7 @@ def create_app(
                 repositories_,
                 graph_,
                 retriever_,
+                mcp_provider=getattr(request.app.state, "mcp_provider", None),
                 release_session=req.session_id,
                 recover_message=str(values.get("user_message") or ""),
                 persist_on_error=persist_on_error,

@@ -43,6 +43,7 @@ def _config(
     intent_model: Any = None,
     intent_cheap_model: Any = None,
     summarizer: Any = None,
+    mcp_provider: Any = None,
 ) -> dict[str, Any]:
     return {
         "configurable": {
@@ -55,6 +56,8 @@ def _config(
             "settings": settings,
             # ch07：后台摘要器。不传就是 None，图里层 2 只记账不压缩。
             "summarizer": summarizer,
+            # ch08：MCP 工具发现器。None 表示本实例不接 MCP。
+            "mcp_provider": mcp_provider,
         }
     }
 
@@ -206,6 +209,7 @@ async def astream_turn(
     intent_cheap_model: Any = None,
     turn_id: str | None = None,
     summarizer: Any = None,
+    mcp_provider: Any = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """跑一轮图，逐条产出 token/status/tools/citations/done 事件。"""
     config = _config(
@@ -271,6 +275,7 @@ async def astream_resume(
     intent_model: Any = None,
     intent_cheap_model: Any = None,
     summarizer: Any = None,
+    mcp_provider: Any = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """从退款子流程的中断点续跑；不重新跑 begin_turn。"""
     config = _config(
@@ -303,6 +308,7 @@ async def complete_turn(
     intent_cheap_model: Any = None,
     turn_id: str | None = None,
     summarizer: Any = None,
+    mcp_provider: Any = None,
 ) -> tuple[str, dict[str, Any]]:
     """非流式：收齐 token 事件，返回完整回复与 done 摘要。"""
     parts: list[str] = []
@@ -320,6 +326,7 @@ async def complete_turn(
         intent_cheap_model=intent_cheap_model,
         turn_id=turn_id,
         summarizer=summarizer,
+        mcp_provider=mcp_provider,
     ):
         if event.get("type") == "token":
             parts.append(str(event.get("delta") or ""))
