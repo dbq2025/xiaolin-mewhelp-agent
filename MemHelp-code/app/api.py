@@ -18,6 +18,7 @@ guard 里抛 ``HTTPException`` 只会直接返回 422，**不会回落到第二�
 帧编码抽到 ``app.sse`` 并由 ``tests/test_sse.py`` 单独钉住。
 """
 
+import asyncio
 import hashlib
 import inspect
 import json
@@ -77,6 +78,8 @@ from app.knowledge.retrieval import warmup as warmup_rag
 from app.knowledge.vector_store import MilvusVectorStore
 from app.observability import tracing
 from app.observability.intent_cost import LangfuseNotConfigured, fetch_intent_costs
+from app.eval_runs import run_evaluation, summarize_trend
+from app.eval_schedule import start_scheduler, stop_scheduler
 from app.llm import get_chat_model
 from app.memory import InMemorySessionStore, get_session_store, new_session_id
 from app.rag_eval import (
@@ -313,6 +316,24 @@ async def get_repositories(request: Request):
         yield Repositories.from_session(session)
     finally:
         session.close()
+
+
+async def _manual_eval(app: FastAPI) -> None:
+    """后台跑一轮评估；失败只记日志，让前端在列表里看不到新行。"""
+    settings = app.state.settings or get_settings()
+    repositories = getattr(app.state, "repositories", None)
+    session = None
+    if repositories is None:
+        factory, _ = _ensure_database(app, settings)
+        session = factory()
+        repositories = Repositories.from_session(session)
+    try:
+        await run_evaluation(repositories=repositories, trigger="手动", settings=settings)
+    except Exception:  # noqa: BLE001 - 后台任务不能把异常抛给事件循环
+        logger.exception("ch09 手动评估失败")
+    finally:
+        if session is not None:
+            session.close()
 
 
 @lru_cache(maxsize=4)
@@ -1113,6 +1134,16 @@ async def _lifespan(app: FastAPI):
             _attach_mcp_provider(app, current_settings)
             # ch09：必须在编译图之前配置，build_agent_graph 才会把 callback 挂上。
             tracing.configure(current_settings)
+            # ch09：定时评估需要进程级数据库；先建引擎（不连接），再由调度器复用。
+            if current_settings.eval_schedule_enabled:
+                try:
+                    _ensure_database(app, current_settings)
+                except Exception:  # noqa: BLE001 - 定时评估不可用不该阻断启动
+                    logger.warning("评估调度无法初始化数据库，将跳过", exc_info=True)
+            try:
+                app.state.eval_scheduler_task = start_scheduler(app)
+            except Exception:  # noqa: BLE001 - 调度失败不影响聊天
+                logger.warning("评估调度启动失败（已忽略）", exc_info=True)
 
         # ch05：编译图。生产开 SQLite checkpointer；测试注入 InMemorySaver。
         if getattr(app.state, "agent_graph", None) is None:
@@ -1156,6 +1187,11 @@ async def _lifespan(app: FastAPI):
 
         yield
     finally:
+        # ch09：先停调度器，避免它在本进程关库/关模型之后才醒来。
+        try:
+            await stop_scheduler(getattr(app.state, "eval_scheduler_task", None))
+        except Exception:  # noqa: BLE001 - 退出路径不该再抛
+            logger.debug("关闭评估调度失败（已忽略）", exc_info=True)
         # ch09：先把 trace 刷出去，再关摘要器/嵌入客户端（它们可能还在打点）。
         try:
             tracing.shutdown()
@@ -2165,6 +2201,43 @@ def create_app(
                 "total_tokens": sum(item.tokens for item in items),
             },
         )
+
+    # -- ch09：评估流水线 ---------------------------------------------------
+
+    @app.get("/api/eval-runs")
+    async def eval_runs_list(
+        limit: int = 20,
+        repositories_: Repositories = Depends(get_repositories),
+    ) -> JSONResponse:
+        """最近几轮评估 + 指标趋势（最近两轮对比）。"""
+        rows = await repositories_.eval_runs.list_recent(max(1, min(limit, 100)))
+        return JSONResponse(
+            status_code=200,
+            content={
+                "items": [
+                    {
+                        "id": row.id,
+                        "triggered_by": row.triggered_by,
+                        "dataset_size": row.dataset_size,
+                        "metrics": row.metrics,
+                        "created_at": _iso(row.created_at),
+                    }
+                    for row in rows
+                ],
+                "trend": summarize_trend(rows),
+            },
+        )
+
+    @app.post("/api/eval-runs/run")
+    async def eval_runs_run() -> JSONResponse:
+        """手动触发一轮评估；后台跑，前端轮询 ``GET /api/eval-runs`` 等新行。"""
+        task = getattr(app.state, "eval_run_task", None)
+        if task is not None and not task.done():
+            return _error(409, "eval_run_in_progress", "已有一轮评估在跑，请稍后再试")
+        app.state.eval_run_task = asyncio.create_task(
+            _manual_eval(app), name="ch09-manual-eval"
+        )
+        return JSONResponse(status_code=202, content={"started": True})
 
     # -- ch04：RAG 评估看板 -------------------------------------------------
     #

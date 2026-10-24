@@ -303,6 +303,22 @@ class Settings(BaseSettings):
         description="trace 的环境标签（production / staging / development）。",
     )
 
+    # -- ch09：评估流水线 ---------------------------------------------------
+
+    eval_schedule_enabled: bool = Field(
+        default=True,
+        description="是否在进程内定时跑 ch04 评估集并写 eval_runs。",
+    )
+    eval_schedule_interval_hours: float = Field(
+        default=24.0,
+        gt=0,
+        description="定时评估间隔（小时）；默认每天一轮。",
+    )
+    eval_script_path: str = Field(
+        default="evals/run_ch04_evals.py",
+        description="评估脚本相对项目根目录的路径。",
+    )
+
     # -- ch06：正式版分流器 -------------------------------------------------
     intent_model: str = Field(
         default="",

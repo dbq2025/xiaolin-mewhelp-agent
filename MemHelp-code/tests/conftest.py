@@ -49,6 +49,8 @@ def test_settings() -> Settings:
         # ch09：图/HTTP 单测默认不跑飞轮（否则假模型会被标准化/查重多调几次）；
         # 飞轮自身由 test_ch09_flywheel.py 直接测服务。
         flywheel_enabled=False,
+        # ch09：测试不启定时评估（否则 lifespan 会留一个 24h 的 asyncio 任务）。
+        eval_schedule_enabled=False,
     )
 
 
