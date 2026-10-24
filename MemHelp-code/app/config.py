@@ -318,6 +318,14 @@ class Settings(BaseSettings):
         default="evals/run_ch04_evals.py",
         description="评估脚本相对项目根目录的路径。",
     )
+    eval_generation_limit: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "生成段每桶取多少条；0 表示全部。生成模型偶发卡住时可设小值，"
+            "检索段仍跑全量，报告里会注明。"
+        ),
+    )
 
     # -- ch06：正式版分流器 -------------------------------------------------
     intent_model: str = Field(

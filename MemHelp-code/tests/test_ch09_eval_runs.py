@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 
 from app.db.repositories import EvalRunRow
 from app.eval_runs import (
+    build_script_args,
     extract_metrics,
     record_report,
     run_evaluation,
@@ -99,6 +100,21 @@ async def test_record_report_writes_row(fake_repositories):
     assert rows[0].triggered_by == "手动"
     assert rows[0].dataset_size == 4
     assert rows[0].metrics["retrieval"]["recall@5"] == 0.9
+
+
+def test_build_script_args_includes_generation_limit(test_settings):
+    settings = test_settings.model_copy(update={"eval_generation_limit": 8})
+
+    args = build_script_args(settings)
+
+    assert args[:2] == ["--generation", "hybrid_rerank"]
+    assert args[-2:] == ["--limit", "8"]
+
+
+def test_build_script_args_omits_zero_limit(test_settings):
+    settings = test_settings.model_copy(update={"eval_generation_limit": 0})
+
+    assert "--limit" not in build_script_args(settings)
 
 
 async def test_run_evaluation_uses_injected_report(fake_repositories, monkeypatch, test_settings):

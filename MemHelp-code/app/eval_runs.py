@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 TRIGGERS = ("定时", "手动")
 REPORT_PATH = PROJECT_ROOT / "evals" / "reports" / "ch09-latest.json"
 MARKDOWN_PATH = PROJECT_ROOT / "evals" / "reports" / "ch09-latest.md"
+LOG_PATH = PROJECT_ROOT / "evals" / "reports" / "ch09-run.log"
 RETRIEVAL_KEYS = ("recall@1", "recall@3", "recall@5", "recall@10", "mrr@10")
 GENERATION_KEYS = (
     "faithfulness",
@@ -74,37 +75,52 @@ async def record_report(repositories, report: dict, *, triggered_by: str) -> int
     )
 
 
+def build_script_args(settings: Settings) -> list[str]:
+    """拼评估脚本参数。
+
+    ``eval_generation_limit > 0`` 时只跑每桶这么多个生成样本（检索仍跑全量），
+    用于在生成模型偶发卡住时把一轮控制在可接受的时间里；报告里会写明。
+    """
+    args = ["--generation", "hybrid_rerank"]
+    if settings.eval_generation_limit > 0:
+        args.extend(["--limit", str(settings.eval_generation_limit)])
+    return args
+
+
 async def _run_report(settings: Settings) -> dict:
     """跑评估脚本（子进程），返回它写出的 JSON 报告。"""
     script = PROJECT_ROOT / settings.eval_script_path
     if not script.is_file():
         raise RuntimeError(f"评估脚本不存在：{script}")
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    process = await asyncio.create_subprocess_exec(
-        sys.executable,
-        str(script),
-        "--generation",
-        "hybrid_rerank",
-        "--json",
-        str(REPORT_PATH),
-        "--markdown",
-        str(MARKDOWN_PATH),
-        cwd=str(PROJECT_ROOT),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(), timeout=TIMEOUT_SECONDS
+    # 不接 PIPE：Windows 沙箱里给子进程建管道会 WinError 5；写日志文件即可，
+    # 失败时再从文件尾部取上下文。生产环境同样受益（长跑的输出不会撑爆内存）。
+    with LOG_PATH.open("ab") as log:
+        log.write("\n=== ch09 eval start ===\n".encode("utf-8"))
+        log.flush()
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(script),
+            *build_script_args(settings),
+            "--json",
+            str(REPORT_PATH),
+            "--markdown",
+            str(MARKDOWN_PATH),
+            cwd=str(PROJECT_ROOT),
+            stdout=log,
+            stderr=asyncio.subprocess.STDOUT,
         )
-    except asyncio.TimeoutError as exc:
-        process.kill()
-        await process.wait()
-        raise RuntimeError(f"评估超时（>{TIMEOUT_SECONDS:.0f}s）") from exc
+        try:
+            await asyncio.wait_for(process.wait(), timeout=TIMEOUT_SECONDS)
+        except asyncio.TimeoutError as exc:
+            process.kill()
+            await process.wait()
+            raise RuntimeError(f"评估超时（>{TIMEOUT_SECONDS:.0f}s）") from exc
 
     if process.returncode != 0:
-        tail = (stderr or b"").decode("utf-8", "replace").strip()[-800:]
+        tail = LOG_PATH.read_text(encoding="utf-8", errors="replace")[-800:].strip()
         raise RuntimeError(f"评估脚本退出码 {process.returncode}：{tail}")
     if not REPORT_PATH.is_file():
         raise RuntimeError(f"评估脚本没有写出报告：{REPORT_PATH}")

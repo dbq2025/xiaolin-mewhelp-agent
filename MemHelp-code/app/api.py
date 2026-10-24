@@ -2153,13 +2153,13 @@ def create_app(
     # -- ch09：按意图的 token 成本 -----------------------------------------
 
     @app.get("/api/intent-cost")
-    async def intent_cost(days: int = 7) -> JSONResponse:
+    async def intent_cost(request: Request, days: int = 7) -> JSONResponse:
         """按意图汇总 Langfuse 里的 token / 成本。
 
         没有配置云端凭据时返回空列表 + ``configured=false``，页面据此显示
         「未接入」而不是报错；上游失败返回 502。
         """
-        current = app.state.settings
+        current = get_app_settings(request)
         if not (
             current.langfuse_enabled
             and current.langfuse_public_key
