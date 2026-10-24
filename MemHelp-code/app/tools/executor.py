@@ -38,6 +38,7 @@ from app.db.repositories import Repositories
 from app.errors import redact
 from app.tools.audit import AuditEntry, write_audit
 from app.tools.contract import ToolSource, ToolStatus, ToolSpec
+from app.tools.mcp_client import unwrap_mcp_result
 from app.tools.permissions import check_permission
 from app.tools.presenter import present_result, summarize_result
 from app.tools.registry import TOOL_NAMES, ToolRegistry, build_registry
@@ -443,6 +444,9 @@ async def execute_tool(
                 continue
             break
         else:
+            if source == "mcp":
+                # MCP 返回 content blocks；先摊平成文本，呈现层才解析得了 JSON。
+                raw = unwrap_mcp_result(raw)
             if legacy:
                 # 旧测试注入的假工具没有业务字段，呈现层的白名单会把它削空；
                 # 兼容路径保持 ch02 的「原样回灌」语义。

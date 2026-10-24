@@ -25,6 +25,8 @@ def _register(
     *,
     read_only: bool = True,
     schema: dict | None = None,
+    source: str = "builtin",
+    mcp_server: str | None = None,
 ) -> ToolSpec:
     """把一个协程登记成工具；schema 缺省为空对象（无参数）。"""
     tool = StructuredTool.from_function(coroutine=fn, name=name, description="测试工具")
@@ -32,8 +34,8 @@ def _register(
         name=name,
         description="测试工具",
         args_schema=schema or {"type": "object", "properties": {}},
-        source="builtin",
-        mcp_server=None,
+        source=source,
+        mcp_server=mcp_server,
         read_only=read_only,
         tool=tool,
     )
@@ -246,6 +248,53 @@ async def test_write_confirmed_executes(fake_repositories) -> None:
 
     assert result.ok is True
     assert result.status == "成功"
+
+
+async def test_mcp_content_blocks_are_unwrapped(fake_repositories) -> None:
+    """MCP 工具返回的是 content blocks，审计与呈现都应按 JSON 处理。"""
+    registry = build_registry(fake_repositories)
+
+    async def shipment():
+        return [
+            {
+                "type": "text",
+                "text": json.dumps(
+                    {
+                        "order_id": "1001",
+                        "carrier": "顺丰",
+                        "tracking_no": "SF1",
+                        "status": "IN_TRANSIT",
+                        "nodes": [],
+                        "eta": "2026-10-26",
+                    },
+                    ensure_ascii=False,
+                ),
+            }
+        ]
+
+    _register(
+        registry,
+        "track_shipment",
+        shipment,
+        source="mcp",
+        mcp_server="logistics",
+    )
+
+    result = await execute_tool(
+        "track_shipment",
+        {"order_id": "1001"},
+        registry=registry,
+        repositories=fake_repositories,
+    )
+
+    assert result.ok is True
+    assert result.source == "mcp"
+    assert result.mcp_server == "logistics"
+    assert json.loads(result.data)["status_text"] == "运输中"
+
+    row = (await fake_repositories.audit.list_recent(limit=1))[0]
+    assert row.tool_source == "mcp"
+    assert row.mcp_server == "logistics"
 
 
 def test_summary_keeps_legacy_keys() -> None:
