@@ -223,6 +223,13 @@ class Settings(BaseSettings):
     rag_rewrite_timeout: float = Field(
         default=3.0, gt=0, description="单次 Query 改写请求超时（秒）。"
     )
+    evidence_confidence_model: str = Field(
+        default="evals/ch09_confidence_model.json",
+        description=(
+            "ch09 正式证据置信度模型的 JSON artifact 路径（相对项目根）。"
+            "文件缺失或损坏时闸退回 ch05 的 RAG_MIN_RERANK_SCORE 阈值版。"
+        ),
+    )
 
     # -- ch05：Workflow 编排 + 主 Agent -------------------------------------
     checkpoint_db_path: str = Field(
