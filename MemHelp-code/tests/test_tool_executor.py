@@ -207,7 +207,7 @@ async def test_validation_failure_is_not_retried(repos):
         "query_order", {}, repositories=repos, timeout=TIMEOUT, max_retries=3, resolve=fake
     )
 
-    assert result.attempts == 1
+    assert result.attempts == 0, "校验拦下时工具根本没被调用，attempts 记 0"
 
 
 async def test_wrong_argument_type_is_rejected(repos):

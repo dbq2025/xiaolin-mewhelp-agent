@@ -94,6 +94,7 @@ from app.schemas import (
 from app.sse import SSE_MEDIA_TYPE, sse_frame
 from app.tools.executor import execute_tool
 from app.tools.knowledge import AnswerContextLike
+from app.tools.registry import build_registry
 
 logger = logging.getLogger(__name__)
 
@@ -1382,10 +1383,13 @@ def create_app(
                 "idempotency_key": req.idempotency_key,
             },
             repositories=repositories_,
+            registry=build_registry(repositories_, None),
             # 建单不需要检索器；传 None 避免为了一个 tickets 写入去构造 Milvus 客户端。
             retriever=None,
             timeout=settings_.tool_timeout_seconds,
             max_retries=settings_.tool_max_retries,
+            # ch05 这条路是「用户点按钮」本身即确认，保持不动；ch08 只补 confirmed。
+            confirmed=True,
         )
         if not result.ok:
             if result.fault == "database":
@@ -1574,9 +1578,11 @@ def create_app(
                 "idempotency_key": idempotency_key,
             },
             repositories=repositories_,
+            registry=build_registry(repositories_, None),
             retriever=None,
             timeout=settings_.tool_timeout_seconds,
             max_retries=settings_.tool_max_retries,
+            confirmed=True,
         )
         if not result.ok:
             if result.fault == "database":

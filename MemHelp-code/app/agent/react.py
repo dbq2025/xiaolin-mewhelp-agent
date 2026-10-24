@@ -272,14 +272,18 @@ async def run_react_agent(
                 }
             )
         else:
-            result = await run_tool(
-                name,
-                args,
-                repositories=repositories,
-                retriever=retriever,
-                timeout=timeout,
-                max_retries=max_retries,
-            )
+            call_kwargs: dict[str, object] = {
+                "repositories": repositories,
+                "retriever": retriever,
+                "timeout": timeout,
+                "max_retries": max_retries,
+            }
+            if executor is None:
+                # 真执行器需要本轮工具表（含 MCP）与 tool_call_id 落审计；
+                # 测试注入的假执行器签名更窄，不硬塞这两个参数。
+                call_kwargs["registry"] = registry
+                call_kwargs["tool_call_id"] = call_id
+            result = await run_tool(name, args, **call_kwargs)  # type: ignore[arg-type]
             last_tool_result = result
             tool_traces.append(result.summary())
             content = to_tool_message_content(result)
