@@ -76,6 +76,7 @@ from app.knowledge.sufficiency import SufficiencyJudge
 from app.knowledge.retrieval import warmup as warmup_rag
 from app.knowledge.vector_store import MilvusVectorStore
 from app.observability import tracing
+from app.observability.intent_cost import LangfuseNotConfigured, fetch_intent_costs
 from app.llm import get_chat_model
 from app.memory import InMemorySessionStore, get_session_store, new_session_id
 from app.rag_eval import (
@@ -2112,6 +2113,58 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _as_upstream_error(exc) from exc
         return JSONResponse(status_code=200, content=result.model_dump())
+
+    # -- ch09：按意图的 token 成本 -----------------------------------------
+
+    @app.get("/api/intent-cost")
+    async def intent_cost(days: int = 7) -> JSONResponse:
+        """按意图汇总 Langfuse 里的 token / 成本。
+
+        没有配置云端凭据时返回空列表 + ``configured=false``，页面据此显示
+        「未接入」而不是报错；上游失败返回 502。
+        """
+        current = app.state.settings
+        if not (
+            current.langfuse_enabled
+            and current.langfuse_public_key
+            and current.langfuse_secret_key
+        ):
+            return JSONResponse(
+                status_code=200,
+                content={"configured": False, "days": days, "items": [], "total_tokens": 0},
+            )
+        if days < 1 or days > 90:
+            return _error(422, "invalid_days", "days 必须在 1–90 之间")
+
+        try:
+            items = await fetch_intent_costs(current, days=days)
+        except LangfuseNotConfigured:
+            return JSONResponse(
+                status_code=200,
+                content={"configured": False, "days": days, "items": [], "total_tokens": 0},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("intent cost query failed")
+            return _error(502, "langfuse_unavailable", redact(str(exc)))
+
+        payload = [
+            {
+                "intent": item.intent,
+                "tokens": item.tokens,
+                "cost": item.cost,
+                "observations": item.observations,
+            }
+            for item in items
+        ]
+        return JSONResponse(
+            status_code=200,
+            content={
+                "configured": True,
+                "days": days,
+                "items": payload,
+                "total_tokens": sum(item.tokens for item in items),
+            },
+        )
 
     # -- ch04：RAG 评估看板 -------------------------------------------------
     #
