@@ -123,7 +123,7 @@ git commit -m "feat(ch09): review_queue/eval_runs 模型与仓库，问题池加
 
 **Interfaces:**
 - Produces:
-  - `Settings.langfuse_enabled: bool = False`、`langfuse_public_key/secret_key/base_url/environment`
+  - `Settings.langfuse_enabled: bool = True`、`langfuse_public_key/secret_key/base_url/environment`（`configure()` 在 `enabled` 为假**或三个连接项任一为空**时 no-op）
   - `tracing.configure(settings) -> None`（幂等；失败只 warning）
   - `tracing.callback_handler() -> object | None`
   - `tracing.turn_span(session_id, question) -> TurnSpan`（`TurnSpan.finish(payload)`；未启用时 no-op）

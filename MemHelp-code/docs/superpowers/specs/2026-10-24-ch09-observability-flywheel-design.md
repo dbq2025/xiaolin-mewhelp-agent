@@ -169,7 +169,7 @@ LANGFUSE_FLUSH_AT=20
 LANGFUSE_FLUSH_INTERVAL=3
 ```
 
-`LANGFUSE_ENABLED=false` 或密钥缺失时，所有 tracing helper 变成 no-op；聊天链路绝不因为 Langfuse 不可用而失败。
+`LANGFUSE_ENABLED` 默认 `true`；`enabled=false` 或三个连接项（public key / secret key / base URL）任一缺失时，所有 tracing helper 变成 no-op；聊天链路绝不因为 Langfuse 不可用而失败。当前 `.env` 只配了三个连接项（未写 `LANGFUSE_ENABLED`），走默认开启。
 
 ### 5.2 `app/observability/tracing.py`
 
