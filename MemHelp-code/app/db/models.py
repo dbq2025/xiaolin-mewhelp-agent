@@ -519,3 +519,49 @@ class FaithCase(Base):
         Index("idx_faith_status", "status"),
         Index("idx_faith_last_seen_at", "last_seen_at"),
     )
+
+# ---------------------------------------------------------------------------
+# ch08：工具审计
+# ---------------------------------------------------------------------------
+
+#: 审计状态。与 ``sql/ch08-ddl.sql`` 的 ENUM 逐字相同（顺序也一致）。
+TOOL_AUDIT_STATUSES: tuple[str, ...] = ("成功", "失败", "超时", "校验拦下", "权限拒绝")
+
+
+class ToolAuditLog(Base):
+    """每次工具调用一条，**包括**被权限拒绝、被校验拦下的那些。
+
+    刻意不挂外键：工具调用可能发生在会话行落库之前（或会话被清理之后），
+    审计不能因此写不进去 —— 它的职责是「留痕」，不是「参与业务一致性」。
+    """
+
+    __tablename__ = "tool_audit_logs"
+
+    id: Mapped[int] = mapped_column(_AUTOINC_PK, primary_key=True, autoincrement=True)
+    #: 所属会话；调用发生时可能还没有会话行，所以可空。
+    conversation_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    #: 模型给的调用 id，用来把审计行与那一轮的工具消息对上。
+    tool_call_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    tool_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    tool_source: Mapped[str] = mapped_column(
+        SAEnum("builtin", "mcp", name="tool_audit_source"), nullable=False
+    )
+    #: 来源是 MCP 时记 Server 名（logistics / aftersales …）。
+    mcp_server: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    arguments: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    result_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(
+        SAEnum(*TOOL_AUDIT_STATUSES, name="tool_audit_status"), nullable=False
+    )
+    error_message: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("idx_audit_conversation_id", "conversation_id"),
+        Index("idx_audit_tool_name", "tool_name"),
+        Index("idx_audit_status", "status"),
+    )

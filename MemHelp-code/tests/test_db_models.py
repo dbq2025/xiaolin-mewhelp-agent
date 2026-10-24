@@ -10,12 +10,13 @@
 """
 
 
-def test_metadata_has_exactly_nine_tables():
+def test_metadata_has_exactly_ten_tables():
     """多一张少一张都要红 —— 表名漂移会让 compose 灌好的数据白费。
 
     ch03 新增 `knowledge_chunks` / `qa_extraction_staging`（六张）；
     ch04 新增 `low_confidence_questions` / `faith_cases`（八张）；
-    ch07 新增 `conversation_summaries`（九张）。
+    ch07 新增 `conversation_summaries`（九张）；
+    ch08 新增 `tool_audit_logs`（十张）。
     """
     import app.db.models  # noqa: F401 - 必须先 import 才会注册进 metadata
     from app.db.base import Base
@@ -30,6 +31,7 @@ def test_metadata_has_exactly_nine_tables():
         "low_confidence_questions",
         "faith_cases",
         "conversation_summaries",
+        "tool_audit_logs",
     }
 
 
