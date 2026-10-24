@@ -230,6 +230,16 @@ class Settings(BaseSettings):
             "文件缺失或损坏时闸退回 ch05 的 RAG_MIN_RERANK_SCORE 阈值版。"
         ),
     )
+    knowledge_self_check: bool = Field(
+        default=True,
+        description=(
+            "ch09：置信度闸通过后、进 Agent 前是否再让模型自评一次「证据够不够」。"
+            "生产默认开；单元测试关掉，避免每次图测试都多一次模型调用。"
+        ),
+    )
+    self_check_timeout: float = Field(
+        default=5.0, gt=0, description="生成前自评的单次超时（秒）。"
+    )
 
     # -- ch05：Workflow 编排 + 主 Agent -------------------------------------
     checkpoint_db_path: str = Field(

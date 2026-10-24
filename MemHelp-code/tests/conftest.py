@@ -43,6 +43,9 @@ def test_settings() -> Settings:
         context_token_budget=2000,
         # ch05：测试不往仓库写 JSONL；需要日志的用例显式传路径。
         turn_log_path="",
+        # ch09：图单测不额外调一次自评模型（否则会吃掉 ScriptedChatModel 的脚本）；
+        # 需要验自评的用例显式打开并注入假判官。
+        knowledge_self_check=False,
     )
 
 

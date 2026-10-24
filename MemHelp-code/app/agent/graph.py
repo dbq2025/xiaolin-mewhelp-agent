@@ -32,6 +32,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -44,7 +45,11 @@ from langgraph.types import StreamWriter, interrupt
 from app.agent.checkpoint import memory_checkpointer
 from app.agent.coref import CorefResolver
 from app.agent.ctxlog import AppLogger, log_history_ctx, log_model_ctx
-from app.agent.gate import evaluate_gate
+from app.agent.gate import evaluate_evidence_gate, evaluate_gate
+from app.agent.evidence_confidence import (
+    features_from_scores,
+    load_model,
+)
 from app.agent.intent import IntentClassifier
 from app.agent.logging import TurnLogger, build_turn_log
 from app.agent.persist import persist_turn
@@ -73,6 +78,7 @@ from app.knowledge.citations import (
     evidence_from_payload,
     evidence_payload,
 )
+from app.knowledge.sufficiency import SufficiencyJudge
 from app.observability import tracing
 from app.prompts import REFUSAL_TEXT
 from app.tools.audit import AuditEntry, write_audit
@@ -113,6 +119,19 @@ class GraphDeps:
     默认 ``None`` 表示本实例不接 MCP：图只登记内置工具，行为与 ch07 一致。
     """
 
+    flywheel: Any = None
+    """ch09 数据飞轮（``app.flywheel.service.FlywheelService``）。
+
+    默认 ``None``：入池成功即结束；Task 5 接入后会在池子落库后同步标准化+查重。
+    """
+
+    sufficiency: Any = None
+    """ch09 生成前自评（``SufficiencyJudge`` 兼容对象）。
+
+    默认 ``None`` 时按 ``settings.knowledge_self_check`` 决定：生产 true →
+    用当前模型构造真实判官；测试/旧调用方 false → 跳过，不额外消耗模型调用。
+    """
+
 
 def _deps(config: RunnableConfig) -> GraphDeps:
     configurable = (config or {}).get("configurable") or {}
@@ -125,6 +144,8 @@ def _deps(config: RunnableConfig) -> GraphDeps:
         settings=configurable.get("settings"),
         summarizer=configurable.get("summarizer"),
         mcp_provider=configurable.get("mcp_provider"),
+        flywheel=configurable.get("flywheel"),
+        sufficiency=configurable.get("sufficiency"),
     )
 
 
@@ -375,13 +396,76 @@ async def _route_intent(state: AgentState, config: RunnableConfig) -> dict[str, 
     }
 
 
+def _snapshot_items(evidence: Sequence[Evidence]) -> list[dict[str, Any]]:
+    """当轮召回快照：给入池/审核页看「当时到底召回了什么、多少分」。"""
+    return [
+        {
+            "n": item.n,
+            "chunk_id": item.chunk_id,
+            "section_path": item.section_path,
+            "category": item.category,
+            "quote": item.quote[:600],
+            "score": float(item.score),
+        }
+        for item in evidence
+    ]
+
+
+def _confidence_model(settings: Any):
+    """加载 ch09 模型 artifact；缺失/损坏返回 None，由调用方退回阈值闸。"""
+    path = getattr(settings, "evidence_confidence_model", "")
+    if not path:
+        return None
+    from app.config import PROJECT_ROOT
+
+    resolved = Path(path)
+    if not resolved.is_absolute():
+        resolved = PROJECT_ROOT / resolved
+    return load_model(resolved)
+
+
+async def _pool_low_confidence(
+    deps: GraphDeps,
+    state: AgentState,
+    *,
+    source: str,
+    reason: str,
+    snapshot: Sequence[dict[str, Any]],
+) -> int | None:
+    """落池 + 交给飞轮；失败只记日志，不改变给用户的话术。"""
+    try:
+        conversation_id = await deps.repositories.conversations.upsert_by_session(
+            state["session_id"], "anonymous"
+        )
+        question_id = await deps.repositories.low_confidence.add(
+            conversation_id,
+            state["user_message"],
+            source,
+            reason,
+            retrieved_chunks=list(snapshot) or None,
+        )
+    except Exception:  # noqa: BLE001 - 入池失败不该吞掉兜底话术
+        logger.exception("低置信度入池失败（已忽略，仍然回兜底话术）")
+        return None
+
+    if deps.flywheel is not None:
+        try:
+            await deps.flywheel.ingest(question_id)
+        except Exception:  # noqa: BLE001 - 飞轮失败不该改变给用户的回答
+            logger.exception("飞轮处理失败（问题已入池，id=%s）", question_id)
+    return question_id
+
+
 async def _knowledge_retrieve(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     retriever = _deps(config).retriever
     query = state["resolved_message"]
+    # ch09：闸要自己看分数，所以优先走只拒 0 命中的 retrieve_for_gate；
+    # 旧假检索器只有 retrieve_only 时保持兼容（既有图测试不必全改）。
+    retrieve = getattr(retriever, "retrieve_for_gate", None) or retriever.retrieve_only
     with tracing.observation(
         "knowledge_retrieve", as_type="retriever", input={"query": query}
     ) as span:
-        outcome = await retriever.retrieve_only(query)
+        outcome = await retrieve(query)
         if span is not None:
             span.update(
                 output={
@@ -409,6 +493,7 @@ async def _knowledge_retrieve(state: AgentState, config: RunnableConfig) -> dict
         "retrieval_degraded": bool(outcome.rerank_degraded),
         "retrieval_score": top_score,
         "evidence": evidence,
+        "retrieval_snapshot": _snapshot_items(outcome.evidence),
         "gate_reason": outcome.refusal_reason or "",
         "trace": _trace(state, "knowledge_retrieve"),
     }
@@ -417,34 +502,89 @@ async def _knowledge_retrieve(state: AgentState, config: RunnableConfig) -> dict
 async def _confidence_gate(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     deps = _deps(config)
     settings = deps.settings
-    repositories = deps.repositories
-    decision = evaluate_gate(
-        refused=bool(state.get("retrieval_refused")),
-        evidence_count=len(state.get("evidence") or []),
-        top_score=float(state.get("retrieval_score") or 0.0),
-        rerank_degraded=bool(state.get("retrieval_degraded")),
-        min_score=float(getattr(settings, "rag_min_rerank_score", 0.3)),
-    )
+    snapshot = list(state.get("retrieval_snapshot") or [])
+    scores = [float(item.get("score") or 0.0) for item in snapshot]
+    features = features_from_scores(scores)
+    model = _confidence_model(settings)
 
+    if model is not None:
+        confidence = model.score(features)
+        decision = evaluate_evidence_gate(
+            evidence_count=len(state.get("evidence") or []),
+            features=features,
+            confidence=confidence,
+            rerank_degraded=bool(state.get("retrieval_degraded")),
+            model=model,
+        )
+    else:
+        confidence = 0.0
+        decision = evaluate_gate(
+            refused=bool(state.get("retrieval_refused")),
+            evidence_count=len(state.get("evidence") or []),
+            top_score=float(state.get("retrieval_score") or 0.0),
+            rerank_degraded=bool(state.get("retrieval_degraded")),
+            min_score=float(getattr(settings, "rag_min_rerank_score", 0.3)),
+        )
+
+    reason = state.get("gate_reason") or decision.reason
     if not decision.passed:
-        reason = state.get("gate_reason") or decision.reason
-        try:
-            conversation_id = await repositories.conversations.upsert_by_session(
-                state["session_id"], "anonymous"
-            )
-            await repositories.low_confidence.add(
-                conversation_id,
-                state["user_message"],
-                "retrieval_low_conf",
-                reason,
-            )
-        except Exception:  # noqa: BLE001 - 入池失败不该吞掉兜底话术
-            logger.exception("低置信度入池失败（已忽略，仍然回兜底话术）")
+        await _pool_low_confidence(
+            deps,
+            state,
+            source="retrieval_low_conf",
+            reason=reason,
+            snapshot=snapshot,
+        )
 
     return {
         "gate_passed": decision.passed,
-        "gate_reason": state.get("gate_reason") or decision.reason,
+        "gate_reason": reason,
+        "evidence_confidence": confidence,
+        "self_check_degraded": False,
         "trace": _trace(state, "confidence_gate"),
+    }
+
+
+async def _knowledge_self_check(
+    state: AgentState, config: RunnableConfig
+) -> dict[str, Any]:
+    """闸通过后、进 Agent 前的一次模型自评（ch09 第三个飞轮入口）。"""
+    deps = _deps(config)
+    settings = deps.settings
+    if not bool(getattr(settings, "knowledge_self_check", True)):
+        return {
+            "self_check_degraded": False,
+            "trace": _trace(state, "knowledge_self_check_skipped"),
+        }
+
+    judge = deps.sufficiency
+    if judge is None:
+        judge = SufficiencyJudge(
+            deps.model, timeout=float(getattr(settings, "self_check_timeout", 5.0))
+        )
+    question = state.get("resolved_message") or state["user_message"]
+    evidence = evidence_from_payload(state.get("evidence") or [])
+    verdict = await judge.judge(question, evidence)
+    if verdict.sufficient:
+        return {
+            "self_check_degraded": bool(verdict.degraded),
+            "trace": _trace(state, "knowledge_self_check"),
+        }
+
+    reason = verdict.reason or verdict.missing or "模型自评证据不足以回答"
+    snapshot = list(state.get("retrieval_snapshot") or [])
+    await _pool_low_confidence(
+        deps,
+        state,
+        source="self_check",
+        reason=reason,
+        snapshot=snapshot,
+    )
+    return {
+        "gate_passed": False,
+        "gate_reason": reason,
+        "self_check_degraded": bool(verdict.degraded),
+        "trace": _trace(state, "knowledge_self_check"),
     }
 
 
@@ -1179,6 +1319,7 @@ def build_agent_graph(*, checkpointer: BaseCheckpointSaver | None = None):
     builder.add_node("route_intent", _route_intent)
     builder.add_node("knowledge_retrieve", _knowledge_retrieve)
     builder.add_node("confidence_gate", _confidence_gate)
+    builder.add_node("knowledge_self_check", _knowledge_self_check)
     builder.add_node("refund_prepare_order", _refund_prepare_order)
     builder.add_node("refund_await_order", _refund_await_order)
     builder.add_node("refund_expand_queries", _refund_expand_queries)
@@ -1221,6 +1362,11 @@ def build_agent_graph(*, checkpointer: BaseCheckpointSaver | None = None):
     builder.add_edge("knowledge_retrieve", "confidence_gate")
     builder.add_conditional_edges(
         "confidence_gate",
+        lambda state: "knowledge_self_check" if state.get("gate_passed") else "fallback",
+        {"knowledge_self_check": "knowledge_self_check", "fallback": "fallback"},
+    )
+    builder.add_conditional_edges(
+        "knowledge_self_check",
         lambda state: "agent" if state.get("gate_passed") else "fallback",
         {"agent": "agent", "fallback": "fallback"},
     )

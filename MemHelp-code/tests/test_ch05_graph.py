@@ -427,6 +427,7 @@ async def test_turn_log_written_with_retrieval_trace(fake_repositories):
         openai_api_key="sk-test",
         openai_model="fake-model",
         turn_log_path="tests/_ch05_turns.jsonl",
+        knowledge_self_check=False,
     )
     path = Path("tests/_ch05_turns.jsonl")
     if path.exists():

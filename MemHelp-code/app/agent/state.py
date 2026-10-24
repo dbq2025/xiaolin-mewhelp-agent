@@ -132,8 +132,14 @@ class AgentState(TypedDict, total=False):
     retrieval_degraded: bool
     retrieval_refused: bool
     evidence: list[dict[str, Any]]
+    #: ch09：当轮召回片段快照（含分数），入池与 👎 回捞都用它。
+    retrieval_snapshot: list[dict[str, Any]]
+    #: ch09：正式闸算出的证据置信度（0~1）。
+    evidence_confidence: float
     gate_passed: bool
     gate_reason: str
+    #: ch09：生成前自评是否降级（模型失败/坏 JSON 时 fail-open）。
+    self_check_degraded: bool
 
     # -- Agent ------------------------------------------------------------
     answer: str

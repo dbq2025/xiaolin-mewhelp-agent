@@ -224,6 +224,35 @@ class RagPipeline:
             rerank_degraded=result.rerank_degraded,
         )
 
+    async def retrieve_for_gate(
+        self, query: str, *, category: str | None = None
+    ) -> RetrievalOutcome:
+        """给正式置信度闸用的检索：**只拒 0 命中，不按分数提前拒答**。
+
+        ``retrieve_only`` 在最高分低于阈值时直接返回空证据，闸就看不到
+        Top1/Top2 分差与有效证据数了。ch09 把「分数低」的判断挪到闸里，
+        所以这里必须把低分证据原样带出去。
+        """
+        understood, result, chunks = await self._retrieve(query, category=category)
+        top_score = float(chunks[0].score) if chunks else 0.0
+
+        if not chunks:
+            return self._refuse(
+                understood,
+                source="retrieval_low_conf",
+                reason="检索没有命中任何知识块",
+                rerank_degraded=result.rerank_degraded,
+                top_score=0.0,
+            )
+
+        return RetrievalOutcome(
+            query=understood,
+            evidence=build_evidence(chunks),
+            top_score=top_score,
+            refused=False,
+            rerank_degraded=result.rerank_degraded,
+        )
+
     async def retrieve_many(
         self, queries: Sequence[str], *, category: str | None = None
     ) -> RetrievalOutcome:
