@@ -565,6 +565,82 @@
     }
   }
 
+  function renderTicketPreview(target, data, ctx) {
+    const preview = (data && data.preview) || {};
+    const box = el('div', 'ticket-preview');
+    box.appendChild(el('div', 'ticket-preview-title', '工单预览'));
+    box.appendChild(el('div', 'ticket-preview-hint', '确认后才会真正创建工单。'));
+
+    const rows = el('div', 'ticket-preview-rows');
+    [
+      ['工单类型', preview.ticket_type || '—'],
+      ['问题描述', preview.description || '—'],
+    ].forEach(([key, value]) => {
+      const row = el('div', 'ticket-preview-row');
+      row.appendChild(el('span', 'ticket-preview-key', key));
+      row.appendChild(el('span', 'ticket-preview-value', value));
+      rows.appendChild(row);
+    });
+    box.appendChild(rows);
+
+    const actions = el('div', 'ticket-preview-actions');
+    const confirm = el('button', 'ticket-confirm', '确认提交');
+    confirm.type = 'button';
+    const cancel = el('button', 'ticket-cancel', '取消');
+    cancel.type = 'button';
+    confirm.addEventListener('click', () => {
+      if (!confirm.disabled) confirmTicket(ctx, true, target, box);
+    });
+    cancel.addEventListener('click', () => {
+      if (!cancel.disabled) confirmTicket(ctx, false, target, box);
+    });
+    actions.appendChild(confirm);
+    actions.appendChild(cancel);
+    box.appendChild(actions);
+
+    target.flow.hidden = false;
+    target.flow.appendChild(box);
+  }
+
+  async function confirmTicket(ctx, confirmed, target, box) {
+    if (!sessionId) {
+      addNotice('会话信息缺失，请刷新后重试。', true);
+      return;
+    }
+    const buttons = box ? box.querySelectorAll('button') : [];
+    buttons.forEach((button) => { button.disabled = true; });
+    addFlowNote(target, confirmed ? '已确认提交，正在建单…' : '已取消建单。');
+    setStatus(confirmed ? '正在建单…' : '正在取消…', 'ok');
+    try {
+      const resp = await fetch('/api/chat/ticket/confirm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId, confirmed: !!confirmed }),
+      });
+      if (!resp.ok) {
+        const payload = await resp.json().catch(() => null);
+        const err = (payload && payload.error) || {};
+        throw new Error(err.message || `HTTP ${resp.status}`);
+      }
+      ctx.awaiting = false;
+      ctx.acc = '';
+      ctx.bot.body.innerHTML = '';
+      await consumeStream(resp, ctx);
+      ctx.finish();
+      setStatus('已连接', 'ok');
+    } catch (err) {
+      addNotice(`工单确认失败：${err && err.message ? err.message : err}`, true);
+      setStatus('确认失败', 'bad');
+      buttons.forEach((button) => { button.disabled = false; });
+    } finally {
+      if (!ctx.awaiting) {
+        els.input.disabled = false;
+        els.send.disabled = false;
+        els.input.focus();
+      }
+    }
+  }
+
   function attachRefundForm(target, form) {
     if (!form || !form.order_id) return;
     const existing = target.wrap.querySelector('.refund-form');
@@ -674,16 +750,27 @@
     }
 
     if (event === 'awaiting_input') {
+      const kind = (data && data.kind) || 'order_picker';
+      const isTicket = kind === 'ticket_preview';
       ctx.awaiting = true;
       ctx.bot.body.innerHTML = '';
       els.input.disabled = true;
       els.send.disabled = true;
-      setStatus('等待选择订单', 'ok');
+      setStatus(isTicket ? '等待确认建单' : '等待选择订单', 'ok');
       if (data.error) {
         addNotice(data.error, true);
       }
       if (data.discarded_message) {
-        addNotice(data.message || '请先选择要办理的订单；刚才的消息没有被处理。', true);
+        addNotice(
+          data.message || (isTicket
+            ? '请先确认或取消刚才的工单；刚才的消息没有被处理。'
+            : '请先选择要办理的订单；刚才的消息没有被处理。'),
+          true,
+        );
+      } else if (isTicket) {
+        if (!ctx.bot.flow.querySelector('.ticket-preview')) {
+          renderTicketPreview(ctx.bot, data, ctx);
+        }
       } else if (!ctx.bot.flow.querySelector('.order-picker') && data.orders) {
         renderOrderPicker(ctx.bot, data, ctx);
       }
