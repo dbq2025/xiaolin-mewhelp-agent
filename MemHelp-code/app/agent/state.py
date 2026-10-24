@@ -167,3 +167,5 @@ class AgentState(TypedDict, total=False):
     turn_started_at: float
     turn_log: dict[str, Any]
     error: str | None
+    #: ch09：本轮最终回答在 messages 表里的 id；👎 反馈靠它定位是哪条回答。
+    message_id: int | None

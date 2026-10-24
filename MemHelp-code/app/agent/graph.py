@@ -1281,8 +1281,9 @@ async def _log_turn(state: AgentState, config: RunnableConfig) -> dict[str, Any]
     latency_ms = int((time.time() - started) * 1000)
 
     already_committed = state.get("last_committed_turn_id") == turn_id
+    persisted = None
     if not already_committed:
-        await persist_turn(
+        persisted = await persist_turn(
             repositories=repositories,
             session_id=state["session_id"],
             user_message=state["user_message"],
@@ -1305,6 +1306,8 @@ async def _log_turn(state: AgentState, config: RunnableConfig) -> dict[str, Any]
     if not already_committed:
         payload["messages"] = list(state.get("pending_messages") or [])
         payload["last_committed_turn_id"] = turn_id
+    if persisted is not None:
+        payload["message_id"] = persisted.answer_message_id
     return payload
 
 

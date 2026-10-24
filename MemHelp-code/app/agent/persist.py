@@ -17,13 +17,22 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
 from app.db.repositories import Repositories
 
-__all__ = ["persist_turn", "persist_user_only"]
+__all__ = ["PersistedTurn", "persist_turn", "persist_user_only"]
+
+
+@dataclass(frozen=True)
+class PersistedTurn:
+    """一轮落库后拿到的两个锚点；👎 反馈用 ``answer_message_id`` 定位回答。"""
+
+    user_message_id: int
+    answer_message_id: int
 
 
 def _tool_calls_payload(message: AIMessage) -> list[dict[str, Any]]:
@@ -123,8 +132,8 @@ async def persist_turn(
     suggested_actions: Sequence[str] = (),
     ticket_type: str = "售后",
     tool_records: Sequence[dict[str, Any]] = (),
-) -> None:
-    """把一轮成功对话写进 MySQL（user + pending 里的全部行）。"""
+) -> PersistedTurn:
+    """把一轮成功对话写进 MySQL（user + pending 里的全部行），返回消息 id。"""
     conversation_id = await repositories.conversations.upsert_by_session(session_id, "anonymous")
     action_rows = _action_rows(suggested_actions, ticket_type)
     rows = [
@@ -136,7 +145,19 @@ async def persist_turn(
             tool_records=tool_records,
         ),
     ]
-    await repositories.messages.append_many(conversation_id, rows)
+    ids = await repositories.messages.append_many(conversation_id, rows)
+    answer_index = next(
+        (
+            index
+            for index in range(len(rows) - 1, 0, -1)
+            if rows[index]["role"] == "assistant"
+        ),
+        0,
+    )
+    return PersistedTurn(
+        user_message_id=ids[0],
+        answer_message_id=ids[answer_index] if ids else 0,
+    )
 
 
 async def persist_user_only(

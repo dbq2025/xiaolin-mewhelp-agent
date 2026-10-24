@@ -143,6 +143,8 @@ def done_payload(values: dict[str, Any], *, session_id: str) -> dict[str, Any]:
     return {
         "finish_reason": finish_reason,
         "session_id": session_id,
+        # ch09：👎 反馈要精确到「这条回答」，前端把它挂到 bot 气泡上。
+        "message_id": values.get("message_id"),
         "trimmed": int(context.get("trimmed_messages") or 0),
         "kept": int(context.get("kept_messages") or 0),
         # ch07：三层结构的可观测字段。全部带默认值，ch01–ch06 的调用方

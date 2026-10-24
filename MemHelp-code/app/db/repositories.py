@@ -139,6 +139,8 @@ class MessageRow:
     citations: list[dict[str, Any]] | None = None
     #: ch05：本轮建议动作（转人工 / 建工单）。刷新后按钮还能渲染，就靠它。
     actions: list[dict[str, Any]] | None = None
+    #: ch09：👎 反馈要按会话回捞，消息行得能回答「我属于哪个会话」。
+    conversation_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -711,8 +713,8 @@ class MessageRepository:
 
     def _append_many(
         self, conversation_id: int, rows: Sequence[dict[str, Any]]
-    ) -> None:
-        """一次事务写入多行。
+    ) -> list[int]:
+        """一次事务写入多行，返回新行 id（按传入顺序）。
 
         **先把所有 role 校验完再 add**：否则第二行非法时第一行已经进 Session，
         调用方 catch 了异常也不知道要不要 rollback。这里要么全写、要么一行不写。
@@ -720,31 +722,92 @@ class MessageRepository:
         for row in rows:
             self._check_role(str(row["role"]))
 
+        messages: list[Message] = []
         for row in rows:
-            self._session.add(
-                Message(
-                    conversation_id=conversation_id,
-                    role=row["role"],
-                    content=row.get("content"),
-                    tool_calls=row.get("tool_calls"),
-                    tool_call_id=row.get("tool_call_id"),
-                    tool_traces=row.get("tool_traces"),
-                    citations=row.get("citations"),
-                    actions=row.get("actions"),
-                )
+            message = Message(
+                conversation_id=conversation_id,
+                role=row["role"],
+                content=row.get("content"),
+                tool_calls=row.get("tool_calls"),
+                tool_call_id=row.get("tool_call_id"),
+                tool_traces=row.get("tool_traces"),
+                citations=row.get("citations"),
+                actions=row.get("actions"),
             )
+            self._session.add(message)
+            messages.append(message)
+        self._session.flush()
+        ids = [int(message.id) for message in messages]
         self._session.commit()
+        return ids
 
     async def append_many(
         self, conversation_id: int, rows: Sequence[dict[str, Any]]
-    ) -> None:
+    ) -> list[int]:
         """把一轮的多行（user / assistant tool_calls / tool / assistant）单事务写入。
 
         ch05 的 ReAct 一轮可能产生多组工具调用；逐行 ``append`` 每次 commit，
         中途失败会留下「有工具申请单、没有工具结果」的半截历史，下一轮回灌时
         上游会直接拒绝。单事务是这条链路的结构性保证。
+
+        返回 id 供 ch09 的 👎 反馈精确定位「是哪一条回答被差评」。
         """
-        await _run(self._append_many, conversation_id, rows)
+        return await _run(self._append_many, conversation_id, rows)
+
+    def _get(self, message_id: int) -> MessageRow | None:
+        row = self._session.get(Message, message_id)
+        if row is None:
+            return None
+        return MessageRow(
+            id=row.id,
+            role=row.role,
+            content=row.content,
+            tool_calls=row.tool_calls,
+            tool_call_id=row.tool_call_id,
+            created_at=row.created_at,
+            tool_traces=row.tool_traces,
+            citations=row.citations,
+            actions=row.actions,
+            conversation_id=row.conversation_id,
+        )
+
+    async def get(self, message_id: int) -> MessageRow | None:
+        """按主键取一条消息；不存在返回 ``None``。"""
+        return await _run(self._get, message_id)
+
+    def _last_user_before(
+        self, conversation_id: int, message_id: int
+    ) -> MessageRow | None:
+        row = self._session.scalars(
+            select(Message)
+            .where(
+                Message.conversation_id == conversation_id,
+                Message.role == "user",
+                Message.id < message_id,
+            )
+            .order_by(Message.id.desc())
+            .limit(1)
+        ).first()
+        if row is None:
+            return None
+        return MessageRow(
+            id=row.id,
+            role=row.role,
+            content=row.content,
+            tool_calls=row.tool_calls,
+            tool_call_id=row.tool_call_id,
+            created_at=row.created_at,
+            tool_traces=row.tool_traces,
+            citations=row.citations,
+            actions=row.actions,
+            conversation_id=row.conversation_id,
+        )
+
+    async def last_user_before(
+        self, conversation_id: int, message_id: int
+    ) -> MessageRow | None:
+        """同会话里、这条消息之前最近的一条 user 消息。👎 用它反查问题原话。"""
+        return await _run(self._last_user_before, conversation_id, message_id)
 
     def _list(self, conversation_id: int) -> list[MessageRow]:
         rows = self._session.scalars(
@@ -1564,6 +1627,18 @@ class LowConfidenceQuestionRepository:
     async def list_recent(self, limit: int = 20) -> list[LowConfidenceRow]:
         """最近入池的若干条（新的在前）。"""
         return await _run(self._list_recent, limit)
+
+    def _has_reason_fragment(self, fragment: str) -> bool:
+        found = self._session.scalar(
+            select(LowConfidenceQuestion.id).where(
+                LowConfidenceQuestion.reason.like(f"%{fragment}%")
+            )
+        )
+        return found is not None
+
+    async def has_reason_fragment(self, fragment: str) -> bool:
+        """``reason`` 里是否已有某个标记；👎 双击幂等靠它。"""
+        return await _run(self._has_reason_fragment, fragment)
 
     def _count_by_source(self) -> dict[str, int]:
         rows = self._session.execute(

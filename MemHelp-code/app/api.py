@@ -61,6 +61,7 @@ from app.extract import ExtractionError, extract_request
 from app.knowledge.embedder import get_embedder
 from app.knowledge.hybrid import HybridRetriever
 from app.flywheel.service import FlywheelService
+from app.flywheel.snapshot import snapshot_for_turn
 from app.knowledge.pipeline import RagPipeline
 from app.knowledge.query import LlmRewriter, QueryUnderstander
 from app.knowledge.rerank import get_reranker
@@ -91,6 +92,7 @@ from app.schemas import (
     ErrorResponse,
     ExtractRequest,
     FaithCaseUpdateRequest,
+    FeedbackRequest,
     RefundSelectRequest,
     SessionMessagesResponse,
     TicketConfirmRequest,
@@ -583,6 +585,7 @@ async def _db_session_messages_payload(
 
     for index, row in enumerate(rows):
         item: dict[str, Any] = {
+            "id": row.id,
             "role": _ROLE_TO_API.get(row.role, row.role),
             "content": row.content or "",
         }
@@ -635,6 +638,32 @@ def _faith_case_payload(row: Any) -> dict[str, Any]:
         "resolution": row.resolution,
         "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,
     }
+
+
+def _citations_as_snapshot(citations: Any) -> list[dict[str, Any]]:
+    """把回答里的 ``citations`` 退化成召回快照。
+
+    只用于 checkpoint 回捞失败时兜底：``citations`` 是给用户看的引用，
+    没有重排分数（``score`` 只能置 ``None``），但原文和位置还在，审核人
+    照样能判断「知识库缺这块」还是「有但没检到」。
+    """
+    if not isinstance(citations, list):
+        return []
+    snapshot: list[dict[str, Any]] = []
+    for index, item in enumerate(citations, start=1):
+        if not isinstance(item, dict):
+            continue
+        snapshot.append(
+            {
+                "n": item.get("n") or index,
+                "chunk_id": item.get("chunk_id"),
+                "section_path": item.get("section_path") or "",
+                "category": item.get("category") or "",
+                "quote": str(item.get("quote") or "")[:600],
+                "score": None,
+            }
+        )
+    return snapshot
 
 
 def _tool_traces(
@@ -751,7 +780,11 @@ async def _chat_stream_body(
             settings=settings,
             summarizer=summarizer,
             mcp_provider=mcp_provider,
-            flywheel=FlywheelService(repositories, model, settings),
+            flywheel=(
+                FlywheelService(repositories, model, settings)
+                if settings.flywheel_enabled
+                else None
+            ),
         ):
             frame = _sse_event(event)
             if frame is not None:
@@ -812,7 +845,11 @@ async def _refund_resume_body(
             settings=settings,
             summarizer=summarizer,
             mcp_provider=mcp_provider,
-            flywheel=FlywheelService(repositories, model, settings),
+            flywheel=(
+                FlywheelService(repositories, model, settings)
+                if settings.flywheel_enabled
+                else None
+            ),
         ):
             frame = _sse_event(event)
             if frame is not None:
@@ -875,7 +912,11 @@ async def _ticket_resume_body(
             settings=settings,
             summarizer=summarizer,
             mcp_provider=mcp_provider,
-            flywheel=FlywheelService(repositories, model, settings),
+            flywheel=(
+                FlywheelService(repositories, model, settings)
+                if settings.flywheel_enabled
+                else None
+            ),
         ):
             frame = _sse_event(event)
             if frame is not None:
@@ -1312,7 +1353,11 @@ def create_app(
                 settings=settings_,
                 summarizer=getattr(request.app.state, "summarizer", None),
                 mcp_provider=getattr(request.app.state, "mcp_provider", None),
-                flywheel=FlywheelService(repositories_, model_, settings_),
+                flywheel=(
+                    FlywheelService(repositories_, model_, settings_)
+                    if settings_.flywheel_enabled
+                    else None
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             try:
@@ -1849,6 +1894,87 @@ def create_app(
         if row is None:
             return _error(404, "not_found", f"台账里没有题号 {eval_id}。")
         return JSONResponse(status_code=200, content=_faith_case_payload(row))
+
+    # -- ch09：聊天页满意度反馈 ---------------------------------------------
+    #
+    # 👍 只记前端状态，不进池；👎 才把该轮用户问题送进飞轮。入池后立刻同步
+    # 标准化 + 查重，审核人打开后台就能看到，不用等定时任务。
+
+    @app.post("/api/feedback")
+    async def submit_feedback(
+        req: FeedbackRequest,
+        request: Request,
+        repositories_: Repositories = Depends(get_repositories),
+        settings_: Settings = Depends(get_app_settings),
+        model_: BaseChatModel = Depends(get_model),
+    ) -> JSONResponse:
+        """把一条 👎 落进问题池，并尽量回捞当轮召回片段。
+
+        幂等靠 ``reason`` 里的 ``[feedback:<message_id>]`` 标记：用户双击、
+        网络重试都不会把同一轮问题重复入池。
+        """
+        if req.rating == "up":
+            return JSONResponse(status_code=200, content={"ok": True, "ignored": True})
+
+        answer = await repositories_.messages.get(req.message_id)
+        if answer is None or answer.conversation_id is None:
+            return _error(404, "not_found", f"消息 {req.message_id} 不存在。")
+        owner = await repositories_.conversations.find_session_id(
+            answer.conversation_id
+        )
+        if owner != req.session_id:
+            return _error(
+                404, "not_found", "这条消息不属于该会话，不能提交反馈。"
+            )
+
+        marker = f"[feedback:{req.message_id}]"
+        if await repositories_.low_confidence.has_reason_fragment(marker):
+            return JSONResponse(
+                status_code=200, content={"ok": True, "duplicate": True}
+            )
+
+        user_row = await repositories_.messages.last_user_before(
+            answer.conversation_id, req.message_id
+        )
+        question = (user_row.content or "").strip() if user_row is not None else ""
+        if not question:
+            return _error(
+                409, "no_question", "找不到这条回答对应的用户问题，无法入池。"
+            )
+
+        snapshot = None
+        graph = getattr(request.app.state, "agent_graph", None)
+        if graph is not None:
+            snapshot = await snapshot_for_turn(
+                graph, session_id=req.session_id, user_message=question
+            )
+        if not snapshot:
+            snapshot = _citations_as_snapshot(answer.citations)
+
+        detail = f"：{req.reason.strip()}" if req.reason and req.reason.strip() else ""
+        reason = f"用户反馈未解决{detail} {marker}"
+        question_id = await repositories_.low_confidence.add(
+            answer.conversation_id,
+            question,
+            "user_feedback",
+            reason,
+            retrieved_chunks=snapshot or None,
+        )
+        if settings_.flywheel_enabled:
+            try:
+                await FlywheelService(repositories_, model_, settings_).ingest(
+                    question_id
+                )
+            except Exception:  # noqa: BLE001 - 飞轮失败不该让用户看到报错
+                logger.exception("👎 已入池，但飞轮处理失败（question_id=%s）", question_id)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "ok": True,
+                "question_id": question_id,
+                "snapshot_count": len(snapshot or []),
+            },
+        )
 
     # -- 结构化提取（一次返回完整 JSON，不流式）---------------------------
 

@@ -240,6 +240,19 @@ class Settings(BaseSettings):
     self_check_timeout: float = Field(
         default=5.0, gt=0, description="生成前自评的单次超时（秒）。"
     )
+    flywheel_enabled: bool = Field(
+        default=True,
+        description=(
+            "ch09：入池后是否自动跑「标准化 → 查重 → 待审队列」。"
+            "生产默认开；离线单测关掉，避免多调几次模型。"
+        ),
+    )
+    flywheel_normalize_timeout: float = Field(
+        default=20.0, gt=0, description="问题标准化模型调用超时（秒）。"
+    )
+    flywheel_dedupe_timeout: float = Field(
+        default=15.0, gt=0, description="查重模型调用超时（秒）。"
+    )
 
     # -- ch05：Workflow 编排 + 主 Agent -------------------------------------
     checkpoint_db_path: str = Field(

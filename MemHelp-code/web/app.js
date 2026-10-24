@@ -143,6 +143,9 @@
       body,
       tools,
       flow,
+      // ch09：这条回答在 messages 表里的 id，👎 靠它告诉后端「是哪条回答」。
+      // 流式 done 帧带上；历史回载从 /messages 的 id 字段还原。
+      messageId: null,
       // 渲染状态挂在消息节点上：多次工具调用、增量结果与最终 done 都改这一份。
       toolState: { items: [], open: new Set() },
     };
@@ -815,6 +818,7 @@
       setToolRecords(ctx.bot, data.tools);
       // 引用与反馈都挂在最终答案上：流式过程中 cites 还没到，先不管。
       decorateCitations(ctx.bot.body, data.citations);
+      ctx.bot.messageId = data.message_id || null;
       attachFeedback(ctx.bot);
       attachActions(ctx.bot, data.actions, {
         route: data.route,
@@ -912,9 +916,9 @@
 
   // ---------------------------------------------------------- 满意度反馈
   //
-  // 纯前端采集：一次点击即锁定，写进 localStorage，供后续做数据飞轮时读取。
-  // 键里带序号，刷新后能对上同一条回答；序号取「当前是第几条 bot 消息」，
-  // 与 restoreHistory 的渲染顺序一致。
+  // ch09：👍 仍只记本地；👎 调 POST /api/feedback，后端把这一轮的用户问题
+  // 连同召回片段送进飞轮。键优先用消息 id（刷新/重开都对得上），旧历史没有
+  // id 时才退回「第几条 bot 消息」的序号。
 
   const FEEDBACK_PREFIX = 'mewhelp.feedback.';
 
@@ -927,8 +931,10 @@
     return rows.indexOf(row);
   }
 
-  function feedbackKey(index) {
-    return `${FEEDBACK_PREFIX}${sessionId || 'anon'}.${index}`;
+  function feedbackKey(target) {
+    const session = sessionId || 'anon';
+    if (target.messageId) return `${FEEDBACK_PREFIX}${session}.id.${target.messageId}`;
+    return `${FEEDBACK_PREFIX}${session}.${botIndexOf(target.row)}`;
   }
 
   function applyFeedbackLock(box, choice) {
@@ -943,11 +949,40 @@
     if (note) note.textContent = '已反馈';
   }
 
+  function setFeedbackPending(box, pending) {
+    box.dataset.pending = pending ? '1' : '';
+    box.querySelectorAll('button').forEach((button) => {
+      button.disabled = pending;
+    });
+    if (!pending) {
+      box.querySelectorAll('button').forEach((button) => {
+        button.disabled = false;
+      });
+    }
+  }
+
+  async function sendDownFeedback(messageId) {
+    const resp = await fetch('/api/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId || 'anon',
+        message_id: messageId,
+        rating: 'down',
+      }),
+    });
+    if (!resp.ok) {
+      const payload = await resp.json().catch(() => null);
+      const err = (payload && payload.error) || {};
+      throw new Error(err.message || `HTTP ${resp.status}`);
+    }
+    return resp.json().catch(() => ({}));
+  }
+
   function attachFeedback(target) {
     const existing = target.wrap.querySelector('.feedback');
     if (existing) existing.remove();
 
-    const index = botIndexOf(target.row);
     const box = el('div', 'feedback');
     box.appendChild(el('span', 'feedback-label', '这条回答有帮助吗'));
 
@@ -956,11 +991,32 @@
       button.type = 'button';
       button.dataset.vote = vote;
       button.setAttribute('aria-pressed', 'false');
-      button.addEventListener('click', () => {
-        if (box.dataset.choice) return;   // 一次性：已锁就不再写
+      button.addEventListener('click', async () => {
+        if (box.dataset.choice || box.dataset.pending) return;   // 一次性：已锁/提交中不再写
+        const note = box.querySelector('.feedback-note');
+
+        if (vote === 'down') {
+          if (!target.messageId) {
+            // 没有消息 id 的历史行无法精确定位到「哪条回答」，别静默吞掉点击。
+            if (note) note.textContent = '这条历史回答缺少消息编号，暂时无法反馈';
+            return;
+          }
+          box.dataset.choice = vote;      // 立刻锁住，避免连点发两次
+          setFeedbackPending(box, true);
+          if (note) note.textContent = '提交中…';
+          try {
+            await sendDownFeedback(target.messageId);
+          } catch (err) {
+            delete box.dataset.choice;
+            setFeedbackPending(box, false);
+            if (note) note.textContent = `提交失败：${err.message || '请稍后重试'}`;
+            return;
+          }
+        }
+
         box.dataset.choice = vote;
         try {
-          localStorage.setItem(feedbackKey(index), vote);
+          localStorage.setItem(feedbackKey(target), vote);
         } catch { /* 隐私模式写不进去也别挡住聊天 */ }
         applyFeedbackLock(box, vote);
       });
@@ -971,7 +1027,7 @@
     target.wrap.appendChild(box);
 
     let saved = null;
-    try { saved = localStorage.getItem(feedbackKey(index)); } catch { saved = null; }
+    try { saved = localStorage.getItem(feedbackKey(target)); } catch { saved = null; }
     if (saved === 'up' || saved === 'down') applyFeedbackLock(box, saved);
   }
 
@@ -1278,6 +1334,7 @@
         setToolRecords(row, m.tools);
         // 引用与反馈同理：刷新后角标仍可点、已反馈仍是已反馈
         decorateCitations(row.body, m.citations);
+        row.messageId = m.id || null;
         attachFeedback(row);
         // ch05：建议动作也随历史还原；建单描述回退到上一条用户消息。
         attachActions(row, m.actions, { sourceText: lastUserText });
