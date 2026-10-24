@@ -46,6 +46,9 @@ def test_settings() -> Settings:
         # ch09：图单测不额外调一次自评模型（否则会吃掉 ScriptedChatModel 的脚本）；
         # 需要验自评的用例显式打开并注入假判官。
         knowledge_self_check=False,
+        # ch09：图/HTTP 单测默认不跑飞轮（否则假模型会被标准化/查重多调几次）；
+        # 飞轮自身由 test_ch09_flywheel.py 直接测服务。
+        flywheel_enabled=False,
     )
 
 
