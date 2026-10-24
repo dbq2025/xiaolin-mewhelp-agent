@@ -2342,6 +2342,20 @@ def create_app(
                 name="eval-trend",
             )
 
+        # 观测与成本：纯静态页，数据走 /api/intent-cost 与 /api/eval-runs。
+        observability_dir = web_dir / "observability"
+        if observability_dir.is_dir():
+
+            @app.get("/observability", include_in_schema=False)
+            async def observability_redirect() -> RedirectResponse:
+                return RedirectResponse(url="/observability/")
+
+            app.mount(
+                "/observability",
+                StaticFiles(directory=observability_dir, html=True),
+                name="observability",
+            )
+
         @app.get("/", include_in_schema=False)
         async def root_redirect() -> RedirectResponse:
             """根路径直接跳聊天页，省得记地址。"""

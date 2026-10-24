@@ -945,6 +945,7 @@ uv run uvicorn app.main:app --reload --port 8000
 # 聊天：      http://127.0.0.1:8000/chat/
 # 待审队列：  http://127.0.0.1:8000/review/
 # 评估趋势：  http://127.0.0.1:8000/eval-trend/
+# 观测与成本：http://127.0.0.1:8000/observability/
 # 检索评估：  http://127.0.0.1:8000/rag-eval/
 ```
 

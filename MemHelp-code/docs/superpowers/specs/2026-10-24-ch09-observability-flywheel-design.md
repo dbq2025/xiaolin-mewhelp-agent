@@ -109,6 +109,7 @@ app/config.py           # Langfuse / 飞轮 / 评估调度配置
 web/review.html|js      # 审核后台（Vibe Coding）
 web/app.js              # 👎 改为调后端
 web/eval-trend.html|js  # 评估趋势页（简单表格 + 环比箭头）
+web/observability/*     # 观测与成本页（讲义 /observability 验收地址）
 sql/ch09-ddl.sql        # 已有，直接执行
 scripts/calibrate_confidence.py   # 跑 ch04 评估集 → 模型 artifact + 报告
 scripts/intent_cost.py            # CLI 打印意图成本
@@ -390,6 +391,15 @@ async def run_evaluation(*, trigger: Literal["定时", "手动"], limit: int | N
 
 `/eval-trend`：表格每行一轮（时间、触发方式、条数、recall@5、mrr@10、faithfulness、refusal_accuracy）；最后一行显示相对上一轮的箭头（↑ 绿 / ↓ 红 / → 灰）。无构建工具，原生 JS + 内联样式。
 
+### 8.4 观测与成本页
+
+`/observability`（讲义第九节验收地址）：默认 7 天窗口，可切 14/30 天。
+
+- 四张 KPI：窗口 tokens、覆盖意图数、最烧钱意图、成本合计。
+- 按意图表：tokens / 占比条 / 成本 / 聚合行数；数据来自 `GET /api/intent-cost`，按 `intent:` tag 聚合。
+- 右侧：最新一轮评估指标卡（带环比箭头，读 `GET /api/eval-runs` 的 `trend`）与运行健康（`GET /healthz`）。
+- 三块数据各自独立降级：Langfuse 未配置/接口失败只影响成本区，并写明原因；不把「没接」显示成「0 成本」。
+
 ---
 
 ## 9. API 与前端
@@ -408,6 +418,7 @@ async def run_evaluation(*, trigger: Literal["定时", "手动"], limit: int | N
 | GET | `/api/intent-cost` | 按意图 token/cost |
 | GET | `/review` | 审核后台页 |
 | GET | `/eval-trend` | 趋势页 |
+| GET | `/observability` | 观测与成本页（讲义验收地址） |
 
 ### 9.2 审核页（Vibe Coding）
 
@@ -421,6 +432,12 @@ async def run_evaluation(*, trigger: Literal["定时", "手动"], limit: int | N
 
 - `web/app.js` 把 `localStorage` 记录改为 `POST /api/feedback`；成功后按钮锁定、note 显示「已反馈」；失败恢复可点并提示。
 - 其余前端反馈逻辑（👍）保持纯前端，不上后端。
+
+### 9.4 观测与成本页
+
+- 只读汇总，不在前端重算成本或指标：成本取 `/api/intent-cost` 的 `items`/`total_tokens`，指标取 `/api/eval-runs` 的 `trend`。
+- 空态区分三种：Langfuse 未接入、窗口内无 trace、请求失败；文案写清楚该补哪三项 env 或该聊几轮。
+- 顶栏五页互通（对话 / 评估看板 / 待审队列 / 趋势 / 观测），聊天页用 `<a class="btn-ghost">观测</a>` 入口。
 
 ---
 
@@ -437,6 +454,7 @@ async def run_evaluation(*, trigger: Literal["定时", "手动"], limit: int | N
 | 向量化失败 | 知识原文已写，状态 pending；接口返回可重试提示 |
 | 评估子进程失败 | 不写 `eval_runs`，接口/日志标失败 |
 | 👎 找不到当轮快照 | 照常入池，`retrieved_chunks=NULL`（闲聊/业务数据类属正常） |
+| Langfuse 未接入 / metrics 失败 | 观测页成本区显示原因（未配置 / HTTP 错误），指标与健康区照常；聊天下游不受影响 |
 
 ---
 
@@ -453,6 +471,7 @@ async def run_evaluation(*, trigger: Literal["定时", "手动"], limit: int | N
 - `tests/test_ch09_eval_runs.py`：报告 → metrics JSON；趋势方向；调度开关。
 - `tests/test_ch09_tracing.py`：关闭时 no-op；开启时 `build_agent_graph` 的 `callbacks` 存在（monkeypatch handler）；不使用真实网络。
 - 既有 `test_ch05_gate.py` / `test_ch05_graph.py` / `test_knowledge_pipeline.py` 随签名/行为同步更新，不删断言。
+- `tests/test_ch09_observability_page.py`：`/observability` 307 → `/observability/`、首页含「观测与成本」与「Langfuse」、JS/CSS 可达；四张既有页面都含 `href="/observability/"` 入口。
 
 ### 11.2 数据 / Prompt（替代 TDD 的验证）
 
@@ -476,6 +495,7 @@ async def run_evaluation(*, trigger: Literal["定时", "手动"], limit: int | N
 | 4 | 👎 落池 → 标准化查重 → 待审 | 聊天页点 👎 → `GET /api/review-queue` 出现 |
 | 5 | 按意图 token 花费 | `GET /api/intent-cost` / `scripts/intent_cost.py` 输出表格，最烧钱意图可见 |
 | 6 | 评估两轮 + 趋势 | `POST /api/eval-runs/run` ×2 → `/eval-trend` 两行 + 箭头 |
+| 7 | 讲义验收地址 `/observability` 可打开 | 浏览器打开显示按意图成本表 + 评估指标 + 健康，不再 404 |
 
 ---
 

@@ -200,6 +200,8 @@ body {
   transition: .15s;
 }
 .btn-ghost:hover { border-color: #d1d5db; color: var(--ink); }
+/* 顶栏「观测」入口是 <a> 挂的 .btn-ghost：按按钮样式收掉下划线与默认链接色。 */
+a.btn-ghost { display: inline-flex; align-items: center; text-decoration: none; }
 
 /* ---------- 消息区 ---------- */
 
