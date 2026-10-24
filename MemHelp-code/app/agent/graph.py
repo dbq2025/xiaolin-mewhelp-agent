@@ -73,6 +73,7 @@ from app.knowledge.citations import (
     evidence_from_payload,
     evidence_payload,
 )
+from app.observability import tracing
 from app.prompts import REFUSAL_TEXT
 from app.tools.audit import AuditEntry, write_audit
 from app.tools.executor import execute_tool, to_tool_message_content
@@ -376,7 +377,28 @@ async def _route_intent(state: AgentState, config: RunnableConfig) -> dict[str, 
 
 async def _knowledge_retrieve(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     retriever = _deps(config).retriever
-    outcome = await retriever.retrieve_only(state["resolved_message"])
+    query = state["resolved_message"]
+    with tracing.observation(
+        "knowledge_retrieve", as_type="retriever", input={"query": query}
+    ) as span:
+        outcome = await retriever.retrieve_only(query)
+        if span is not None:
+            span.update(
+                output={
+                    "chunks": [
+                        {
+                            "chunk_id": item.chunk_id,
+                            "section_path": item.section_path,
+                            "score": item.score,
+                            "quote": item.quote[:200],
+                        }
+                        for item in outcome.evidence
+                    ],
+                    "top_score": outcome.top_score,
+                    "degraded": outcome.rerank_degraded,
+                    "refused": outcome.refused,
+                }
+            )
     evidence = list(evidence_payload(outcome.evidence))
     top_score = float(outcome.top_score)
     if not top_score and outcome.evidence:
@@ -906,22 +928,25 @@ async def _run_agent_node(
             background="\n".join(summary_texts),
         )
 
-    outcome = await run_react_agent(
-        model=model,
-        messages=ctx.messages,
-        repositories=repositories,
-        retriever=retriever,
-        include_faq=(state.get("route") == "business"),
-        include_order=not refund_mode,
-        evidence=evidence,
-        max_steps=int(getattr(settings, "agent_max_steps", 6)),
-        token_budget=int(getattr(settings, "agent_token_budget", 6000)),
-        timeout=float(getattr(settings, "tool_timeout_seconds", 3.0)),
-        max_retries=int(getattr(settings, "tool_max_retries", 1)),
-        emit=lambda payload: _emit(_stream_writer(), payload),
-        registry=await _turn_registry(deps, repositories, retriever),
-        conversation_id=conversation_id,
-    )
+    with tracing.tag_intent(
+        str(state.get("intent") or ""), float(state.get("intent_confidence") or 0.0)
+    ):
+        outcome = await run_react_agent(
+            model=model,
+            messages=ctx.messages,
+            repositories=repositories,
+            retriever=retriever,
+            include_faq=(state.get("route") == "business"),
+            include_order=not refund_mode,
+            evidence=evidence,
+            max_steps=int(getattr(settings, "agent_max_steps", 6)),
+            token_budget=int(getattr(settings, "agent_token_budget", 6000)),
+            timeout=float(getattr(settings, "tool_timeout_seconds", 3.0)),
+            max_retries=int(getattr(settings, "tool_max_retries", 1)),
+            emit=lambda payload: _emit(_stream_writer(), payload),
+            registry=await _turn_registry(deps, repositories, retriever),
+            conversation_id=conversation_id,
+        )
 
     payload: dict[str, Any] = {
         "answer": outcome.answer,
@@ -1238,4 +1263,9 @@ def build_agent_graph(*, checkpointer: BaseCheckpointSaver | None = None):
     builder.add_edge("fallback", "log_turn")
     builder.add_edge("log_turn", END)
 
-    return builder.compile(checkpointer=checkpointer or memory_checkpointer())
+    compiled = builder.compile(checkpointer=checkpointer or memory_checkpointer())
+    # ch09：编译期挂一次 Langfuse 回调；节点内的模型调用由 LangGraph 传播。
+    handler = tracing.callback_handler()
+    if handler is not None:
+        compiled = compiled.with_config({"callbacks": [handler]})
+    return compiled

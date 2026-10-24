@@ -257,6 +257,22 @@ class Settings(BaseSettings):
         ),
     )
 
+    # -- ch09：Langfuse 观测 -------------------------------------------------
+    langfuse_enabled: bool = Field(
+        default=True,
+        description="总开关；false 或缺少任一连接项时，tracing 全降级为 no-op。",
+    )
+    langfuse_public_key: str = Field(default="", description="Langfuse 项目 public key。")
+    langfuse_secret_key: str = Field(default="", description="Langfuse 项目 secret key。")
+    langfuse_base_url: str = Field(
+        default="https://cloud.langfuse.com",
+        description="Langfuse 地址；自部署时换成自己的 URL。",
+    )
+    langfuse_environment: str = Field(
+        default="development",
+        description="trace 的环境标签（production / staging / development）。",
+    )
+
     # -- ch06：正式版分流器 -------------------------------------------------
     intent_model: str = Field(
         default="",
@@ -535,6 +551,9 @@ class Settings(BaseSettings):
         "mysql_user",
         "mysql_password",
         "mysql_database",
+        "langfuse_public_key",
+        "langfuse_secret_key",
+        "langfuse_base_url",
         mode="before",
     )
     @classmethod

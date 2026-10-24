@@ -47,6 +47,7 @@ from app.agent.tools import agent_tools
 from app.chat import _message_text
 from app.chat_tools import fallback_answer
 from app.knowledge.citations import Evidence
+from app.observability import tracing
 from app.tools.audit import AuditEntry, write_audit
 from app.tools.executor import ToolResult, execute_tool, to_tool_message_content
 from app.tools.registry import TOOL_LABELS, build_registry
@@ -377,7 +378,14 @@ async def run_react_agent(
                 call_kwargs["registry"] = registry
                 call_kwargs["tool_call_id"] = call_id
                 call_kwargs["conversation_id"] = conversation_id
-            result = await run_tool(name, args, **call_kwargs)  # type: ignore[arg-type]
+            with tracing.observation(
+                f"tool:{name}", as_type="tool", input=args
+            ) as span:
+                result = await run_tool(name, args, **call_kwargs)  # type: ignore[arg-type]
+                if span is not None:
+                    span.update(
+                        output=result.summary(), metadata={"ok": bool(result.ok)}
+                    )
             last_tool_result = result
             tool_traces.append(result.summary())
             content = to_tool_message_content(result)

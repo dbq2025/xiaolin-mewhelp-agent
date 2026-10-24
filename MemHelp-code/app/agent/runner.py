@@ -22,6 +22,8 @@ from typing import Any
 
 from langgraph.types import Command
 
+from app.observability import tracing
+
 __all__ = [
     "astream_resume",
     "astream_turn",
@@ -279,12 +281,17 @@ async def astream_turn(
         "user_message": message,
     }
 
-    async for event in _stream_events(graph, payload, config):
-        yield event
-
-    async for event in _finish_or_pause(graph, config, session_id=session_id):
-        yield event
-
+    done: dict[str, Any] | None = None
+    with tracing.turn_span(session_id, message) as span:
+        try:
+            async for event in _stream_events(graph, payload, config):
+                yield event
+            async for event in _finish_or_pause(graph, config, session_id=session_id):
+                if event.get("type") == "done":
+                    done = event.get("payload") or {}
+                yield event
+        finally:
+            span.finish(done or {})
 
 async def astream_resume(
     graph: Any,
@@ -320,10 +327,19 @@ async def astream_resume(
     resumed = Command(
         resume=resume_value if resume_value is not None else {"order_id": order_id}
     )
-    async for event in _stream_events(graph, resumed, config):
-        yield event
-    async for event in _finish_or_pause(graph, config, session_id=session_id):
-        yield event
+    snapshot = await graph.aget_state(config)
+    question = str((snapshot.values or {}).get("user_message") or "")
+    done: dict[str, Any] | None = None
+    with tracing.turn_span(session_id, question) as span:
+        try:
+            async for event in _stream_events(graph, resumed, config):
+                yield event
+            async for event in _finish_or_pause(graph, config, session_id=session_id):
+                if event.get("type") == "done":
+                    done = event.get("payload") or {}
+                yield event
+        finally:
+            span.finish(done or {})
 
 
 async def complete_turn(

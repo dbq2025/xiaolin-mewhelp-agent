@@ -66,6 +66,7 @@ from app.knowledge.rerank import get_reranker
 from app.knowledge.sufficiency import SufficiencyJudge
 from app.knowledge.retrieval import warmup as warmup_rag
 from app.knowledge.vector_store import MilvusVectorStore
+from app.observability import tracing
 from app.llm import get_chat_model
 from app.memory import InMemorySessionStore, get_session_store, new_session_id
 from app.rag_eval import (
@@ -1026,6 +1027,8 @@ async def _lifespan(app: FastAPI):
             _check_context_budget(current_settings)
             _attach_summarizer(app, current_settings)
             _attach_mcp_provider(app, current_settings)
+            # ch09：必须在编译图之前配置，build_agent_graph 才会把 callback 挂上。
+            tracing.configure(current_settings)
 
         # ch05：编译图。生产开 SQLite checkpointer；测试注入 InMemorySaver。
         if getattr(app.state, "agent_graph", None) is None:
@@ -1069,6 +1072,11 @@ async def _lifespan(app: FastAPI):
 
         yield
     finally:
+        # ch09：先把 trace 刷出去，再关摘要器/嵌入客户端（它们可能还在打点）。
+        try:
+            tracing.shutdown()
+        except Exception:  # noqa: BLE001 - 退出路径不该再抛
+            logger.debug("关闭 Langfuse tracing 失败（已忽略）", exc_info=True)
         # ch07：先等后台摘要任务收敛。放在最前面 —— 它们还要写库，
         # 而后面几步会关掉需要的东西（checkpointer、嵌入客户端）。
         try:
