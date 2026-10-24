@@ -29,6 +29,7 @@ dependencies = [
     "mcp>=1.24,<2.0",
     "langchain-mcp-adapters>=0.3.2,<0.4",
     "jsonschema>=4.21",
+    "langfuse>=5.0.4",
 ]
 
 [dependency-groups]
