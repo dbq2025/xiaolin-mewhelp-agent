@@ -300,6 +300,20 @@ class RefundSelectRequest(BaseModel):
     )
 
 
+class TicketConfirmRequest(BaseModel):
+    """工单预览卡片上的「确认提交 / 取消」。
+
+    只带会话与布尔值：工单内容一律以 checkpoint 里的预览为准，前端改不了。
+    """
+
+    session_id: str = Field(
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_-]+$",
+        description="会话 ID，与聊天接口同一个值。",
+    )
+    confirmed: bool = Field(description="True=确认提交；False=取消。")
+
+
 class CreateRefundRequest(BaseModel):
     """用户提交退款单。"""
 

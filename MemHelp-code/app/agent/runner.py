@@ -93,9 +93,18 @@ def _awaiting_payload(
         "orders": list(interrupt_value.get("orders") or []),
         "message": _AWAITING_TEXT,
     }
+    if payload["kind"] == "ticket_preview":
+        # 建单预览：前端渲染「确认提交 / 取消」，message 也换成对应提示。
+        payload["call_id"] = interrupt_value.get("call_id")
+        payload["preview"] = dict(interrupt_value.get("preview") or {})
+        payload["message"] = "请确认是否提交这张工单。"
     if discarded_message:
         payload["discarded_message"] = True
-        payload["message"] = "请先选择要办理的订单；刚才的消息没有被处理。"
+        payload["message"] = (
+            "请先确认或取消刚才的工单；刚才的消息没有被处理。"
+            if payload["kind"] == "ticket_preview"
+            else "请先选择要办理的订单；刚才的消息没有被处理。"
+        )
     if interrupt_value.get("error"):
         payload["error"] = interrupt_value["error"]
     return payload
@@ -267,7 +276,7 @@ async def astream_resume(
     graph: Any,
     *,
     session_id: str,
-    order_id: str,
+    order_id: str = "",
     model: Any,
     repositories: Any,
     retriever: Any,
@@ -276,8 +285,13 @@ async def astream_resume(
     intent_cheap_model: Any = None,
     summarizer: Any = None,
     mcp_provider: Any = None,
+    resume_value: Any = None,
 ) -> AsyncIterator[dict[str, Any]]:
-    """从退款子流程的中断点续跑；不重新跑 begin_turn。"""
+    """从中断点续跑；不重新跑 begin_turn。
+
+    ``resume_value`` 优先：建工单确认传 ``{"confirmed": bool}``；不传时按
+    ch06 的订单选择器约定传 ``{"order_id": order_id}``。
+    """
     config = _config(
         session_id=session_id,
         model=model,
@@ -288,7 +302,9 @@ async def astream_resume(
         settings=settings,
         summarizer=summarizer,
     )
-    resumed = Command(resume={"order_id": order_id})
+    resumed = Command(
+        resume=resume_value if resume_value is not None else {"order_id": order_id}
+    )
     async for event in _stream_events(graph, resumed, config):
         yield event
     async for event in _finish_or_pause(graph, config, session_id=session_id):

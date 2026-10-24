@@ -90,6 +90,7 @@ from app.schemas import (
     FaithCaseUpdateRequest,
     RefundSelectRequest,
     SessionMessagesResponse,
+    TicketConfirmRequest,
 )
 from app.sse import SSE_MEDIA_TYPE, sse_frame
 from app.tools.executor import execute_tool
@@ -840,6 +841,56 @@ async def _refund_resume_body(
 # ---------------------------------------------------------------------------
 
 
+async def _ticket_resume_body(
+    req: TicketConfirmRequest,
+    settings: Settings,
+    model: BaseChatModel,
+    intent_model: BaseChatModel | None,
+    intent_cheap_model: BaseChatModel | None,
+    repositories: Repositories,
+    graph: Any,
+    retriever: AnswerContextLike | None = None,
+    summarizer: Any = None,
+    mcp_provider: Any = None,
+    *,
+    release_session: str | None = None,
+) -> AsyncIterable[str]:
+    """工单预览的确认/取消续跑；不落用户轮，结果由图内节点写审计。"""
+    yield sse_frame("meta", {"session_id": req.session_id, "model": settings.openai_model})
+    try:
+        async for event in astream_resume(
+            graph,
+            session_id=req.session_id,
+            resume_value={"confirmed": bool(req.confirmed)},
+            model=model,
+            intent_model=intent_model,
+            intent_cheap_model=intent_cheap_model,
+            repositories=repositories,
+            retriever=retriever,
+            settings=settings,
+            summarizer=summarizer,
+            mcp_provider=mcp_provider,
+        ):
+            frame = _sse_event(event)
+            if frame is not None:
+                yield frame
+    except Exception as exc:  # noqa: BLE001 - 必须转成事件，不能让连接裸断
+        err = _as_upstream_error(exc)
+        await _delete_thread(graph, req.session_id)
+        yield sse_frame(
+            "error",
+            {
+                "type": err.type,
+                "message": redact(str(err)),
+                "session_id": req.session_id,
+                "recovered": True,
+            },
+        )
+    finally:
+        if release_session is not None:
+            _RESUME_INFLIGHT.discard(release_session)
+
+
 def _check_context_budget(settings: Settings) -> None:
     """启动自检：把倒推出来的预算打一行，装不下就打 ERROR（**不阻断**）。
 
@@ -1532,6 +1583,65 @@ def create_app(
                 release_session=req.session_id,
                 recover_message=str(values.get("user_message") or ""),
                 persist_on_error=persist_on_error,
+            ),
+            media_type=SSE_MEDIA_TYPE,
+        )
+
+    # -- ch08：工单预览卡片的确认 / 取消 -----------------------------------
+
+    @app.post("/api/chat/ticket/confirm")
+    async def ticket_confirm(
+        req: TicketConfirmRequest,
+        request: Request,
+        settings_: Settings = Depends(get_app_settings),
+        model_: BaseChatModel = Depends(get_model),
+        intent_model_: BaseChatModel = Depends(get_intent_model),
+        intent_cheap_model_: BaseChatModel | None = Depends(get_intent_cheap_model),
+        repositories_: Repositories = Depends(get_repositories),
+        retriever_: AnswerContextLike = Depends(get_retriever),
+        graph_: Any = Depends(get_agent_graph),
+    ):
+        """用户点「确认提交」/「取消」后，从工单预览的 checkpoint 续跑。"""
+        config = {"configurable": {"thread_id": req.session_id}}
+        try:
+            snapshot = await graph_.aget_state(config)
+        except Exception as exc:  # noqa: BLE001
+            err = _as_upstream_error(exc)
+            status = 503 if err.type == "database_error" else 502
+            return _error(status, err.type, redact(str(err)))
+
+        pending_nodes = tuple(getattr(snapshot, "next", ()) or ())
+        pending = pending_interrupt(snapshot)
+        if (
+            "ticket_await_confirm" not in pending_nodes
+            or not pending
+            or pending.get("kind") != "ticket_preview"
+        ):
+            return _error(
+                409,
+                "no_pending_ticket",
+                "没有待确认的工单：请先说明要建什么工单。",
+            )
+        if req.session_id in _RESUME_INFLIGHT:
+            return _error(
+                409,
+                "ticket_resume_in_progress",
+                "这张工单正在处理，请稍候。",
+            )
+        _RESUME_INFLIGHT.add(req.session_id)
+
+        return StreamingResponse(
+            _ticket_resume_body(
+                req,
+                settings_,
+                model_,
+                intent_model_,
+                intent_cheap_model_,
+                repositories_,
+                graph_,
+                retriever_,
+                mcp_provider=getattr(request.app.state, "mcp_provider", None),
+                release_session=req.session_id,
             ),
             media_type=SSE_MEDIA_TYPE,
         )

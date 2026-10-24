@@ -49,6 +49,7 @@ from app.chat_tools import fallback_answer
 from app.knowledge.citations import Evidence
 from app.tools.executor import ToolResult, execute_tool, to_tool_message_content
 from app.tools.registry import TOOL_LABELS, build_registry
+from app.tools.validation import validate_against_schema
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,12 @@ class AgentOutcome:
     llm_calls: int
     token_usage: dict[str, int]
     stop_reason: str
+    pending_ticket_call: dict[str, Any] | None = None
+    """待用户确认的建单调用：``{"args": {...}, "call_id": "..."}``。
+
+    非空表示模型发起了合法的 ``create_ticket``，但**还没有执行** —— 由图的
+    ``ticket_await_confirm`` 节点负责出示预览、等用户点确认。
+    """
 
 
 def _empty_usage() -> dict[str, int]:
@@ -188,6 +195,7 @@ async def run_react_agent(
     faq_evidence: tuple[Evidence, ...] = ()
     query_faq_used = False
     last_tool_result: ToolResult | None = None
+    pending_ticket_call: dict[str, Any] | None = None
 
     while True:
         if llm_calls >= max_steps + 1:
@@ -244,7 +252,46 @@ async def run_react_agent(
         call_id = str(chosen.get("id", ""))
         _emit(emit, _status_payload(name, args, call_id))
 
-        if name == "suggest_actions":
+        if name == "create_ticket":
+            # 写操作不在 ReAct 里执行：interrupt 需要图上下文，执行引擎在这里
+            # 拿不到「用户是否确认」。先校验参数，把错误回灌让模型追问；参数
+            # 齐全就停在这里，交给 ticket_await_confirm 节点出示预览。
+            spec = registry.get("create_ticket")
+            schema = spec.args_schema if spec is not None else None
+            error = (
+                validate_against_schema(schema, args)
+                if schema is not None
+                else "工具 create_ticket 未注册"
+            )
+            if error:
+                result = ToolResult(
+                    tool=name,
+                    args=args,
+                    ok=False,
+                    data=None,
+                    error=f"参数不合法 —— {error}",
+                    attempts=0,
+                    duration_ms=0,
+                    started_at=datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                    status="校验拦下",
+                )
+                last_tool_result = result
+                tool_traces.append(result.summary())
+                content = to_tool_message_content(result)
+                tool_records.append(
+                    {
+                        "name": name,
+                        "args": args,
+                        "tool_call_id": call_id,
+                        "content": content,
+                        "traces": [result.summary()],
+                    }
+                )
+            else:
+                pending_ticket_call = {"args": args, "call_id": call_id}
+                stop_reason = "ticket_pending"
+                break
+        elif name == "suggest_actions":
             content, record = await _run_suggest_actions(tools_by_name, args, call_id)
             tool_records.append(record)
         elif name not in tools_by_name:
@@ -342,7 +389,7 @@ async def run_react_agent(
         for action in ("transfer_human", "create_ticket"):
             if action not in suggested_actions:
                 suggested_actions.append(action)
-    elif stop_reason == "empty_response" or not answer:
+    elif stop_reason != "ticket_pending" and (stop_reason == "empty_response" or not answer):
         # 最后一步空回复时，优先用最后一条工具结果拼一句人话；
         # 没有工具结果才用固定兜底。不要把「我查一下」当前言留在答案里。
         fallback = fallback_answer(last_tool_result) if last_tool_result else AGENT_EMPTY_TEXT
@@ -367,6 +414,7 @@ async def run_react_agent(
         llm_calls=llm_calls,
         token_usage=usage,
         stop_reason=stop_reason,
+        pending_ticket_call=pending_ticket_call,
     )
 
 

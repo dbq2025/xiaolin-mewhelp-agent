@@ -34,7 +34,7 @@ import time
 from dataclasses import dataclass, replace
 from typing import Any, Mapping, Sequence
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.config import get_stream_writer
@@ -74,6 +74,8 @@ from app.knowledge.citations import (
     evidence_payload,
 )
 from app.prompts import REFUSAL_TEXT
+from app.tools.audit import AuditEntry, write_audit
+from app.tools.executor import execute_tool, to_tool_message_content
 from app.tools.registry import build_registry
 from app.tools.business import query_order, query_product
 
@@ -931,6 +933,7 @@ async def _run_agent_node(
         "llm_calls": outcome.llm_calls + int(state.get("llm_calls") or 0),
         "token_usage": outcome.token_usage,
         "stop_reason": outcome.stop_reason,
+        "pending_ticket_call": outcome.pending_ticket_call,
         "context": {
             "kept_messages": ctx.kept_messages,
             "trimmed_messages": ctx.trimmed_messages,
@@ -966,6 +969,110 @@ async def _agent(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
 
 async def _refund_agent(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     return await _run_agent_node(state, config, refund_mode=True)
+
+
+async def _ticket_await_confirm(
+    state: AgentState, config: RunnableConfig
+) -> dict[str, Any]:
+    """出示工单预览，等用户点「确认提交」/「取消」。
+
+    ``interrupt()`` 会让本节点在恢复时**从头重跑**，所以 ``interrupt`` 之前的
+    代码不能有副作用：这里只读 state、拼预览。真正的写库在拿到确认值之后，
+    且通过执行引擎（``confirmed=True``）走同一套校验与审计。
+    """
+    deps = _deps(config)
+    repositories = deps.repositories
+    settings = deps.settings
+    pending = state.get("pending_ticket_call") or {}
+    args = dict(pending.get("args") or {})
+    call_id = str(pending.get("call_id") or "")
+    preview = {
+        "ticket_type": str(args.get("ticket_type") or state.get("ticket_type") or "售后"),
+        "description": str(args.get("description") or ""),
+    }
+
+    decision = interrupt(
+        {
+            "kind": "ticket_preview",
+            "turn_id": state.get("turn_id"),
+            "call_id": call_id,
+            "preview": preview,
+        }
+    )
+    confirmed = bool(decision.get("confirmed")) if isinstance(decision, dict) else False
+    trace = _trace(state, "ticket_await_confirm")
+    pending_messages = list(state.get("pending_messages") or [])
+
+    conversation_id: int | None = None
+    try:
+        conversation_id = await repositories.conversations.find_id(
+            str(state.get("session_id") or "")
+        )
+    except Exception:  # noqa: BLE001 - 审计拿不到会话 id 也要能记
+        conversation_id = None
+
+    if not confirmed:
+        await write_audit(
+            repositories,
+            AuditEntry(
+                tool_name="create_ticket",
+                tool_source="builtin",
+                status="权限拒绝",
+                tool_call_id=call_id or None,
+                conversation_id=conversation_id,
+                args=args,
+                error="用户取消建单，未执行",
+            ),
+        )
+        answer = "已取消建单，没有创建工单。"
+        pending_messages.append(
+            ToolMessage(content="用户取消建单，未执行。", tool_call_id=call_id)
+        )
+        pending_messages.append(AIMessage(content=answer))
+        _emit(_stream_writer(), {"type": "token", "delta": answer})
+        return {
+            "answer": answer,
+            "pending_messages": pending_messages,
+            "pending_ticket_call": None,
+            "ticket_preview": preview,
+            "stop_reason": "ticket_cancelled",
+            "trace": trace,
+        }
+
+    result = await execute_tool(
+        "create_ticket",
+        args,
+        registry=build_registry(repositories, deps.retriever),
+        repositories=repositories,
+        retriever=deps.retriever,
+        session_id=str(state.get("session_id") or "") or None,
+        conversation_id=conversation_id,
+        tool_call_id=call_id or None,
+        timeout=float(getattr(settings, "tool_timeout_seconds", 3.0)),
+        max_retries=int(getattr(settings, "tool_max_retries", 1)),
+        confirmed=True,
+    )
+
+    answer = "建工单没有成功，请稍后再试或转人工。"
+    if result.ok and result.data:
+        try:
+            answer = str(json.loads(result.data).get("message") or answer)
+        except (ValueError, TypeError, AttributeError):
+            answer = answer
+    pending_messages.append(
+        ToolMessage(content=to_tool_message_content(result), tool_call_id=call_id)
+    )
+    pending_messages.append(AIMessage(content=answer))
+    _emit(_stream_writer(), {"type": "token", "delta": answer})
+    return {
+        "answer": answer,
+        "pending_messages": pending_messages,
+        "pending_ticket_call": None,
+        "ticket_preview": preview,
+        "stop_reason": "ticket_created" if result.ok else "ticket_failed",
+        "tool_traces": [*list(state.get("tool_traces") or []), result.summary()],
+        "trace": trace,
+    }
 
 
 def _fixed_node(
@@ -1047,6 +1154,7 @@ def build_agent_graph(*, checkpointer: BaseCheckpointSaver | None = None):
     builder.add_node("refund_retrieve_policies", _refund_retrieve_policies)
     builder.add_node("refund_agent", _refund_agent)
     builder.add_node("agent", _agent)
+    builder.add_node("ticket_await_confirm", _ticket_await_confirm)
     builder.add_node(
         "complaint",
         _fixed_node(
@@ -1101,7 +1209,16 @@ def build_agent_graph(*, checkpointer: BaseCheckpointSaver | None = None):
     builder.add_edge("refund_expand_queries", "refund_retrieve_policies")
     builder.add_edge("refund_retrieve_policies", "refund_agent")
     builder.add_edge("refund_agent", "log_turn")
-    builder.add_edge("agent", "log_turn")
+    builder.add_conditional_edges(
+        "agent",
+        lambda state: (
+            "ticket_await_confirm"
+            if state.get("pending_ticket_call")
+            else "log_turn"
+        ),
+        {"ticket_await_confirm": "ticket_await_confirm", "log_turn": "log_turn"},
+    )
+    builder.add_edge("ticket_await_confirm", "log_turn")
     builder.add_edge("complaint", "log_turn")
     builder.add_edge("chitchat", "log_turn")
     builder.add_edge("fallback", "log_turn")
