@@ -2176,6 +2176,21 @@ def create_app(
                 name="rag-eval",
             )
 
+        # 待审队列后台：同样是纯静态页，数据走 /api/review-queue。
+        review_dir = web_dir / "review"
+        if review_dir.is_dir():
+
+            @app.get("/review", include_in_schema=False)
+            async def review_redirect() -> RedirectResponse:
+                """不带斜杠也能进；审核人一般记 /review。"""
+                return RedirectResponse(url="/review/")
+
+            app.mount(
+                "/review",
+                StaticFiles(directory=review_dir, html=True),
+                name="review",
+            )
+
         @app.get("/", include_in_schema=False)
         async def root_redirect() -> RedirectResponse:
             """根路径直接跳聊天页，省得记地址。"""
