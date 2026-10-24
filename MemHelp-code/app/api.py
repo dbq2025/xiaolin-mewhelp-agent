@@ -44,6 +44,7 @@ from app.agent.runner import (
     astream_turn,
     complete_turn,
     pending_interrupt,
+    pending_payload,
 )
 from app.agent.summarizer import ContextSummarizer
 from app.config import PROJECT_ROOT, Settings, get_settings
@@ -90,10 +91,12 @@ from app.schemas import (
     FaithCaseUpdateRequest,
     RefundSelectRequest,
     SessionMessagesResponse,
+    TicketConfirmRequest,
 )
 from app.sse import SSE_MEDIA_TYPE, sse_frame
 from app.tools.executor import execute_tool
 from app.tools.knowledge import AnswerContextLike
+from app.tools.registry import build_registry
 
 logger = logging.getLogger(__name__)
 
@@ -723,6 +726,7 @@ async def _chat_stream_body(
     intent_model: BaseChatModel | None = None,
     intent_cheap_model: BaseChatModel | None = None,
     summarizer: Any = None,
+    mcp_provider: Any = None,
 ) -> AsyncIterable[str]:
     """SSE 响应体：``meta`` → ``status``? → ``token``* → ``tools``? →
     ``citations``? → ``done``。
@@ -744,6 +748,7 @@ async def _chat_stream_body(
             retriever=retriever,
             settings=settings,
             summarizer=summarizer,
+            mcp_provider=mcp_provider,
         ):
             frame = _sse_event(event)
             if frame is not None:
@@ -783,6 +788,7 @@ async def _refund_resume_body(
     graph: Any,
     retriever: AnswerContextLike | None = None,
     summarizer: Any = None,
+    mcp_provider: Any = None,
     *,
     release_session: str | None = None,
     recover_message: str = "",
@@ -802,6 +808,7 @@ async def _refund_resume_body(
             retriever=retriever,
             settings=settings,
             summarizer=summarizer,
+            mcp_provider=mcp_provider,
         ):
             frame = _sse_event(event)
             if frame is not None:
@@ -833,6 +840,56 @@ async def _refund_resume_body(
 # ---------------------------------------------------------------------------
 # 应用
 # ---------------------------------------------------------------------------
+
+
+async def _ticket_resume_body(
+    req: TicketConfirmRequest,
+    settings: Settings,
+    model: BaseChatModel,
+    intent_model: BaseChatModel | None,
+    intent_cheap_model: BaseChatModel | None,
+    repositories: Repositories,
+    graph: Any,
+    retriever: AnswerContextLike | None = None,
+    summarizer: Any = None,
+    mcp_provider: Any = None,
+    *,
+    release_session: str | None = None,
+) -> AsyncIterable[str]:
+    """工单预览的确认/取消续跑；不落用户轮，结果由图内节点写审计。"""
+    yield sse_frame("meta", {"session_id": req.session_id, "model": settings.openai_model})
+    try:
+        async for event in astream_resume(
+            graph,
+            session_id=req.session_id,
+            resume_value={"confirmed": bool(req.confirmed)},
+            model=model,
+            intent_model=intent_model,
+            intent_cheap_model=intent_cheap_model,
+            repositories=repositories,
+            retriever=retriever,
+            settings=settings,
+            summarizer=summarizer,
+            mcp_provider=mcp_provider,
+        ):
+            frame = _sse_event(event)
+            if frame is not None:
+                yield frame
+    except Exception as exc:  # noqa: BLE001 - 必须转成事件，不能让连接裸断
+        err = _as_upstream_error(exc)
+        await _delete_thread(graph, req.session_id)
+        yield sse_frame(
+            "error",
+            {
+                "type": err.type,
+                "message": redact(str(err)),
+                "session_id": req.session_id,
+                "recovered": True,
+            },
+        )
+    finally:
+        if release_session is not None:
+            _RESUME_INFLIGHT.discard(release_session)
 
 
 def _check_context_budget(settings: Settings) -> None:
@@ -907,6 +964,38 @@ def _attach_summarizer(app: FastAPI, settings: Settings) -> None:
         logger.warning("ch07 后台摘要器初始化失败（层 2 将只记账不压缩）", exc_info=True)
 
 
+def _attach_mcp_provider(app: FastAPI, settings: Settings) -> None:
+    """按配置建 MCP 工具发现器，挂到 ``app.state.mcp_provider``。
+
+    **建了不连**：构造只解析配置，真正的发现发生在每轮对话前的
+    ``ToolRegistry.refresh_mcp()``。MCP Server 没起时启动不受影响，聊天退回
+    只用内置工具 —— 外部系统可用性不该决定客服系统能不能启动。
+    """
+    if getattr(app.state, "mcp_provider", None) is not None:
+        return
+    if not getattr(settings, "mcp_enabled", True):
+        logger.info("ch08 MCP 接入已关闭（MCP_ENABLED=false）")
+        return
+    try:
+        from app.tools.mcp_client import (
+            McpToolProvider,
+            connections_from_settings,
+            readonly_servers_from_settings,
+        )
+
+        connections = connections_from_settings(settings)
+        if not connections:
+            return
+        app.state.mcp_provider = McpToolProvider(
+            connections,
+            read_only_servers=readonly_servers_from_settings(settings),
+            timeout=float(getattr(settings, "mcp_timeout_seconds", 3.0)),
+        )
+        logger.info("ch08 MCP 工具发现器已就绪（servers=%s）", ",".join(sorted(connections)))
+    except Exception:  # noqa: BLE001 - 接不上 MCP 不影响内置工具与聊天
+        logger.warning("ch08 MCP 工具发现器初始化失败（仅使用内置工具）", exc_info=True)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     """启动预热（ch03）：发一次真实嵌入请求 + 确保 Milvus 集合存在。
@@ -936,6 +1025,7 @@ async def _lifespan(app: FastAPI):
         if current_settings is not None:
             _check_context_budget(current_settings)
             _attach_summarizer(app, current_settings)
+            _attach_mcp_provider(app, current_settings)
 
         # ch05：编译图。生产开 SQLite checkpointer；测试注入 InMemorySaver。
         if getattr(app.state, "agent_graph", None) is None:
@@ -1065,6 +1155,8 @@ def create_app(
     # ch07：后台摘要器由 lifespan 建（测试可注入）。显式置 None 而不是不赋值，
     # 是为了让 `getattr(state, "summarizer", None)` 与「属性根本不存在」可区分。
     app.state.summarizer = None
+    # ch08：MCP 工具发现器。lifespan 按配置建；测试可用 ``None`` 表示不接 MCP。
+    app.state.mcp_provider = None
     # 注入 checkpointer 时**立即编译**：TestClient 不进入 context manager 也不会跑
     # lifespan，而测试仍然要能聊天。生产路径（checkpointer=None）仍由 lifespan 管
     # AsyncSqliteSaver 的开关。
@@ -1190,6 +1282,7 @@ def create_app(
                     intent_model_,
                     intent_cheap_model_,
                     getattr(request.app.state, "summarizer", None),
+                    getattr(request.app.state, "mcp_provider", None),
                 ),
                 media_type=SSE_MEDIA_TYPE,
             )
@@ -1206,6 +1299,7 @@ def create_app(
                 retriever=retriever_,
                 settings=settings_,
                 summarizer=getattr(request.app.state, "summarizer", None),
+                mcp_provider=getattr(request.app.state, "mcp_provider", None),
             )
         except Exception as exc:  # noqa: BLE001
             try:
@@ -1273,6 +1367,21 @@ def create_app(
         而且重启服务后历史不会凭空消失。
         """
         return await _db_session_messages_payload(session_id, repositories_)
+
+    @app.get("/api/chat/sessions/{session_id}/pending")
+    async def session_pending(
+        session_id: str,
+        graph_: Any = Depends(get_agent_graph),
+    ) -> dict[str, Any]:
+        """刷新页面后恢复「等待选择/等待确认」的卡片。
+
+        SSE 流断开后前端拿不到那次 ``awaiting_input`` 帧，只能主动问图停在哪；
+        没有暂停时返回 ``{"pending": null}``。
+        """
+        snapshot = await graph_.aget_state(
+            {"configurable": {"thread_id": session_id}}
+        )
+        return {"pending": pending_payload(snapshot)}
 
     # -- ch07：会话侧栏（两个只读接口）------------------------------------
 
@@ -1382,10 +1491,13 @@ def create_app(
                 "idempotency_key": req.idempotency_key,
             },
             repositories=repositories_,
+            registry=build_registry(repositories_, None),
             # 建单不需要检索器；传 None 避免为了一个 tickets 写入去构造 Milvus 客户端。
             retriever=None,
             timeout=settings_.tool_timeout_seconds,
             max_retries=settings_.tool_max_retries,
+            # ch05 这条路是「用户点按钮」本身即确认，保持不动；ch08 只补 confirmed。
+            confirmed=True,
         )
         if not result.ok:
             if result.fault == "database":
@@ -1428,6 +1540,7 @@ def create_app(
     )
     async def refund_select(
         req: RefundSelectRequest,
+        request: Request,
         settings_: Settings = Depends(get_app_settings),
         model_: BaseChatModel = Depends(get_model),
         intent_model_: BaseChatModel = Depends(get_intent_model),
@@ -1482,9 +1595,69 @@ def create_app(
                 repositories_,
                 graph_,
                 retriever_,
+                mcp_provider=getattr(request.app.state, "mcp_provider", None),
                 release_session=req.session_id,
                 recover_message=str(values.get("user_message") or ""),
                 persist_on_error=persist_on_error,
+            ),
+            media_type=SSE_MEDIA_TYPE,
+        )
+
+    # -- ch08：工单预览卡片的确认 / 取消 -----------------------------------
+
+    @app.post("/api/chat/ticket/confirm")
+    async def ticket_confirm(
+        req: TicketConfirmRequest,
+        request: Request,
+        settings_: Settings = Depends(get_app_settings),
+        model_: BaseChatModel = Depends(get_model),
+        intent_model_: BaseChatModel = Depends(get_intent_model),
+        intent_cheap_model_: BaseChatModel | None = Depends(get_intent_cheap_model),
+        repositories_: Repositories = Depends(get_repositories),
+        retriever_: AnswerContextLike = Depends(get_retriever),
+        graph_: Any = Depends(get_agent_graph),
+    ):
+        """用户点「确认提交」/「取消」后，从工单预览的 checkpoint 续跑。"""
+        config = {"configurable": {"thread_id": req.session_id}}
+        try:
+            snapshot = await graph_.aget_state(config)
+        except Exception as exc:  # noqa: BLE001
+            err = _as_upstream_error(exc)
+            status = 503 if err.type == "database_error" else 502
+            return _error(status, err.type, redact(str(err)))
+
+        pending_nodes = tuple(getattr(snapshot, "next", ()) or ())
+        pending = pending_interrupt(snapshot)
+        if (
+            "ticket_await_confirm" not in pending_nodes
+            or not pending
+            or pending.get("kind") != "ticket_preview"
+        ):
+            return _error(
+                409,
+                "no_pending_ticket",
+                "没有待确认的工单：请先说明要建什么工单。",
+            )
+        if req.session_id in _RESUME_INFLIGHT:
+            return _error(
+                409,
+                "ticket_resume_in_progress",
+                "这张工单正在处理，请稍候。",
+            )
+        _RESUME_INFLIGHT.add(req.session_id)
+
+        return StreamingResponse(
+            _ticket_resume_body(
+                req,
+                settings_,
+                model_,
+                intent_model_,
+                intent_cheap_model_,
+                repositories_,
+                graph_,
+                retriever_,
+                mcp_provider=getattr(request.app.state, "mcp_provider", None),
+                release_session=req.session_id,
             ),
             media_type=SSE_MEDIA_TYPE,
         )
@@ -1574,9 +1747,11 @@ def create_app(
                 "idempotency_key": idempotency_key,
             },
             repositories=repositories_,
+            registry=build_registry(repositories_, None),
             retriever=None,
             timeout=settings_.tool_timeout_seconds,
             max_retries=settings_.tool_max_retries,
+            confirmed=True,
         )
         if not result.ok:
             if result.fault == "database":

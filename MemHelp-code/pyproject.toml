@@ -26,6 +26,9 @@ dependencies = [
     # ch05：LangGraph 官方 SQLite checkpointer（图状态持久化）。
     # 它是独立官方包，不在 langgraph 主包里；测试注入 InMemorySaver，不落盘。
     "langgraph-checkpoint-sqlite>=3.1.2",
+    "mcp>=1.24,<2.0",
+    "langchain-mcp-adapters>=0.3.2,<0.4",
+    "jsonschema>=4.21",
 ]
 
 [dependency-groups]

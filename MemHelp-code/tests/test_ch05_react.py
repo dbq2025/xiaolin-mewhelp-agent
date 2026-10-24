@@ -61,7 +61,7 @@ async def _run(model, *, include_faq=False, max_steps=6, token_budget=6000, exec
 async def test_one_tool_call_then_final():
     model = ScriptedChatModel(
         script=[
-            tool_turn("query_logistics", {"order_id": "1001"}),
+            tool_turn("query_order", {"order_id": "1001"}),
             text_turn("已发货，正在派送。"),
         ]
     )
@@ -72,9 +72,9 @@ async def test_one_tool_call_then_final():
     assert outcome.stop_reason == "final"
     assert outcome.answer == "已发货，正在派送。"
     assert [m.type for m in outcome.pending_messages] == ["ai", "tool", "ai"]
-    assert outcome.pending_messages[0].tool_calls[0]["name"] == "query_logistics"
+    assert outcome.pending_messages[0].tool_calls[0]["name"] == "query_order"
     assert isinstance(outcome.pending_messages[1], ToolMessage)
-    assert outcome.tool_traces[0]["name"] == "query_logistics"
+    assert outcome.tool_traces[0]["name"] == "query_order"
     assert outcome.tool_records[0]["tool_call_id"] == "call_1"
 
     # 工具执行完就推一条结果帧，界面才能在最终回答生成期间把「执行中」改成
@@ -84,7 +84,7 @@ async def test_one_tool_call_then_final():
     assert status_index < result_index
     result_event = events[result_index]
     assert result_event["call_id"] == "call_1"
-    assert result_event["tool"]["name"] == "query_logistics"
+    assert result_event["tool"]["name"] == "query_order"
     assert result_event["tool"]["ok"] is True
     assert "started_at" in result_event["tool"]
 
@@ -93,7 +93,7 @@ async def test_complex_question_takes_two_tool_steps():
     model = ScriptedChatModel(
         script=[
             tool_turn("query_order", {"order_id": "1001"}, call_id="call_1"),
-            tool_turn("query_logistics", {"order_id": "1001"}, call_id="call_2"),
+            tool_turn("query_order", {"order_id": "1001"}, call_id="call_2"),
             text_turn("订单已付款，物流运输中。"),
         ]
     )
@@ -102,7 +102,7 @@ async def test_complex_question_takes_two_tool_steps():
     assert outcome.agent_steps == 2
     assert [record["name"] for record in outcome.tool_records] == [
         "query_order",
-        "query_logistics",
+        "query_order",
     ]
     assert [m.type for m in outcome.pending_messages] == ["ai", "tool", "ai", "tool", "ai"]
 
@@ -113,7 +113,7 @@ async def test_multiple_calls_in_one_step_only_first_runs():
             multi_tool_turn(
                 [
                     ("query_order", {"order_id": "1001"}, "call_1"),
-                    ("query_logistics", {"order_id": "1001"}, "call_2"),
+                    ("query_order", {"order_id": "1001"}, "call_2"),
                 ]
             ),
             text_turn("好了。"),
@@ -132,7 +132,7 @@ async def test_max_steps_returns_handoff_and_does_not_call_again():
     model = ScriptedChatModel(
         script=[
             tool_turn("query_order", {"order_id": "1001"}),
-            tool_turn("query_logistics", {"order_id": "1001"}),
+            tool_turn("query_order", {"order_id": "1001"}),
         ]
     )
     outcome, _ = await _run(model, max_steps=1)
@@ -285,7 +285,11 @@ async def test_status_is_emitted_before_the_tool_runs():
 async def test_unknown_tool_is_rejected_and_never_executed(
     fake_repositories, empty_retriever, sqlite_session
 ):
-    """模型编出 create_ticket 时，绝不能被 executor 按全局注册表执行。"""
+    """模型编出本轮工具集里没有的名字时，绝不能被 executor 按全局注册表执行。
+
+    ch08 起 create_ticket 本身就在工具集里（由 ReAct 拦截、转前端确认），
+    针对它的放行/拒绝规则由 ch08 的工单确认流测试覆盖；这里只钉未知名字。
+    """
     called: list[str] = []
 
     async def executor(name, args, **kwargs):
@@ -297,8 +301,7 @@ async def test_unknown_tool_is_rejected_and_never_executed(
 
     model = ScriptedChatModel(
         script=[
-            tool_turn("create_ticket", {"description": "偷偷建单", "ticket_type": "投诉",
-                                        "conversation_id": "s-evil"}, call_id="call_evil"),
+            tool_turn("issue_refund", {"order_id": "1001"}, call_id="call_evil"),
             text_turn("没有执行任何写操作。"),
         ]
     )

@@ -269,9 +269,9 @@ async def test_tools_are_bound_to_the_model_before_asking(repos):
     await _collect(**_common(repos, model, executor))
 
     bound = model.bind_tools_calls.messages
-    assert len(bound) == 5, f"应绑上全部五个工具，实际 {len(bound)}"
+    assert len(bound) == 4, f"应绑上全部四个内置工具，实际 {len(bound)}"
     assert {t.name for t in bound} == {
-        "query_order", "query_product", "query_logistics", "query_faq", "create_ticket",
+        "query_order", "query_product", "query_faq", "create_ticket",
     }
 
 
@@ -648,7 +648,7 @@ async def test_tools_stay_available_on_the_second_call(repos):
 
     await _collect(**_common(repos, model, executor))
 
-    assert len(model.bind_tools_calls.messages) == 10, "两次调用各绑五个"
+    assert len(model.bind_tools_calls.messages) == 8, "两次调用各绑四个"
 
 
 async def test_reasoning_content_from_the_first_call_is_carried_into_the_second(repos):

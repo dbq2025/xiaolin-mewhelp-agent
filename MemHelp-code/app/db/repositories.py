@@ -54,6 +54,7 @@ from app.db.models import (
     Message,
     QaStaging,
     Ticket,
+    ToolAuditLog,
 )
 
 T = TypeVar("T")
@@ -1658,6 +1659,100 @@ def _to_faith_case_row(row: FaithCase) -> FaithCaseRow:
 
 
 # ---------------------------------------------------------------------------
+# 工具审计（ch08）
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AuditRow:
+    """``tool_audit_logs`` 的只读投影（不把 ORM 对象漏出仓库层）。"""
+
+    id: int
+    conversation_id: int | None
+    tool_call_id: str | None
+    tool_name: str
+    tool_source: str
+    mcp_server: str | None
+    arguments: dict[str, object] | None
+    result_summary: str | None
+    status: str
+    error_message: str | None
+    retry_count: int
+    duration_ms: int | None
+    created_at: datetime
+
+
+class ToolAuditRepository:
+    """``tool_audit_logs`` 的写入与最近记录查询。"""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def _create(
+        self,
+        *,
+        tool_name: str,
+        tool_source: str,
+        status: str,
+        mcp_server: str | None = None,
+        tool_call_id: str | None = None,
+        conversation_id: int | None = None,
+        arguments: dict[str, object] | None = None,
+        result_summary: str | None = None,
+        error_message: str | None = None,
+        retry_count: int = 0,
+        duration_ms: int | None = None,
+    ) -> None:
+        self._session.add(
+            ToolAuditLog(
+                conversation_id=conversation_id,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                tool_source=tool_source,
+                mcp_server=mcp_server,
+                arguments=arguments,
+                result_summary=result_summary,
+                status=status,
+                error_message=error_message,
+                retry_count=retry_count,
+                duration_ms=duration_ms,
+            )
+        )
+        self._session.commit()
+
+    async def create(self, **values: object) -> None:
+        """落一条审计。参数名与 ``tool_audit_logs`` 的列语义一一对应。"""
+        await anyio.to_thread.run_sync(partial(self._create, **values))
+
+    def _list_recent(self, limit: int) -> list[AuditRow]:
+        rows = self._session.scalars(
+            select(ToolAuditLog).order_by(ToolAuditLog.id.desc()).limit(limit)
+        ).all()
+        return [
+            AuditRow(
+                id=int(row.id),
+                conversation_id=row.conversation_id,
+                tool_call_id=row.tool_call_id,
+                tool_name=row.tool_name,
+                tool_source=row.tool_source,
+                mcp_server=row.mcp_server,
+                arguments=row.arguments,
+                result_summary=row.result_summary,
+                status=row.status,
+                error_message=row.error_message,
+                retry_count=int(row.retry_count),
+                duration_ms=row.duration_ms,
+                created_at=row.created_at,
+            )
+            for row in rows
+        ]
+
+    async def list_recent(self, limit: int = 20) -> list[AuditRow]:
+        """最近的若干条（新的在前）。"""
+        return await _run(self._list_recent, limit)
+
+
+# ---------------------------------------------------------------------------
 # 容器
 # ---------------------------------------------------------------------------
 
@@ -1684,6 +1779,8 @@ class Repositories:
     faith_cases: FaithCaseRepository
     #: ch07：会话梗概（只追加）
     summaries: ConversationSummaryRepository
+    #: ch08：工具调用审计（只追加，不挂外键）
+    audit: ToolAuditRepository
 
     @classmethod
     def from_session(cls, session: Session) -> "Repositories":
@@ -1702,4 +1799,5 @@ class Repositories:
             low_confidence=LowConfidenceQuestionRepository(session),
             faith_cases=FaithCaseRepository(session),
             summaries=ConversationSummaryRepository(session),
+            audit=ToolAuditRepository(session),
         )

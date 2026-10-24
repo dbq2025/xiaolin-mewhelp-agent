@@ -43,6 +43,7 @@ def _config(
     intent_model: Any = None,
     intent_cheap_model: Any = None,
     summarizer: Any = None,
+    mcp_provider: Any = None,
 ) -> dict[str, Any]:
     return {
         "configurable": {
@@ -55,6 +56,8 @@ def _config(
             "settings": settings,
             # ch07：后台摘要器。不传就是 None，图里层 2 只记账不压缩。
             "summarizer": summarizer,
+            # ch08：MCP 工具发现器。None 表示本实例不接 MCP。
+            "mcp_provider": mcp_provider,
         }
     }
 
@@ -90,12 +93,34 @@ def _awaiting_payload(
         "orders": list(interrupt_value.get("orders") or []),
         "message": _AWAITING_TEXT,
     }
+    if payload["kind"] == "ticket_preview":
+        # 建单预览：前端渲染「确认提交 / 取消」，message 也换成对应提示。
+        payload["call_id"] = interrupt_value.get("call_id")
+        payload["preview"] = dict(interrupt_value.get("preview") or {})
+        payload["message"] = "请确认是否提交这张工单。"
     if discarded_message:
         payload["discarded_message"] = True
-        payload["message"] = "请先选择要办理的订单；刚才的消息没有被处理。"
+        payload["message"] = (
+            "请先确认或取消刚才的工单；刚才的消息没有被处理。"
+            if payload["kind"] == "ticket_preview"
+            else "请先选择要办理的订单；刚才的消息没有被处理。"
+        )
     if interrupt_value.get("error"):
         payload["error"] = interrupt_value["error"]
     return payload
+
+
+def pending_payload(snapshot: Any) -> dict[str, Any] | None:
+    """把「图正停在哪」压成前端可直接渲染的 awaiting 载荷。
+
+    刷新页面后前端没有 SSE 上下文，只能靠这个接口把预览卡片重新画出来；
+    没有暂停时返回 ``None``。
+    """
+    interrupt_value = pending_interrupt(snapshot)
+    if interrupt_value is None:
+        return None
+    values = dict(getattr(snapshot, "values", {}) or {})
+    return _awaiting_payload(values, interrupt_value)
 
 
 def done_payload(values: dict[str, Any], *, session_id: str) -> dict[str, Any]:
@@ -206,6 +231,7 @@ async def astream_turn(
     intent_cheap_model: Any = None,
     turn_id: str | None = None,
     summarizer: Any = None,
+    mcp_provider: Any = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """跑一轮图，逐条产出 token/status/tools/citations/done 事件。"""
     config = _config(
@@ -217,6 +243,7 @@ async def astream_turn(
         retriever=retriever,
         settings=settings,
         summarizer=summarizer,
+        mcp_provider=mcp_provider,
     )
 
     # 同一 thread 还在等订单选择时，不要把新消息塞进暂停中的图：
@@ -263,7 +290,7 @@ async def astream_resume(
     graph: Any,
     *,
     session_id: str,
-    order_id: str,
+    order_id: str = "",
     model: Any,
     repositories: Any,
     retriever: Any,
@@ -271,8 +298,14 @@ async def astream_resume(
     intent_model: Any = None,
     intent_cheap_model: Any = None,
     summarizer: Any = None,
+    mcp_provider: Any = None,
+    resume_value: Any = None,
 ) -> AsyncIterator[dict[str, Any]]:
-    """从退款子流程的中断点续跑；不重新跑 begin_turn。"""
+    """从中断点续跑；不重新跑 begin_turn。
+
+    ``resume_value`` 优先：建工单确认传 ``{"confirmed": bool}``；不传时按
+    ch06 的订单选择器约定传 ``{"order_id": order_id}``。
+    """
     config = _config(
         session_id=session_id,
         model=model,
@@ -282,8 +315,11 @@ async def astream_resume(
         retriever=retriever,
         settings=settings,
         summarizer=summarizer,
+        mcp_provider=mcp_provider,
     )
-    resumed = Command(resume={"order_id": order_id})
+    resumed = Command(
+        resume=resume_value if resume_value is not None else {"order_id": order_id}
+    )
     async for event in _stream_events(graph, resumed, config):
         yield event
     async for event in _finish_or_pause(graph, config, session_id=session_id):
@@ -303,6 +339,7 @@ async def complete_turn(
     intent_cheap_model: Any = None,
     turn_id: str | None = None,
     summarizer: Any = None,
+    mcp_provider: Any = None,
 ) -> tuple[str, dict[str, Any]]:
     """非流式：收齐 token 事件，返回完整回复与 done 摘要。"""
     parts: list[str] = []
@@ -320,6 +357,7 @@ async def complete_turn(
         intent_cheap_model=intent_cheap_model,
         turn_id=turn_id,
         summarizer=summarizer,
+        mcp_provider=mcp_provider,
     ):
         if event.get("type") == "token":
             parts.append(str(event.get("delta") or ""))

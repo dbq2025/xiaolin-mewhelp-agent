@@ -160,9 +160,12 @@
   const TOOL_LABELS = {
     query_order: '查询订单',
     query_product: '查询商品',
-    query_logistics: '查询物流',
     query_faq: '检索常见问题',
     create_ticket: '创建工单',
+    track_shipment: '查询物流轨迹',
+    check_warranty: '查询保修状态',
+    check_return_progress: '查询退货进度',
+    estimate_delivery: '预估送达时间',
   };
 
   const TOOL_ICONS = {
@@ -565,6 +568,82 @@
     }
   }
 
+  function renderTicketPreview(target, data, ctx) {
+    const preview = (data && data.preview) || {};
+    const box = el('div', 'ticket-preview');
+    box.appendChild(el('div', 'ticket-preview-title', '工单预览'));
+    box.appendChild(el('div', 'ticket-preview-hint', '确认后才会真正创建工单。'));
+
+    const rows = el('div', 'ticket-preview-rows');
+    [
+      ['工单类型', preview.ticket_type || '—'],
+      ['问题描述', preview.description || '—'],
+    ].forEach(([key, value]) => {
+      const row = el('div', 'ticket-preview-row');
+      row.appendChild(el('span', 'ticket-preview-key', key));
+      row.appendChild(el('span', 'ticket-preview-value', value));
+      rows.appendChild(row);
+    });
+    box.appendChild(rows);
+
+    const actions = el('div', 'ticket-preview-actions');
+    const confirm = el('button', 'ticket-confirm', '确认提交');
+    confirm.type = 'button';
+    const cancel = el('button', 'ticket-cancel', '取消');
+    cancel.type = 'button';
+    confirm.addEventListener('click', () => {
+      if (!confirm.disabled) confirmTicket(ctx, true, target, box);
+    });
+    cancel.addEventListener('click', () => {
+      if (!cancel.disabled) confirmTicket(ctx, false, target, box);
+    });
+    actions.appendChild(confirm);
+    actions.appendChild(cancel);
+    box.appendChild(actions);
+
+    target.flow.hidden = false;
+    target.flow.appendChild(box);
+  }
+
+  async function confirmTicket(ctx, confirmed, target, box) {
+    if (!sessionId) {
+      addNotice('会话信息缺失，请刷新后重试。', true);
+      return;
+    }
+    const buttons = box ? box.querySelectorAll('button') : [];
+    buttons.forEach((button) => { button.disabled = true; });
+    addFlowNote(target, confirmed ? '已确认提交，正在建单…' : '已取消建单。');
+    setStatus(confirmed ? '正在建单…' : '正在取消…', 'ok');
+    try {
+      const resp = await fetch('/api/chat/ticket/confirm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId, confirmed: !!confirmed }),
+      });
+      if (!resp.ok) {
+        const payload = await resp.json().catch(() => null);
+        const err = (payload && payload.error) || {};
+        throw new Error(err.message || `HTTP ${resp.status}`);
+      }
+      ctx.awaiting = false;
+      ctx.acc = '';
+      ctx.bot.body.innerHTML = '';
+      await consumeStream(resp, ctx);
+      ctx.finish();
+      setStatus('已连接', 'ok');
+    } catch (err) {
+      addNotice(`工单确认失败：${err && err.message ? err.message : err}`, true);
+      setStatus('确认失败', 'bad');
+      buttons.forEach((button) => { button.disabled = false; });
+    } finally {
+      if (!ctx.awaiting) {
+        els.input.disabled = false;
+        els.send.disabled = false;
+        els.input.focus();
+      }
+    }
+  }
+
   function attachRefundForm(target, form) {
     if (!form || !form.order_id) return;
     const existing = target.wrap.querySelector('.refund-form');
@@ -674,16 +753,30 @@
     }
 
     if (event === 'awaiting_input') {
+      const kind = (data && data.kind) || 'order_picker';
+      const isTicket = kind === 'ticket_preview';
       ctx.awaiting = true;
       ctx.bot.body.innerHTML = '';
       els.input.disabled = true;
       els.send.disabled = true;
-      setStatus('等待选择订单', 'ok');
+      setStatus(isTicket ? '等待确认建单' : '等待选择订单', 'ok');
       if (data.error) {
         addNotice(data.error, true);
       }
       if (data.discarded_message) {
-        addNotice(data.message || '请先选择要办理的订单；刚才的消息没有被处理。', true);
+        addNotice(
+          data.message || (isTicket
+            ? '请先确认或取消刚才的工单；刚才的消息没有被处理。'
+            : '请先选择要办理的订单；刚才的消息没有被处理。'),
+          true,
+        );
+      }
+      // 提示归提示，卡片仍要画出来：用户被丢掉一条消息后，唯一能做的
+      // 就是点这张卡，不给他卡片等于把会话卡死。
+      if (isTicket) {
+        if (!ctx.bot.flow.querySelector('.ticket-preview')) {
+          renderTicketPreview(ctx.bot, data, ctx);
+        }
       } else if (!ctx.bot.flow.querySelector('.order-picker') && data.orders) {
         renderOrderPicker(ctx.bot, data, ctx);
       }
@@ -1203,6 +1296,45 @@
     } catch {
       /* 回读失败不该挡住聊天：静默退化成空白页，用户发一句就恢复正常 */
     }
+    await restorePending();
+  }
+
+  /* 刷新时 SSE 早已断开，那张「订单选择/工单确认」卡片不会自己回来。
+     这里问一次图停在哪，把同一帧重新走一遍 applyFrame —— 渲染逻辑只有一份。 */
+  async function restorePending() {
+    try {
+      const resp = await fetch(`/api/chat/sessions/${sessionId}/pending`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const pending = data && data.pending;
+      if (!pending || !pending.kind) return;
+      const bot = addRow('bot');
+      applyFrame({ event: 'awaiting_input', data: pending }, restoredCtx(bot));
+    } catch {
+      /* 恢复失败只影响这张卡；用户发一句新消息仍会拿到 awaiting_input */
+    }
+  }
+
+  /* 恢复卡片只需要 applyFrame 用到的那几个钩子：token 帧写气泡、
+     done 帧收尾。没有用户输入，所以 queuePaint 直接重画整段文本。 */
+  function restoredCtx(bot) {
+    let acc = '';
+    return {
+      bot,
+      userText: '',
+      awaiting: false,
+      get acc() { return acc; },
+      set acc(v) { acc = v; },
+      queuePaint() {
+        bot.body.innerHTML = renderMarkdown(acc);
+        scrollToBottom();
+      },
+      showStatus() {},
+      finish() { scrollToBottom(true); },
+      fail(data) {
+        addNotice((data && data.message) || '处理失败，请重试。', true);
+      },
+    };
   }
 
   // ------------------------------------------------------------------ 发送

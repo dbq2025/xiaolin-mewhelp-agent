@@ -147,6 +147,10 @@ class AgentState(TypedDict, total=False):
     llm_calls: int
     token_usage: dict[str, int]
     stop_reason: str
+    #: ch08：模型发起、等待用户确认的建单调用 ``{"args", "call_id"}``。
+    pending_ticket_call: dict[str, Any] | None
+    #: ch08：出示给用户的工单预览 ``{"ticket_type", "description"}``。
+    ticket_preview: dict[str, Any] | None
     context: dict[str, Any]
     #: ch07：``history_ctx`` 已为哪个 turn 写过。coref 与 intent 共用同一份
     #: 历史，按 turn 去重，避免一轮写两条。

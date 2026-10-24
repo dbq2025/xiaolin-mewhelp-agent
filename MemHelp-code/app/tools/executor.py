@@ -36,7 +36,13 @@ from sqlalchemy.exc import InterfaceError, OperationalError, PendingRollbackErro
 
 from app.db.repositories import Repositories
 from app.errors import redact
-from app.tools.registry import TOOL_NAMES, get_tool
+from app.tools.audit import AuditEntry, write_audit
+from app.tools.contract import ToolSource, ToolStatus, ToolSpec
+from app.tools.mcp_client import unwrap_mcp_result
+from app.tools.permissions import check_permission
+from app.tools.presenter import present_result, summarize_result
+from app.tools.registry import TOOL_NAMES, ToolRegistry, build_registry
+from app.tools.validation import validate_against_schema
 
 #: 回灌给模型的单个工具结果上限（字符）。
 #:
@@ -71,6 +77,15 @@ class ToolResult:
     #: 失败归类：``tool``（参数/业务/未知工具）或 ``database``（库不可用）。
     #: HTTP 层据此把建单失败映射成 502 或 503，而不是一律 502。
     fault: str | None = None
+    # -- ch08 新增：审计与来源 -------------------------------------------
+    #: 本次调用的结论，与审计表 ``status`` 同一套枚举。
+    status: ToolStatus = "成功"
+    #: 工具来源；未知工具按内置处理（它根本没登记）。
+    source: ToolSource = "builtin"
+    #: MCP 工具所属 Server 名；内置为 ``None``。
+    mcp_server: str | None = None
+    #: 模型给的 tool_call_id；直接调用（按钮/节点）时为 ``None``。
+    tool_call_id: str | None = None
 
     def summary(self) -> dict[str, Any]:
         """给 SSE 工具记录与落库用的精简描述。
@@ -230,26 +245,36 @@ async def execute_tool(
     name: str,
     args: dict[str, Any],
     *,
+    registry: ToolRegistry | None = None,
     repositories: Repositories,
     retriever: Any = None,
+    session_id: str | None = None,
+    conversation_id: int | None = None,
+    tool_call_id: str | None = None,
     timeout: float = 3.0,
     max_retries: int = 1,
+    confirmed: bool = False,
     resolve: Callable[[str, Repositories, Any], Any] | None = None,
 ) -> ToolResult:
     """执行一个工具，**任何失败都转成 ``ToolResult(ok=False)``**。
 
-    顺序固定：**未知工具 → 参数校验 → 带超时执行 → （必要时）重试**。
+    顺序固定：**未知工具 → 参数校验 → 权限 → 带超时执行 → 呈现 → 审计**。
     校验必须在执行之前：不能让工具收到半个参数再炸，那时错误信息来自工具内部，
     对模型毫无可操作性。
 
+    :param registry: 本轮工具表。``None`` 时按 ``repositories`` 现造一份（只含内置）。
     :param repositories: 当次请求的仓库。工具依赖由它按名字构造出来。
     :param retriever: 当次请求的向量检索器（ch03 起 ``query_faq`` 依赖它）。
-        不关心检索的工具会忽略它；``None`` 时 ``query_faq`` 会在被调用时抛错，
-        由本函数分类成 ``ok=false``。
+    :param session_id: 会话 id，仅用于调用方留痕（审计存的是数字 conversation_id）。
+    :param conversation_id: 数字会话 id，直接落审计表的 ``conversation_id``。
+    :param tool_call_id: 模型给的调用 id，落审计表便于把一轮对话和调用对上。
     :param timeout: 单次执行的超时（秒）。
-    :param max_retries: 仅瞬时错误的重试次数，不含首次。总尝试数为 ``max_retries + 1``。
-    :param resolve: 按名字取工具的可调用对象。默认走注册表 ``get_tool``；
-        测试显式注入假工具，从而**不依赖 monkeypatch**。
+    :param max_retries: 仅只读工具 + 瞬时错误的重试次数，不含首次。
+        **写操作永不自动重试**：超时未必没执行，重复执行比失败更糟。
+    :param confirmed: 写操作是否已获用户确认。默认 ``False`` —— 只有前端确认
+        回来的路由（``/api/chat/ticket/confirm``）与 ch05 的按钮路由能传 ``True``。
+    :param resolve: **兼容 ch02 旧测试**的按名字取工具钩子；新代码一律用
+        ``registry``。传了它时按只读工具处理（旧测试都在测只读语义）。
 
         **为什么要有这个参数**（踩过的坑）：测试若用
         ``monkeypatch.setattr(executor, "get_tool", fake)`` 注入，在**全量测试**下会失效 ——
@@ -265,94 +290,205 @@ async def execute_tool(
     def _elapsed_ms() -> int:
         return int((time.perf_counter() - started) * 1000)
 
-    resolver = resolve if resolve is not None else get_tool
+    table = registry if registry is not None else build_registry(repositories, retriever)
+    spec: ToolSpec | None = None if resolve is not None else table.get(name)
+    legacy = False
+    if resolve is not None:
+        # ch02 兼容路径优先：显式注入的假工具没有 ToolSpec，按只读内置工具包一层。
+        # 必须先于 registry 查表 —— 否则同名的真内置工具会抢走调用，
+        # 旧测试就会在真库上跑（表现为注入静默失效）。
+        try:
+            tool = resolve(name, repositories, retriever)
+        except BaseException as exc:  # noqa: BLE001
+            return await _finish(
+                repositories,
+                ToolResult(
+                    tool=name,
+                    args=dict(args),
+                    ok=False,
+                    data=None,
+                    error=redact(f"工具 {name} 无法加载：{type(exc).__name__}: {exc}"),
+                    attempts=0,
+                    duration_ms=_elapsed_ms(),
+                    started_at=started_at,
+                    fault="tool",
+                    status="失败",
+                ),
+                spec=None,
+                timeout=timeout,
+                session_id=session_id,
+                conversation_id=conversation_id,
+                tool_call_id=tool_call_id,
+                status="失败",
+                error=None,
+            )
+        if tool is not None:
+            schema = getattr(tool, "args_schema", None)
+            if schema is not None and not isinstance(schema, dict):
+                schema = schema.model_json_schema()
+            spec = ToolSpec(
+                name=name,
+                description=getattr(tool, "description", "") or "",
+                args_schema=schema or {"type": "object", "properties": {}},
+                source="builtin",
+                mcp_server=None,
+                read_only=True,
+                tool=tool,
+            )
+            legacy = True
 
     # -- 1. 未知工具 ------------------------------------------------------
     # 模型自己编的工具名是**正常输入**（它可能记混），不是程序缺陷：
     # 转成结构化失败让它自我纠正，并在错误里列出可用工具。
-    #
-    # resolver 本身也被包住：构造工具时可能抛异常（某个工具模块 import 期出问题），
-    # 而「永不抛异常」是本函数对外的契约 —— 不能因为异常发生在校验之前就破例。
-    try:
-        tool = resolver(name, repositories, retriever)
-    except BaseException as exc:  # noqa: BLE001
-        return ToolResult(
-            tool=name,
-            args=dict(args),
-            ok=False,
-            data=None,
-            error=redact(f"工具 {name} 无法加载：{type(exc).__name__}: {exc}"),
-            attempts=0,
-            duration_ms=_elapsed_ms(),
-            started_at=started_at,
-            fault="tool",
-        )
-
-    if tool is None:
-        return ToolResult(
-            tool=name,
-            args=dict(args),
-            ok=False,
-            data=None,
-            error=redact(f"未知工具 {name!r}。可用工具：{', '.join(TOOL_NAMES)}"),
-            attempts=0,
-            duration_ms=_elapsed_ms(),
-            started_at=started_at,
-            fault="tool",
-        )
-
-    # -- 2. 参数校验（不重试）---------------------------------------------
-    schema = getattr(tool, "args_schema", None)
-    if schema is not None:
-        try:
-            validated = schema.model_validate(args)
-        except ValidationError as exc:
-            return ToolResult(
+    if spec is None:
+        return await _finish(
+            repositories,
+            ToolResult(
                 tool=name,
                 args=dict(args),
                 ok=False,
                 data=None,
-                error=redact(_validation_error_text(exc)),
-                attempts=1,
+                error=redact(f"未知工具 {name!r}。可用工具：{', '.join(TOOL_NAMES)}"),
+                attempts=0,
                 duration_ms=_elapsed_ms(),
                 started_at=started_at,
                 fault="tool",
-            )
-        call_args = validated.model_dump()
-    else:
-        call_args = dict(args)
+                status="失败",
+            ),
+            spec=None,
+            timeout=timeout,
+            session_id=session_id,
+            conversation_id=conversation_id,
+            tool_call_id=tool_call_id,
+            status="失败",
+            error=None,
+        )
 
-    # -- 3. 执行 + 仅瞬时错误重试 -----------------------------------------
+    source: ToolSource = spec.source
+    server = spec.mcp_server
+
+    # -- 2. JSON Schema 校验（不重试，回灌可操作的错误文本）----------------
+    error = validate_against_schema(spec.args_schema, args)
+    if error is not None:
+        return await _finish(
+            repositories,
+            ToolResult(
+                tool=name,
+                args=dict(args),
+                ok=False,
+                data=None,
+                error=redact(error),
+                attempts=0,
+                duration_ms=_elapsed_ms(),
+                started_at=started_at,
+                fault="tool",
+                status="校验拦下",
+                source=source,
+                mcp_server=server,
+                tool_call_id=tool_call_id,
+            ),
+            spec=spec,
+            timeout=timeout,
+            session_id=session_id,
+            conversation_id=conversation_id,
+            tool_call_id=tool_call_id,
+            status="校验拦下",
+            error=error,
+        )
+
+    # -- 3. 权限闸（只认本侧 read_only + confirmed）------------------------
+    denied = check_permission(spec, confirmed=confirmed)
+    if denied is not None:
+        return await _finish(
+            repositories,
+            ToolResult(
+                tool=name,
+                args=dict(args),
+                ok=False,
+                data=None,
+                error=redact(denied),
+                attempts=0,
+                duration_ms=_elapsed_ms(),
+                started_at=started_at,
+                fault="tool",
+                status="权限拒绝",
+                source=source,
+                mcp_server=server,
+                tool_call_id=tool_call_id,
+            ),
+            spec=spec,
+            timeout=timeout,
+            session_id=session_id,
+            conversation_id=conversation_id,
+            tool_call_id=tool_call_id,
+            status="权限拒绝",
+            error=denied,
+        )
+
+    # -- 4. 执行 + 仅只读工具的瞬时错误重试 -------------------------------
     attempts = 0
     last_error: BaseException | None = None
     retried = False
+    # 写操作永远只有一次机会；旧兼容路径按只读处理。
+    allowed_retries = max_retries if (spec.read_only or legacy) else 0
 
-    for attempt_index in range(max_retries + 1):
+    for attempt_index in range(allowed_retries + 1):
         attempts += 1
         if attempt_index > 0:
             retried = True
         try:
-            data = await _invoke(tool, call_args, timeout)
+            raw = await _invoke(spec.tool, dict(args), timeout)
         except (Exception, asyncio.CancelledError, SystemExit) as exc:  # noqa: BLE001
             last_error = exc
-            if is_transient(exc) and attempt_index < max_retries:
+            if is_transient(exc) and attempt_index < allowed_retries:
                 continue
             break
         else:
-            return ToolResult(
-                tool=name,
-                args=call_args,
-                ok=True,
-                data=data,
+            if source == "mcp":
+                # MCP 返回 content blocks；先摊平成文本，呈现层才解析得了 JSON。
+                raw = unwrap_mcp_result(raw)
+            if legacy:
+                # 旧测试注入的假工具没有业务字段，呈现层的白名单会把它削空；
+                # 兼容路径保持 ch02 的「原样回灌」语义。
+                data = raw
+            else:
+                presented = (
+                    spec.presenter(raw) if spec.presenter else present_result(spec, raw)
+                )
+                data = (
+                    presented
+                    if isinstance(presented, str)
+                    else json.dumps(presented, ensure_ascii=False, default=str)
+                )
+            return await _finish(
+                repositories,
+                ToolResult(
+                    tool=name,
+                    args=dict(args),
+                    ok=True,
+                    data=data,
+                    error=None,
+                    attempts=attempts,
+                    duration_ms=_elapsed_ms(),
+                    started_at=started_at,
+                    retried=retried,
+                    status="成功",
+                    source=source,
+                    mcp_server=server,
+                    tool_call_id=tool_call_id,
+                ),
+                spec=spec,
+                timeout=timeout,
+                session_id=session_id,
+                conversation_id=conversation_id,
+                tool_call_id=tool_call_id,
+                status="成功",
                 error=None,
-                attempts=attempts,
-                duration_ms=_elapsed_ms(),
-                started_at=started_at,
-                retried=retried,
             )
 
     assert last_error is not None  # 循环只在异常或成功时退出
-    if isinstance(last_error, (asyncio.TimeoutError, TimeoutError)):
+    timed_out = isinstance(last_error, (asyncio.TimeoutError, TimeoutError))
+    if timed_out:
         reason = f"工具 {name} 执行超时（超过 {timeout} 秒）"
     elif isinstance(last_error, asyncio.CancelledError):
         # 上游/客户端断开把这次执行取消了。它不是工具的问题，但也不能装作成功。
@@ -360,15 +496,74 @@ async def execute_tool(
     else:
         reason = f"工具 {name} 执行失败：{type(last_error).__name__}: {last_error}"
 
-    return ToolResult(
-        tool=name,
-        args=call_args,
-        ok=False,
-        data=None,
-        error=redact(reason),
-        attempts=attempts,
-        duration_ms=_elapsed_ms(),
-        started_at=started_at,
-        retried=retried,
-        fault="database" if is_database_fault(last_error) else "tool",
+    status: ToolStatus = "超时" if timed_out else "失败"
+    return await _finish(
+        repositories,
+        ToolResult(
+            tool=name,
+            args=dict(args),
+            ok=False,
+            data=None,
+            error=redact(reason),
+            attempts=attempts,
+            duration_ms=_elapsed_ms(),
+            started_at=started_at,
+            retried=retried,
+            fault="database" if is_database_fault(last_error) else "tool",
+            status=status,
+            source=source,
+            mcp_server=server,
+            tool_call_id=tool_call_id,
+        ),
+        spec=spec,
+        timeout=timeout,
+        session_id=session_id,
+        conversation_id=conversation_id,
+        tool_call_id=tool_call_id,
+        status=status,
+        error=reason,
     )
+
+
+async def _finish(
+    repositories: Repositories,
+    result: ToolResult,
+    *,
+    spec: ToolSpec | None,
+    timeout: float,
+    session_id: str | None,
+    conversation_id: int | None,
+    tool_call_id: str | None,
+    status: ToolStatus,
+    error: str | None,
+) -> ToolResult:
+    """写一条审计后把结果原样交回。**审计失败只 warning，绝不改结果。**"""
+    conversation = conversation_id
+    if conversation is None and session_id:
+        # Agent 只在首轮拿不到 conversation_id（会话还没落库）；这里按
+        # session_id 反查一次，让审计能挂上会话。查不到就算了，不升级错误。
+        try:
+            conversation = await repositories.conversations.find_id(session_id)
+        except Exception:  # noqa: BLE001 - 审计关联失败不影响结果
+            conversation = None
+    summary = None
+    if result.ok:
+        try:
+            summary = summarize_result(spec, result.data) if spec is not None else None
+        except Exception:  # noqa: BLE001 - 摘要失败不影响结果
+            summary = None
+    entry = AuditEntry(
+        tool_name=result.tool,
+        tool_source=result.source,
+        status=status,
+        mcp_server=result.mcp_server,
+        tool_call_id=tool_call_id or result.tool_call_id,
+        conversation_id=conversation,
+        args=result.args,
+        result_summary=summary,
+        error=(redact(error)[:512] if error else None),
+        retry_count=max(0, result.attempts - 1) if result.attempts else 0,
+        duration_ms=result.duration_ms,
+    )
+    await write_audit(repositories, entry)
+    return result

@@ -878,6 +878,65 @@ pre.tool-record-detail-value {
 .order-card-meta { font-size: 11.5px; color: var(--ink-soft); }
 .order-card-hint { font-size: 11.5px; color: var(--accent); }
 
+.ticket-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fbfcfe;
+}
+.ticket-preview-title { font-size: 13.5px; font-weight: 650; }
+.ticket-preview-hint { font-size: 11.5px; color: var(--ink-soft); }
+.ticket-preview-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 10px;
+  border-radius: 10px;
+  background: #fff;
+  border: 1px solid var(--line);
+}
+.ticket-preview-row { display: flex; gap: 10px; align-items: flex-start; }
+.ticket-preview-key {
+  flex: 0 0 62px;
+  font-size: 11.5px;
+  color: var(--ink-soft);
+}
+.ticket-preview-value {
+  flex: 1;
+  font-size: 12.5px;
+  color: var(--ink);
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.ticket-preview-actions { display: flex; gap: 8px; }
+.ticket-confirm,
+.ticket-cancel {
+  padding: 7px 14px;
+  border-radius: 9px;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background .15s, border-color .15s, opacity .15s;
+}
+.ticket-confirm {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+.ticket-confirm:hover:not(:disabled) { background: #2563eb; border-color: #2563eb; }
+.ticket-cancel {
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--ink-soft);
+}
+.ticket-cancel:hover:not(:disabled) { border-color: #cbd5e1; color: var(--ink); }
+.ticket-confirm:disabled,
+.ticket-cancel:disabled { opacity: .6; cursor: default; }
+
 .refund-form {
   margin-top: 9px;
   padding: 11px;

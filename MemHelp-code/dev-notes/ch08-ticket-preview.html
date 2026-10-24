@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>ch08 工单预览卡片 · 视觉夹具</title>
+  <link rel="stylesheet" href="../web/style.css" />
+  <style>
+    body { background: #eef2f7; padding: 28px; font-family: "Microsoft YaHei", system-ui, sans-serif; }
+    .fixture { width: 420px; background: #fff; border-radius: 16px; padding: 16px; box-shadow: 0 10px 30px rgba(15,23,42,.08); }
+    .fixture-note { font-size: 11.5px; color: #64748b; margin-bottom: 10px; }
+  </style>
+</head>
+<body>
+  <!--
+    视觉夹具：与 web/app.js 的 renderTicketPreview() 输出保持一致。
+    真实交互（点按钮 -> /api/chat/ticket/confirm -> SSE）由
+    tests/test_ticket_confirm_api.py 覆盖；这个文件只用于截图核对样式。
+  -->
+  <div class="fixture">
+    <div class="fixture-note">聊天页 · 工单预览卡片</div>
+    <div class="ticket-preview">
+      <div class="ticket-preview-title">工单预览</div>
+      <div class="ticket-preview-hint">确认后才会真正创建工单。</div>
+      <div class="ticket-preview-rows">
+        <div class="ticket-preview-row">
+          <span class="ticket-preview-key">工单类型</span>
+          <span class="ticket-preview-value">售后</span>
+        </div>
+        <div class="ticket-preview-row">
+          <span class="ticket-preview-key">问题描述</span>
+          <span class="ticket-preview-value">耳机左声道没有声音，换过设备与线材都一样。</span>
+        </div>
+      </div>
+      <div class="ticket-preview-actions">
+        <button type="button" class="ticket-confirm">确认提交</button>
+        <button type="button" class="ticket-cancel">取消</button>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

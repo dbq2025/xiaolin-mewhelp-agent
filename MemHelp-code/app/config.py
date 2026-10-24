@@ -70,6 +70,29 @@ class Settings(BaseSettings):
         description="仅对瞬时错误的重试次数（不含首次尝试）。业务性失败与参数错误不重试。",
     )
 
+    # -- ch08：业务 MCP Server -------------------------------------------
+    #
+    # 两个 Server 都是本仓库自带的独立进程（mcp_servers/），默认端口 8101/8102。
+    # 关掉 mcp_enabled 后客服系统只保留内置工具，用于断网/离线演示。
+    mcp_enabled: bool = Field(default=True, description="是否接入业务 MCP Server。")
+    mcp_logistics_url: str = Field(
+        default="http://127.0.0.1:8101/mcp",
+        min_length=1,
+        description="物流 MCP Server 的 Streamable HTTP 地址。",
+    )
+    mcp_aftersales_url: str = Field(
+        default="http://127.0.0.1:8102/mcp",
+        min_length=1,
+        description="售后 MCP Server 的 Streamable HTTP 地址。",
+    )
+    mcp_readonly_servers: str = Field(
+        default="logistics,aftersales",
+        description="只读 Server 白名单（逗号分隔）。不在此列的 Server 整站拒调。",
+    )
+    mcp_timeout_seconds: float = Field(
+        default=3.0, gt=0, description="MCP 工具调用与工具发现的超时（秒）。"
+    )
+
     # -- ch03：RAG（向量语义检索）----------------------------------------
     #
     # 嵌入走云端（OpenAI 兼容 /embeddings）。上游 DeepSeek 没有这个端点，
