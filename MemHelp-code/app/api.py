@@ -2317,6 +2317,20 @@ def create_app(
                 name="review",
             )
 
+        # 评估趋势：纯静态页，数据走 /api/eval-runs。
+        trend_dir = web_dir / "eval-trend"
+        if trend_dir.is_dir():
+
+            @app.get("/eval-trend", include_in_schema=False)
+            async def eval_trend_redirect() -> RedirectResponse:
+                return RedirectResponse(url="/eval-trend/")
+
+            app.mount(
+                "/eval-trend",
+                StaticFiles(directory=trend_dir, html=True),
+                name="eval-trend",
+            )
+
         @app.get("/", include_in_schema=False)
         async def root_redirect() -> RedirectResponse:
             """根路径直接跳聊天页，省得记地址。"""

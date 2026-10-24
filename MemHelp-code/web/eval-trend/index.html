@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>评估趋势 · 小邻客服</title>
+  <link rel="stylesheet" href="/eval-trend/style.css">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <a class="brand" href="/chat/">
+        <span class="avatar-bot">邻</span>
+        <span>
+          <span class="brand-name">小邻客服</span>
+          <span class="brand-sub">ch09 · 评估趋势</span>
+        </span>
+      </a>
+      <nav class="nav">
+        <a href="/chat/">对话</a>
+        <a href="/rag-eval/">评估看板</a>
+        <a href="/review/">待审队列</a>
+        <a class="active" href="/eval-trend/">趋势</a>
+      </nav>
+      <div class="topbar-actions">
+        <button id="btn-run" class="btn-primary" type="button">立即跑一轮</button>
+      </div>
+    </header>
+
+    <main class="page">
+      <section class="hero">
+        <div>
+          <h1>指标趋势</h1>
+          <p class="sub" id="hero-sub">最近几轮 ch04 评估集的结果，按时间从左到右。</p>
+        </div>
+        <div class="legend">
+          <span class="dir up">↑ 变好</span>
+          <span class="dir down">↓ 下滑</span>
+          <span class="dir flat">→ 持平</span>
+        </div>
+      </section>
+
+      <section class="cards" id="cards"></section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>逐轮明细</h2>
+          <span class="muted" id="run-count"></span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>触发</th>
+                <th class="num">条数</th>
+                <th class="num">recall@5</th>
+                <th class="num">mrr@10</th>
+                <th class="num">faithfulness</th>
+                <th class="num">refusal</th>
+              </tr>
+            </thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+        <div id="empty" class="empty" hidden>
+          <div class="empty-icon">◎</div>
+          <h2>还没有评估记录</h2>
+          <p>点右上角「立即跑一轮」，跑完这里就会出现第一行。</p>
+        </div>
+        <div id="error-panel" class="empty" hidden>
+          <div class="empty-icon bad">!</div>
+          <h2>读取失败</h2>
+          <p id="error-message"></p>
+          <button id="btn-retry" class="btn-ghost" type="button">重试</button>
+        </div>
+      </section>
+
+      <p class="footnote">
+        数据来自 <code>eval_runs</code> 表；箭头比较的是最新一轮与上一轮。指标口径与
+        <a href="/rag-eval/">评估看板</a>一致（线上策略 hybrid_rerank）。
+      </p>
+    </main>
+  </div>
+  <div id="toast" class="toast" hidden></div>
+  <script src="/eval-trend/trend.js"></script>
+</body>
+</html>
