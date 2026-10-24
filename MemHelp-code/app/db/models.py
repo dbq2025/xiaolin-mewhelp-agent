@@ -452,6 +452,10 @@ class LowConfidenceQuestion(Base):
         SAEnum(*LOW_CONFIDENCE_SOURCES, name="low_confidence_source"), nullable=False
     )
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: ch09：落池当轮的召回片段快照（Top-N 的原文 + 得分），人工审核的依据。
+    retrieved_chunks: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    #: ch09：归并到的待审行；查重命中时回填，驳回/删除后置空。
+    matched_review_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
     )
@@ -462,9 +466,78 @@ class LowConfidenceQuestion(Base):
             ["conversations.id"],
             name="fk_lcq_conversation",
         ),
+        ForeignKeyConstraint(
+            ["matched_review_id"],
+            ["review_queue.id"],
+            name="fk_lcq_review",
+            ondelete="SET NULL",
+        ),
         Index("idx_lcq_source", "source"),
         Index("idx_lcq_created_at", "created_at"),
+        # SQLite 的索引名是库级唯一的，故与 MySQL DDL 的 ``idx_matched_review_id`` 区分。
+        Index("idx_lcq_matched_review", "matched_review_id"),
     )
+
+
+#: 待审队列的审核状态。与 ``sql/ch09-ddl.sql`` 的 ENUM 逐字相同。
+REVIEW_STATUSES: tuple[str, ...] = ("待审", "通过", "驳回")
+
+#: 评估记录的触发方式。
+EVAL_TRIGGERED_BY: tuple[str, ...] = ("定时", "手动")
+
+
+class ReviewQueue(Base):
+    """标准化问题 + 建议答案的待审队列 —— 一行一个**去重后**的缺口。
+
+    同一意图的问题反复入池只累加 ``occurrence_count``，不新增行；被归并的
+    原始提问留在 ``low_confidence_questions``，用 ``matched_review_id`` 指回来。
+    """
+
+    __tablename__ = "review_queue"
+
+    id: Mapped[int] = mapped_column(_AUTOINC_PK, primary_key=True, autoincrement=True)
+    #: 模型改写后的标准 FAQ 式问题（去重与审核都以它为准）。
+    normalized_question: Mapped[str] = mapped_column(String(512), nullable=False)
+    #: 模型给的示例答案，审核人可改；通过时写入 ``approved_answer``。
+    ai_suggested_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
+    occurrence_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+    review_status: Mapped[str] = mapped_column(
+        SAEnum(*REVIEW_STATUSES, name="review_status"),
+        nullable=False,
+        server_default=REVIEW_STATUSES[0],
+    )
+    approved_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (Index("idx_review_queue_status", "review_status"),)
+
+
+class EvalRun(Base):
+    """一轮自动化评估的分数快照 —— 一行一轮，按时间连成趋势。"""
+
+    __tablename__ = "eval_runs"
+
+    id: Mapped[int] = mapped_column(_AUTOINC_PK, primary_key=True, autoincrement=True)
+    triggered_by: Mapped[str] = mapped_column(
+        SAEnum(*EVAL_TRIGGERED_BY, name="eval_triggered_by"),
+        nullable=False,
+        server_default=EVAL_TRIGGERED_BY[0],
+    )
+    dataset_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: ``{"retrieval": {...}, "generation": {...}}``，键与 ch04 报告一致。
+    metrics: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (Index("idx_eval_runs_created_at", "created_at"),)
 
 
 class FaithCase(Base):

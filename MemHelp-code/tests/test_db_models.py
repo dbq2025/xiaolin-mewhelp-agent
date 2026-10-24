@@ -10,13 +10,14 @@
 """
 
 
-def test_metadata_has_exactly_ten_tables():
+def test_metadata_has_exactly_twelve_tables():
     """多一张少一张都要红 —— 表名漂移会让 compose 灌好的数据白费。
 
     ch03 新增 `knowledge_chunks` / `qa_extraction_staging`（六张）；
     ch04 新增 `low_confidence_questions` / `faith_cases`（八张）；
     ch07 新增 `conversation_summaries`（九张）；
-    ch08 新增 `tool_audit_logs`（十张）。
+    ch08 新增 `tool_audit_logs`（十张）；
+    ch09 新增 `review_queue` / `eval_runs`（十二张）。
     """
     import app.db.models  # noqa: F401 - 必须先 import 才会注册进 metadata
     from app.db.base import Base
@@ -32,6 +33,8 @@ def test_metadata_has_exactly_ten_tables():
         "faith_cases",
         "conversation_summaries",
         "tool_audit_logs",
+        "review_queue",
+        "eval_runs",
     }
 
 
@@ -360,10 +363,14 @@ def test_low_confidence_columns_and_enum():
         "raw_question",
         "source",
         "reason",
+        "retrieved_chunks",
+        "matched_review_id",
         "created_at",
     }
     assert LowConfidenceQuestion.__table__.c.conversation_id.nullable is True
     assert LowConfidenceQuestion.__table__.c.raw_question.nullable is False
+    assert LowConfidenceQuestion.__table__.c.retrieved_chunks.nullable is True
+    assert LowConfidenceQuestion.__table__.c.matched_review_id.nullable is True
     source = LowConfidenceQuestion.__table__.c.source
     assert isinstance(source.type, SAEnum)
     assert set(source.type.enums) == set(LOW_CONFIDENCE_SOURCES)
@@ -378,6 +385,7 @@ def test_low_confidence_foreign_key_is_named_like_the_ddl():
         if constraint.name
     }
     assert "fk_lcq_conversation" in names
+    assert "fk_lcq_review" in names
 
 
 def test_faith_case_columns_and_enum():
