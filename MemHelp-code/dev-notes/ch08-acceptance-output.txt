@@ -1,0 +1,53 @@
+﻿
+=== 验收 1：新工具只注册、不改核心代码 ===
+execute_tool -> status=成功 data={"hello": "ch08", "source": "ch08"}
+Agent 回答：已经替你打过招呼了。
+Agent 调到的工具：['hello_tool']
+  audit id=2 tool=hello_tool source=builtin status=成功 retry=0 duration_ms=2 error=-
+  audit id=1 tool=hello_tool source=builtin status=成功 retry=0 duration_ms=4 error=-
+
+=== 验收 2：通过 MCP 查物流 / 在保 / 退货进度 ===
+发现工具：['check_return_progress', 'check_warranty', 'track_shipment']
+track_shipment -> status=成功 data={"order_id": "1001", "carrier": "中通快递", "tracking_no": "SF597263506059", "status": "IN_TRANSIT", "nodes": [{"time": "2026-10-20 09:51", "text": "包裹已由快递员揽收"}, {"time": "2026-10-21 09:44", "text": "包裹已到达转运中心"}], "eta": "2026-10-23", "status_text": "运输中"}
+check_warranty -> status=成功 data={"order_id": "1002", "product_name": "无线耳机", "in_warranty": false, "warranty_until": "2026-06-02", "policy": "已超出整机保修期，可付费维修。"}
+check_return_progress -> status=成功 data={"order_id": "1003", "return_no": "R314465", "status": "REFUNDED", "steps": [{"title": "已申请", "done": true, "time": "2026-10-18"}, {"title": "已通过审核", "done": true, "time": "2026-10-19"}, {"title": "已寄回", "done": true, "time": "2026-10-20"}, {"title": "商家已收货", "done": true, "time": "2026-10-21"}, {"title": "已退款", "done": true, "time": "2026-10-22"}], "refund_amount_yuan": 481.76, "status_text": "已退款"}
+  audit id=3 tool=check_return_progress source=mcp status=成功 retry=0 duration_ms=127 error=-
+  audit id=2 tool=check_warranty source=mcp status=成功 retry=0 duration_ms=131 error=-
+  audit id=1 tool=track_shipment source=mcp status=成功 retry=0 duration_ms=116 error=-
+
+=== 验收 4 / 5：工单预览卡片的确认与取消 ===
+暂停并出示预览：kind=ticket_preview preview={'ticket_type': '售后', 'description': '耳机左声道没有声音'}
+确认后回复：已为你创建工单 T20261024001，人工客服会尽快跟进。
+tickets 落库：['T20261024001']
+create_ticket 审计：[('成功', 0)]
+取消后回复：已取消建单，没有创建工单。
+tickets 数量仍为：1
+取消审计：[('权限拒绝', '用户取消建单，未执行')]
+
+=== 验收 6：超时、重试与审计 ===
+只读超时：status=超时 attempts=2 error=工具 slow_read 执行超时（超过 0.1 秒）
+写超时：status=超时 attempts=1 error=工具 slow_write 执行超时（超过 0.1 秒）
+  audit id=2 tool=slow_write source=builtin status=超时 retry=0 duration_ms=102 error=工具 slow_write 执行超时（超过 0.1 秒）
+  audit id=1 tool=slow_read source=builtin status=超时 retry=1 duration_ms=215 error=工具 slow_read 执行超时（超过 0.1 秒）
+
+=== 验收 3：MCP Server 侧加工具、只重启该 Server ===
+
+INFO:     127.0.0.1:49687 - "POST /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49693 - "POST /mcp HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:49694 - "GET /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49698 - "POST /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49702 - "DELETE /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49716 - "POST /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49723 - "POST /mcp HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:49725 - "GET /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49729 - "POST /mcp HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49733 - "DELETE /mcp HTTP/1.1" 200 OK
+
+=== 验收 3：只重启物流 Server，客服系统侧代码与进程不动 ===
+重启前工具：['track_shipment']
+只重启物流 Server 后工具：['estimate_delivery', 'track_shipment']
+结论：新工具 True（客户端进程未重启、未改代码）
+
+=== 全量测试 ===
+
+1118 passed, 41 skipped in 40.64s

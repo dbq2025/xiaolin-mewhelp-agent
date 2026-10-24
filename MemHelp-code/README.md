@@ -843,4 +843,69 @@ JSON 失败 0、扩写 8/8。
 **本章不做（用户指定）**：微调小模型/BERT 做意图分类、跨会话记忆；真实订单表/退款单表；
 入库侧多份拆存；刷新页面后恢复未完成的订单选择。
 
+## 第八章「工具生态 · 注册中心 / MCP / 工单确认」运行说明
+
+### 1. 新增依赖
+
+```bash
+uv sync        # mcp 1.x、langchain-mcp-adapters 0.3.x、jsonschema
+```
+
+### 2. 起两个 MCP Server（各自独立进程，Streamable HTTP）
+
+```bash
+# 终端 A
+uv run python scripts/run_mcp_servers.py
+# logistics  -> http://127.0.0.1:8101/mcp（track_shipment）
+# aftersales -> http://127.0.0.1:8102/mcp（check_warranty / check_return_progress）
+```
+
+地址与开关在 `.env` 里：`MCP_ENABLED`、`MCP_LOGISTICS_URL`、`MCP_AFTERSALES_URL`、
+`MCP_READONLY_SERVERS`、`MCP_TIMEOUT_SECONDS`。连不上 Server 时聊天仍可用，只是清单里没有 MCP 工具。
+
+### 3. 起客服系统并打开聊天页
+
+```bash
+uv run uvicorn app.main:app --reload --port 8000
+# 浏览器 http://127.0.0.1:8000/chat/
+```
+
+### 4. 功能演示（不依赖真实模型）
+
+```bash
+uv run python scripts/demo_ch08.py                 # 验收 1 / 4 / 5 / 6
+uv run python scripts/demo_ch08.py --part mcp      # 验收 2（先起 MCP Server）
+uv run python scripts/demo_ch08.py --part hot-add  # 验收 3（脚本自己起停物流 Server）
+```
+
+- 验收 1：脚本里只 `registry.register(...)` 一条 `hello_tool`，Agent 立刻调到它。
+- 验收 2：实时发现 `track_shipment` / `check_warranty` / `check_return_progress`，审计 `source=mcp`。
+- 验收 3：物流 Server 用 `--logistics-extra`（或 `MEMHELP_LOGISTICS_EXTRA=1`）重启后多出
+  `estimate_delivery`，客户端进程与代码都没动。
+- 验收 4 / 5：走到 `ticket_preview` 后分别确认、取消；确认落 `tickets`，取消的
+  `create_ticket` 审计为「权限拒绝」。
+- 验收 6：`slow_read` 超时重试 1 次（审计 `retry=1`），`slow_write` 写操作超时不重试（`retry=0`）。
+
+### 5. 接口变化（第八章）
+
+| 方法 | 路径 | 变化 |
+|---|---|---|
+| POST | `/api/chat/ticket/confirm` | 新增；body `{session_id, confirmed}`，从 `ticket_await_confirm` 中断续跑 |
+| POST | `/api/chat/completions` | SSE `awaiting_input` 新增 `kind=ticket_preview`、`call_id`、`preview` |
+| POST | `/api/actions/create-ticket` | 行为不变（按钮即确认）；内部改为 `confirmed=True` 走统一执行引擎 |
+
+数据库新增 `tool_audit_logs`（见 `sql/ch08-ddl.sql`），每次工具调用一条，不挂外键；
+写审计失败只告警，不拦工具执行。
+
+### 6. 本章留痕
+
+- 设计文档：`docs/superpowers/specs/2026-10-24-ch08-tool-ecosystem-design.md`
+- 实施计划：`docs/superpowers/plans/2026-10-24-ch08-tool-ecosystem-plan.md`
+- 开发过程追记：`dev-notes/ch08.md`
+- 验收输出：`dev-notes/ch08-acceptance-output.txt`
+- 截图：`dev-notes/ch08-ticket-preview.png`
+
+**本章不做（用户指定）**：Skill 机制、仓储等更多外部系统。
+
+
 
