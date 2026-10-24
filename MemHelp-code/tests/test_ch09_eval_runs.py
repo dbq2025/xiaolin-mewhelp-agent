@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 from app.db.repositories import EvalRunRow
 from app.eval_runs import (
@@ -12,6 +13,19 @@ from app.eval_runs import (
     run_evaluation,
     summarize_trend,
 )
+from app.eval_schedule import _busy
+
+
+def test_scheduler_skips_while_manual_eval_runs():
+    assert _busy(SimpleNamespace(state=SimpleNamespace(eval_running=True))) is True
+    assert _busy(SimpleNamespace(state=SimpleNamespace())) is False
+
+    class _Running:
+        def done(self) -> bool:
+            return False
+
+    app = SimpleNamespace(state=SimpleNamespace(eval_run_task=_Running()))
+    assert _busy(app) is True
 
 
 def _report(*, recall: float = 0.9, faith: float = 0.88) -> dict:

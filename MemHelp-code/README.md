@@ -907,5 +907,99 @@ uv run python scripts/demo_ch08.py --part hot-add  # 验收 3（脚本自己起�
 
 **本章不做（用户指定）**：Skill 机制、仓储等更多外部系统。
 
+# 第九章「可观测性 · 数据飞轮」运行说明
+
+把每条请求的完整链路送进 Langfuse，把答不上的问题（检索置信度低 / 生成自评不够 / 用户 👎）
+统一落进 `low_confidence_questions`，经标准化、查重后进入 `review_queue`，人工审核通过即写回
+知识库并向量化，形成「问题 → 缺口 → 知识」的闭环。
+
+### 1. Langfuse（Cloud）
+
+`.env` 里配三项即启用；任一为空则整条观测链路自动降级为 no-op，聊天不受影响：
+
+```bash
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_BASE_URL=https://jp.cloud.langfuse.com
+LANGFUSE_ENVIRONMENT=development
+```
+
+点开任意一条请求：`https://jp.cloud.langfuse.com/project/<project-id>/traces/<trace-id>`。
+根 span 是 `chat-turn`，下面挂 `LangGraph` 图、各节点 CHAIN、`knowledge_retrieve` RETRIEVER、
+`tool:<name>` TOOL 和每次模型 GENERATION（含 prompt、token、耗时）。意图通过
+`intent:<intent>` tag 打到 trace 上，`/api/intent-cost` 按 tag 维度聚合 token。
+
+### 2. 数据库
+
+```bash
+mysql -u root -p mewhelp < sql/ch09-ddl.sql
+```
+
+新建 `review_queue`、`eval_runs`，并给 `low_confidence_questions` 加
+`retrieved_chunks`（召回快照 JSON）与 `matched_review_id`（归并落点）。
+
+### 3. 起服务并打开页面
+
+```bash
+uv run uvicorn app.main:app --reload --port 8000
+# 聊天：      http://127.0.0.1:8000/chat/
+# 待审队列：  http://127.0.0.1:8000/review/
+# 评估趋势：  http://127.0.0.1:8000/eval-trend/
+# 检索评估：  http://127.0.0.1:8000/rag-eval/
+```
+
+### 4. 端到端演示（六条验收一次跑完）
+
+```bash
+uv run python scripts/demo_ch09.py \
+  --question "玻璃保鲜盒 G21 可以进烤箱吗？" \
+  --answer "玻璃保鲜盒 G21 采用耐热玻璃，可以进烤箱，但不要直接接触明火或电热丝，避免骤冷骤热；盖子和密封圈不要进烤箱。"
+```
+
+- 验收 2：第一次回答是兜底话术；`/review/` 里出现该问题，详情里有用户原话与 Top 片段（含 score）。
+- 验收 3：脚本调用通过接口后，再问同一问题能答出核准答案（知识块已写 MySQL + Milvus）。
+- 验收 4：脚本对回答点 👎（走 `POST /api/feedback`），问题再次进入待审队列。
+- 验收 5：打印按意图聚合的 token；`cost` 需要 Langfuse 配了模型单价才有值。
+- 验收 6：打印 `eval_runs` 最近两轮与每个指标的 ↑/↓/→。轮次不足时先跑：
+  `uv run python scripts/run_eval_round.py --trigger 手动`。
+
+`--skip-feedback` / `--skip-eval` 可跳过对应步骤。演示脚本会真的写库：每跑一次就多一条
+审核通过的知识块，重复演示请换 `--question`。
+
+### 5. 测试
+
+```bash
+uv run pytest -q -p no:cacheprovider
+```
+
+### 6. 关键配置
+
+| 配置 | 默认 | 说明 |
+|---|---|---|
+| `EVIDENCE_CONFIDENCE_MODEL` | `evals/ch09_confidence_model.json` | 缺失/损坏退回 ch05 阈值闸 |
+| `KNOWLEDGE_SELF_CHECK` | `true` | 闸通过后、进 Agent 前的一次自评 |
+| `SELF_CHECK_TIMEOUT` | `5` | 自评超时（超时按「够答」放行，`degraded`） |
+| `FLYWHEEL_ENABLED` | `true` | 入池后同步做标准化 + 查重 |
+| `FLYWHEEL_NORMALIZE_TIMEOUT` / `FLYWHEEL_DEDUPE_TIMEOUT` | `20` / `15` | 飞轮两次模型调用超时 |
+| `EVAL_SCHEDULE_ENABLED` | `true` | 周期评估（首轮等一个间隔） |
+| `EVAL_SCHEDULE_INTERVAL_HOURS` | `24` | 周期 |
+| `EVAL_GENERATION_LIMIT` | `0` | >0 时生成段每桶只跑 N 条（检索仍全量），演示用 8 |
+| `LANGFUSE_ENABLED` | `true` | 关掉即完全不埋点 |
+
+置信度闸用 ch04 评估集做留一法校准：48 条（40 可答 / 8 拒答），阈值 0.95，
+balanced accuracy 0.90（TP 32 / FP 0 / TN 8 / FN 8）；`C_colloquial` 桶偏保守（50%），
+报告见 `dev-notes/ch09-confidence-calibration.md`。artifact 不达标（BA < 0.70）时
+`scripts/calibrate_confidence.py` 不写文件、返回 2，运行时自动退回 ch05 阈值闸。
+
+### 7. 本章留痕
+
+- 设计文档：`docs/superpowers/specs/2026-10-24-ch09-observability-flywheel-design.md`
+- 实施计划：`docs/superpowers/plans/2026-10-24-ch09-observability-flywheel-plan.md`
+- 开发过程追记：`dev-notes/ch09.md`
+- 置信度校准报告：`dev-notes/ch09-confidence-calibration.md`
+- 校准模型：`evals/ch09_confidence_model.json`
+
+**本章不做（用户指定）**：低置信度问题按主题归类的微调分类器（下一步）。
+
 
 

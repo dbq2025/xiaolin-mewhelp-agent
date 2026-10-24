@@ -127,9 +127,61 @@ async def test_feedback_unknown_message_404(test_settings):
     assert resp.status_code == 404
 
 
+async def test_feedback_rejects_user_message_id(test_settings, fake_repositories):
+    """👎 只能挂在回答上；传用户消息 id 不能把上一轮问题误落池。"""
+    await _seed_turn(fake_repositories, question="上一轮问题")
+    conversation_id = await fake_repositories.conversations.upsert_by_session(
+        "s1", "anonymous"
+    )
+    first_user_id = (
+        await fake_repositories.messages.append_many(
+            conversation_id, [{"role": "user", "content": "这一轮问题"}]
+        )
+    )[0]
+    client = _client(test_settings)
+    resp = client.post(
+        "/api/feedback",
+        json={"session_id": "s1", "message_id": first_user_id, "rating": "down"},
+    )
+    assert resp.status_code == 404
+    assert await fake_repositories.low_confidence.list_recent() == []
+
+
 class _State(TypedDict, total=False):
     user_message: str
     retrieval_snapshot: list[dict[str, Any]]
+    message_id: int
+
+
+async def test_snapshot_prefers_exact_message_id():
+    """同一会话里问了两遍同一句话：按 message_id 找当轮，不拿错轮快照。"""
+    builder = StateGraph(_State)
+
+    def first(_s: _State) -> dict[str, Any]:
+        return {
+            "retrieval_snapshot": [{"chunk_id": "old", "score": 0.1}],
+            "message_id": 11,
+        }
+
+    def second(_s: _State) -> dict[str, Any]:
+        return {
+            "retrieval_snapshot": [{"chunk_id": "new", "score": 0.9}],
+            "message_id": 22,
+        }
+
+    builder.add_node("first", first)
+    builder.add_node("second", second)
+    builder.add_edge(START, "first")
+    builder.add_edge("first", "second")
+    builder.add_edge("second", END)
+    graph = builder.compile(checkpointer=MemorySaver())
+    await graph.ainvoke(
+        {"user_message": "同一句话"}, {"configurable": {"thread_id": "t3"}}
+    )
+    snapshot = await snapshot_for_turn(
+        graph, session_id="t3", user_message="同一句话", message_id=11
+    )
+    assert snapshot is not None and snapshot[0]["chunk_id"] == "old"
 
 
 async def test_snapshot_for_turn_prefers_checkpoint():

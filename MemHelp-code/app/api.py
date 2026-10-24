@@ -328,10 +328,12 @@ async def _manual_eval(app: FastAPI) -> None:
         session = factory()
         repositories = Repositories.from_session(session)
     try:
+        app.state.eval_running = True
         await run_evaluation(repositories=repositories, trigger="手动", settings=settings)
     except Exception:  # noqa: BLE001 - 后台任务不能把异常抛给事件循环
         logger.exception("ch09 手动评估失败")
     finally:
+        app.state.eval_running = False
         if session is not None:
             session.close()
 
@@ -1994,6 +1996,10 @@ def create_app(
         answer = await repositories_.messages.get(req.message_id)
         if answer is None or answer.conversation_id is None:
             return _error(404, "not_found", f"消息 {req.message_id} 不存在。")
+        if answer.role != "assistant":
+            return _error(
+                404, "not_found", "👎 只能提交给回答消息，不能提交给用户提问。"
+            )
         owner = await repositories_.conversations.find_session_id(
             answer.conversation_id
         )
@@ -2021,7 +2027,10 @@ def create_app(
         graph = getattr(request.app.state, "agent_graph", None)
         if graph is not None:
             snapshot = await snapshot_for_turn(
-                graph, session_id=req.session_id, user_message=question
+                graph,
+                session_id=req.session_id,
+                user_message=question,
+                message_id=req.message_id,
             )
         if not snapshot:
             snapshot = _citations_as_snapshot(answer.citations)
@@ -2232,7 +2241,9 @@ def create_app(
     async def eval_runs_run() -> JSONResponse:
         """手动触发一轮评估；后台跑，前端轮询 ``GET /api/eval-runs`` 等新行。"""
         task = getattr(app.state, "eval_run_task", None)
-        if task is not None and not task.done():
+        if (task is not None and not task.done()) or bool(
+            getattr(app.state, "eval_running", False)
+        ):
             return _error(409, "eval_run_in_progress", "已有一轮评估在跑，请稍后再试")
         app.state.eval_run_task = asyncio.create_task(
             _manual_eval(app), name="ch09-manual-eval"

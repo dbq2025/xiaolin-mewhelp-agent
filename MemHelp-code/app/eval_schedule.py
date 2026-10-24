@@ -33,13 +33,23 @@ def _open_repositories(app: Any):
     return Repositories.from_session(session), session
 
 
+def _busy(app: Any) -> bool:
+    """手动评估在跑时跳过定时轮：两轮同时写同一个报告文件会互相覆盖。"""
+    if bool(getattr(app.state, "eval_running", False)):
+        return True
+    task = getattr(app.state, "eval_run_task", None)
+    return task is not None and not task.done()
+
+
 async def _run_once(app: Any, settings: Settings) -> int:
     repositories, session = _open_repositories(app)
+    app.state.eval_running = True
     try:
         return await run_evaluation(
             repositories=repositories, trigger="定时", settings=settings
         )
     finally:
+        app.state.eval_running = False
         if session is not None:
             session.close()
 
@@ -49,6 +59,9 @@ async def _loop(app: Any, settings: Settings) -> None:
     logger.info("ch09 评估调度已启动：每 %.1f 小时一轮", interval / 3600.0)
     while True:
         await asyncio.sleep(interval)
+        if _busy(app):
+            logger.info("ch09 定时评估跳过：手动评估正在跑")
+            continue
         try:
             await _run_once(app, settings)
         except asyncio.CancelledError:

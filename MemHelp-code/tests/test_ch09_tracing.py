@@ -83,3 +83,17 @@ def test_tag_intent_is_noop_when_disabled(monkeypatch):
     monkeypatch.setattr(tracing, "_enabled", False)
     with tracing.tag_intent("refund", 0.9):
         pass
+
+
+class _BrokenClient:
+    def start_as_current_observation(self, **_kwargs):
+        raise RuntimeError("langfuse 内部错误")
+
+
+def test_observation_failure_does_not_break_chat(monkeypatch):
+    tracing.reset_for_tests()
+    monkeypatch.setattr(tracing, "_client", _BrokenClient())
+    monkeypatch.setattr(tracing, "_enabled", True)
+
+    with tracing.observation("knowledge_retrieve", as_type="retriever") as span:
+        assert span is None

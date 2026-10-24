@@ -156,9 +156,15 @@ def observation(name: str, as_type: str = "span", input: Any | None = None):
     if not _enabled or _client is None:
         yield None
         return
-    with _client.start_as_current_observation(
-        name=name, as_type=as_type, input=input
-    ) as span:
+    try:
+        manager = _client.start_as_current_observation(
+            name=name, as_type=as_type, input=input
+        )
+    except Exception:  # pragma: no cover - 观测失败不影响主流程
+        logger.warning("Langfuse 子 span 创建失败：%s", name, exc_info=True)
+        yield None
+        return
+    with manager as span:
         yield span
 
 
