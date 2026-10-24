@@ -398,3 +398,11 @@ class FeedbackRequest(BaseModel):
     reason: str | None = Field(
         default=None, max_length=1000, description="可选：用户填的补充说明。"
     )
+
+
+class ReviewApproveRequest(BaseModel):
+    """审核通过时人工确认/改写的核准答案。"""
+
+    approved_answer: str = Field(
+        min_length=1, max_length=4000, description="写入知识库的最终答案。"
+    )

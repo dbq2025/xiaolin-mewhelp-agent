@@ -62,6 +62,13 @@ from app.knowledge.embedder import get_embedder
 from app.knowledge.hybrid import HybridRetriever
 from app.flywheel.service import FlywheelService
 from app.flywheel.snapshot import snapshot_for_turn
+from app.flywheel.review import (
+    ReviewAlreadyDecided,
+    ReviewNotFound,
+    approve_review,
+    reject_review,
+    review_detail,
+)
 from app.knowledge.pipeline import RagPipeline
 from app.knowledge.query import LlmRewriter, QueryUnderstander
 from app.knowledge.rerank import get_reranker
@@ -94,6 +101,7 @@ from app.schemas import (
     FaithCaseUpdateRequest,
     FeedbackRequest,
     RefundSelectRequest,
+    ReviewApproveRequest,
     SessionMessagesResponse,
     TicketConfirmRequest,
 )
@@ -664,6 +672,36 @@ def _citations_as_snapshot(citations: Any) -> list[dict[str, Any]]:
             }
         )
     return snapshot
+
+
+def _iso(value: Any) -> str | None:
+    return value.isoformat() if hasattr(value, "isoformat") else None
+
+
+def _review_item(row: Any) -> dict[str, Any]:
+    """待审行 → 列表页契约（不含原始提问，详情页才有）。"""
+    return {
+        "id": row.id,
+        "normalized_question": row.normalized_question,
+        "ai_suggested_answer": row.ai_suggested_answer,
+        "occurrence_count": row.occurrence_count,
+        "review_status": row.review_status,
+        "approved_answer": row.approved_answer,
+        "created_at": _iso(row.created_at),
+        "updated_at": _iso(row.updated_at),
+    }
+
+
+def _review_question(row: Any) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "conversation_id": row.conversation_id,
+        "raw_question": row.raw_question,
+        "source": row.source,
+        "reason": row.reason,
+        "created_at": _iso(row.created_at),
+        "retrieved_chunks": row.retrieved_chunks or [],
+    }
 
 
 def _tool_traces(
@@ -1975,6 +2013,84 @@ def create_app(
                 "snapshot_count": len(snapshot or []),
             },
         )
+
+    # -- ch09：审核队列 ------------------------------------------------------
+
+    @app.get("/api/review-queue")
+    async def review_queue_list(
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        repositories_: Repositories = Depends(get_repositories),
+    ) -> JSONResponse:
+        if status is not None and status not in ("待审", "通过", "驳回"):
+            return _error(422, "invalid_status", "status 只能是 待审/通过/驳回")
+        rows = await repositories_.reviews.list_rows(
+            status=status, limit=max(1, min(limit, 200)), offset=max(0, offset)
+        )
+        return JSONResponse(
+            status_code=200,
+            content={"items": [_review_item(row) for row in rows]},
+        )
+
+    @app.get("/api/review-queue/{review_id}")
+    async def review_queue_detail(
+        review_id: int,
+        repositories_: Repositories = Depends(get_repositories),
+    ) -> JSONResponse:
+        detail = await review_detail(repositories_, review_id)
+        if detail is None:
+            return _error(404, "review_not_found", f"待审问题 {review_id} 不存在")
+        return JSONResponse(
+            status_code=200,
+            content={
+                "review": _review_item(detail.review),
+                "questions": [
+                    _review_question(question) for question in detail.questions
+                ],
+                "snapshot": detail.snapshot,
+            },
+        )
+
+    @app.post("/api/review-queue/{review_id}/approve")
+    async def review_queue_approve(
+        review_id: int,
+        req: ReviewApproveRequest,
+        request: Request,
+        repositories_: Repositories = Depends(get_repositories),
+    ) -> JSONResponse:
+        settings_ = get_app_settings(request)
+        store = _vector_store_for(
+            settings_.milvus_uri, settings_.milvus_collection, settings_.embedding_dim
+        )
+        try:
+            payload = await approve_review(
+                repositories_,
+                review_id,
+                req.approved_answer,
+                vector_store=store,
+                embedder=get_embedder(settings_),
+            )
+        except ReviewNotFound as exc:
+            return _error(404, "review_not_found", redact(str(exc)))
+        except ReviewAlreadyDecided as exc:
+            return _error(409, "review_already_decided", redact(str(exc)))
+        except ValueError as exc:
+            return _error(422, "invalid_approved_answer", redact(str(exc)))
+        return JSONResponse(status_code=200, content=payload)
+
+    @app.post("/api/review-queue/{review_id}/reject")
+    async def review_queue_reject(
+        review_id: int,
+        repositories_: Repositories = Depends(get_repositories),
+    ) -> JSONResponse:
+        try:
+            await reject_review(repositories_, review_id)
+        except ReviewNotFound as exc:
+            return _error(404, "review_not_found", redact(str(exc)))
+        except ReviewAlreadyDecided as exc:
+            return _error(409, "review_already_decided", redact(str(exc)))
+        return JSONResponse(status_code=200, content={"ok": True})
 
     # -- 结构化提取（一次返回完整 JSON，不流式）---------------------------
 

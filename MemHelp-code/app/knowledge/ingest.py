@@ -39,6 +39,7 @@ __all__ = [
     "ingest_faq_table",
     "ingest_markdown",
     "rebuild",
+    "vectorize_ids",
     "vectorize_pending",
 ]
 
@@ -173,6 +174,56 @@ async def vectorize_pending(
         await chunk_repo.mark_done([(row.id, str(row.id)) for row in rows])
         written += len(rows)
         logger.info("已向量化 %d 块（本次累计 %d）", len(rows), written)
+
+    return written
+
+
+async def vectorize_ids(
+    chunk_ids: Sequence[int],
+    *,
+    chunk_repo: KnowledgeChunkRepository,
+    vector_store: VectorStore,
+    embedder: Embedder,
+    batch_size: int = 32,
+) -> int:
+    """只给指定块补向量，返回写入条数（审核通过后的增量路径）。
+
+    与 :func:`vectorize_pending` 共用同一套「先写 Milvus 再回填」顺序；区别只是
+    候选集来自主键列表而不是 ``pending`` 状态 —— 审核通过的块刚 ``upsert_chunk``
+    完，可能连 pending 都还没被后台任务扫到，不能等下一轮全量续跑。
+    """
+    ids = [int(chunk_id) for chunk_id in chunk_ids]
+    if not ids:
+        return 0
+
+    written = 0
+    for start in range(0, len(ids), max(1, batch_size)):
+        batch_ids = ids[start : start + batch_size]
+        rows = await chunk_repo.get_many(batch_ids)
+        if not rows:
+            continue
+
+        vectors = await embedder.embed([render_embed_text(row) for row in rows])
+        if len(vectors) != len(rows):
+            raise RuntimeError(
+                f"嵌入返回条数不符：期望 {len(rows)}，实际 {len(vectors)}"
+            )
+
+        await vector_store.upsert(
+            [
+                VectorRecord(
+                    id=str(row.id),
+                    dense=vector,
+                    text=render_bm25_text(row),
+                    category=row.category,
+                    content_type=row.content_type,
+                )
+                for vector, row in zip(vectors, rows)
+            ]
+        )
+        await chunk_repo.mark_done([(row.id, str(row.id)) for row in rows])
+        written += len(rows)
+        logger.info("已向量化 %d 块（指定 id，累计 %d）", len(rows), written)
 
     return written
 

@@ -1628,6 +1628,18 @@ class LowConfidenceQuestionRepository:
         """最近入池的若干条（新的在前）。"""
         return await _run(self._list_recent, limit)
 
+    def _list_for_review(self, review_id: int) -> list[LowConfidenceRow]:
+        rows = self._session.scalars(
+            select(LowConfidenceQuestion)
+            .where(LowConfidenceQuestion.matched_review_id == review_id)
+            .order_by(LowConfidenceQuestion.id.asc())
+        ).all()
+        return [_low_confidence_row(row) for row in rows]
+
+    async def list_for_review(self, review_id: int) -> list[LowConfidenceRow]:
+        """归并到某条待审问题的全部原始提问（审核详情页要逐条展示）。"""
+        return await _run(self._list_for_review, review_id)
+
     def _has_reason_fragment(self, fragment: str) -> bool:
         found = self._session.scalar(
             select(LowConfidenceQuestion.id).where(
