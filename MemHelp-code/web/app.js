@@ -160,9 +160,12 @@
   const TOOL_LABELS = {
     query_order: '查询订单',
     query_product: '查询商品',
-    query_logistics: '查询物流',
     query_faq: '检索常见问题',
     create_ticket: '创建工单',
+    track_shipment: '查询物流轨迹',
+    check_warranty: '查询保修状态',
+    check_return_progress: '查询退货进度',
+    estimate_delivery: '预估送达时间',
   };
 
   const TOOL_ICONS = {
@@ -767,7 +770,10 @@
             : '请先选择要办理的订单；刚才的消息没有被处理。'),
           true,
         );
-      } else if (isTicket) {
+      }
+      // 提示归提示，卡片仍要画出来：用户被丢掉一条消息后，唯一能做的
+      // 就是点这张卡，不给他卡片等于把会话卡死。
+      if (isTicket) {
         if (!ctx.bot.flow.querySelector('.ticket-preview')) {
           renderTicketPreview(ctx.bot, data, ctx);
         }
@@ -1290,6 +1296,45 @@
     } catch {
       /* 回读失败不该挡住聊天：静默退化成空白页，用户发一句就恢复正常 */
     }
+    await restorePending();
+  }
+
+  /* 刷新时 SSE 早已断开，那张「订单选择/工单确认」卡片不会自己回来。
+     这里问一次图停在哪，把同一帧重新走一遍 applyFrame —— 渲染逻辑只有一份。 */
+  async function restorePending() {
+    try {
+      const resp = await fetch(`/api/chat/sessions/${sessionId}/pending`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const pending = data && data.pending;
+      if (!pending || !pending.kind) return;
+      const bot = addRow('bot');
+      applyFrame({ event: 'awaiting_input', data: pending }, restoredCtx(bot));
+    } catch {
+      /* 恢复失败只影响这张卡；用户发一句新消息仍会拿到 awaiting_input */
+    }
+  }
+
+  /* 恢复卡片只需要 applyFrame 用到的那几个钩子：token 帧写气泡、
+     done 帧收尾。没有用户输入，所以 queuePaint 直接重画整段文本。 */
+  function restoredCtx(bot) {
+    let acc = '';
+    return {
+      bot,
+      userText: '',
+      awaiting: false,
+      get acc() { return acc; },
+      set acc(v) { acc = v; },
+      queuePaint() {
+        bot.body.innerHTML = renderMarkdown(acc);
+        scrollToBottom();
+      },
+      showStatus() {},
+      finish() { scrollToBottom(true); },
+      fail(data) {
+        addNotice((data && data.message) || '处理失败，请重试。', true);
+      },
+    };
   }
 
   // ------------------------------------------------------------------ 发送

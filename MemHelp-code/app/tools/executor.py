@@ -538,6 +538,14 @@ async def _finish(
     error: str | None,
 ) -> ToolResult:
     """写一条审计后把结果原样交回。**审计失败只 warning，绝不改结果。**"""
+    conversation = conversation_id
+    if conversation is None and session_id:
+        # Agent 只在首轮拿不到 conversation_id（会话还没落库）；这里按
+        # session_id 反查一次，让审计能挂上会话。查不到就算了，不升级错误。
+        try:
+            conversation = await repositories.conversations.find_id(session_id)
+        except Exception:  # noqa: BLE001 - 审计关联失败不影响结果
+            conversation = None
     summary = None
     if result.ok:
         try:
@@ -550,7 +558,7 @@ async def _finish(
         status=status,
         mcp_server=result.mcp_server,
         tool_call_id=tool_call_id or result.tool_call_id,
-        conversation_id=conversation_id,
+        conversation_id=conversation,
         args=result.args,
         result_summary=summary,
         error=(redact(error)[:512] if error else None),

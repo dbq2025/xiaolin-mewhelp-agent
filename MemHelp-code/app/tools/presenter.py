@@ -18,24 +18,27 @@ from app.tools.contract import ToolSpec
 
 ORDER_STATUS_TEXT: dict[str, str] = {
     "PENDING_PAYMENT": "待付款",
-    "PAID": "已付款",
+    "PAID": "待发货",
     "SHIPPED": "已发货",
+    "DELIVERED": "已签收",
     "COMPLETED": "已完成",
     "CANCELLED": "已取消",
 }
 
 LOGISTICS_STATUS_TEXT: dict[str, str] = {
+    "CREATED": "已揽收",
     "PICKED_UP": "已揽收",
     "IN_TRANSIT": "运输中",
     "OUT_FOR_DELIVERY": "派送中",
     "DELIVERED": "已签收",
+    "EXCEPTION": "异常",
 }
 
 RETURN_STATUS_TEXT: dict[str, str] = {
-    "REQUESTED": "已申请",
+    "APPLIED": "已申请",
+    "REVIEWING": "审核中",
     "APPROVED": "已通过",
-    "SHIPPED_BACK": "已寄回",
-    "RECEIVED": "已收货",
+    "REFUNDING": "退款中",
     "REFUNDED": "已退款",
     "REJECTED": "已驳回",
 }

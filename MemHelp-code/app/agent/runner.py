@@ -110,6 +110,19 @@ def _awaiting_payload(
     return payload
 
 
+def pending_payload(snapshot: Any) -> dict[str, Any] | None:
+    """把「图正停在哪」压成前端可直接渲染的 awaiting 载荷。
+
+    刷新页面后前端没有 SSE 上下文，只能靠这个接口把预览卡片重新画出来；
+    没有暂停时返回 ``None``。
+    """
+    interrupt_value = pending_interrupt(snapshot)
+    if interrupt_value is None:
+        return None
+    values = dict(getattr(snapshot, "values", {}) or {})
+    return _awaiting_payload(values, interrupt_value)
+
+
 def done_payload(values: dict[str, Any], *, session_id: str) -> dict[str, Any]:
     """把最终 state 压成 SSE `done` / 非流式响应用的摘要。"""
     context = values.get("context") or {}
@@ -230,6 +243,7 @@ async def astream_turn(
         retriever=retriever,
         settings=settings,
         summarizer=summarizer,
+        mcp_provider=mcp_provider,
     )
 
     # 同一 thread 还在等订单选择时，不要把新消息塞进暂停中的图：
@@ -301,6 +315,7 @@ async def astream_resume(
         retriever=retriever,
         settings=settings,
         summarizer=summarizer,
+        mcp_provider=mcp_provider,
     )
     resumed = Command(
         resume=resume_value if resume_value is not None else {"order_id": order_id}

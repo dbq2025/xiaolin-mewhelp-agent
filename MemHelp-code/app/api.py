@@ -44,6 +44,7 @@ from app.agent.runner import (
     astream_turn,
     complete_turn,
     pending_interrupt,
+    pending_payload,
 )
 from app.agent.summarizer import ContextSummarizer
 from app.config import PROJECT_ROOT, Settings, get_settings
@@ -1366,6 +1367,21 @@ def create_app(
         而且重启服务后历史不会凭空消失。
         """
         return await _db_session_messages_payload(session_id, repositories_)
+
+    @app.get("/api/chat/sessions/{session_id}/pending")
+    async def session_pending(
+        session_id: str,
+        graph_: Any = Depends(get_agent_graph),
+    ) -> dict[str, Any]:
+        """刷新页面后恢复「等待选择/等待确认」的卡片。
+
+        SSE 流断开后前端拿不到那次 ``awaiting_input`` 帧，只能主动问图停在哪；
+        没有暂停时返回 ``{"pending": null}``。
+        """
+        snapshot = await graph_.aget_state(
+            {"configurable": {"thread_id": session_id}}
+        )
+        return {"pending": pending_payload(snapshot)}
 
     # -- ch07：会话侧栏（两个只读接口）------------------------------------
 

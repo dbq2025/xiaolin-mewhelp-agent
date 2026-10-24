@@ -47,6 +47,7 @@ from app.agent.tools import agent_tools
 from app.chat import _message_text
 from app.chat_tools import fallback_answer
 from app.knowledge.citations import Evidence
+from app.tools.audit import AuditEntry, write_audit
 from app.tools.executor import ToolResult, execute_tool, to_tool_message_content
 from app.tools.registry import TOOL_LABELS, build_registry
 from app.tools.validation import validate_against_schema
@@ -54,6 +55,32 @@ from app.tools.validation import validate_against_schema
 logger = logging.getLogger(__name__)
 
 __all__ = ["AgentOutcome", "run_react_agent"]
+
+
+async def _audit_blocked(
+    repositories: Any,
+    result: ToolResult,
+    *,
+    call_id: str,
+    conversation_id: int | None,
+) -> None:
+    """把被 ReAct 自己拦下的调用也补一条审计（成功/失败之外的分支）。"""
+    await write_audit(
+        repositories,
+        AuditEntry(
+            tool_name=result.tool,
+            tool_source=result.source,
+            status=result.status,
+            mcp_server=result.mcp_server,
+            tool_call_id=call_id or None,
+            conversation_id=conversation_id,
+            args=result.args,
+            result_summary=None,
+            error=result.error,
+            retry_count=max(0, result.attempts - 1),
+            duration_ms=result.duration_ms,
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -165,11 +192,13 @@ async def run_react_agent(
     emit: Callable[[dict[str, Any]], None] | None = None,
     executor: Callable[..., Any] | None = None,
     registry: Any | None = None,
+    conversation_id: int | None = None,
 ) -> AgentOutcome:
     """跑一轮 ReAct，返回可落库的完整产物。
 
     ``registry`` 由调用方（图节点）传入已刷新 MCP 清单的工具表；不传时内部
     构造一张只含内置工具的表，保持旧调用点与测试可用。
+    ``conversation_id`` 只用于审计关联；拿不到就留空，不阻断执行。
     """
     record_actions: list[str] = []
     if registry is None:
@@ -277,6 +306,12 @@ async def run_react_agent(
                 )
                 last_tool_result = result
                 tool_traces.append(result.summary())
+                await _audit_blocked(
+                    repositories,
+                    result,
+                    call_id=call_id,
+                    conversation_id=conversation_id,
+                )
                 content = to_tool_message_content(result)
                 tool_records.append(
                     {
@@ -310,8 +345,15 @@ async def run_react_agent(
                 attempts=0,
                 duration_ms=0,
                 started_at=datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                status="失败",
             )
             tool_traces.append(result.summary())
+            await _audit_blocked(
+                repositories,
+                result,
+                call_id=call_id,
+                conversation_id=conversation_id,
+            )
             content = to_tool_message_content(result)
             tool_records.append(
                 {
@@ -334,6 +376,7 @@ async def run_react_agent(
                 # 测试注入的假执行器签名更窄，不硬塞这两个参数。
                 call_kwargs["registry"] = registry
                 call_kwargs["tool_call_id"] = call_id
+                call_kwargs["conversation_id"] = conversation_id
             result = await run_tool(name, args, **call_kwargs)  # type: ignore[arg-type]
             last_tool_result = result
             tool_traces.append(result.summary())

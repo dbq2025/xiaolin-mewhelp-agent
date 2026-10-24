@@ -192,6 +192,44 @@ async def demo_mcp() -> None:
             timeout=5.0,
         )
         print(f"{name} -> status={result.status} data={result.data}")
+
+    # 光直接调 execute_tool 只能证明「连得上」；验收 2 要的是**Agent 通过 MCP
+    # 回答**。这里把 provider 挂到 app 上，走真实的 SSE 聊天链路（runner →
+    # 图 → registry 刷新 → 模型调工具），这正是 review C1 抓到的断点。
+    _hr("验收 2（端到端）：Agent 通过 MCP 查到物流后回答")
+    from fastapi.testclient import TestClient
+
+    from app import main as app_main
+
+    model = ScriptedChatModel()
+    app = app_main.create_app(
+        model=model,
+        settings=settings,
+        repositories=repositories,
+        db_ping=lambda: True,
+        retriever=EmptyRetriever(),
+        rag_warmup=False,
+        checkpointer=memory_checkpointer(),
+    )
+    app.state.mcp_provider = provider
+    model.script.extend(
+        [
+            _intent(),
+            tool_turn("track_shipment", {"order_id": "1001"}, call_id="call_mcp"),
+            text_turn("已查到：订单 1001 的包裹正在运输中，预计明天送达。"),
+        ]
+    )
+    with TestClient(app) as client:
+        with client.stream(
+            "POST",
+            "/api/chat/completions",
+            json={"session_id": "demo-mcp-agent", "message": "订单 1001 的物流到哪了？"},
+        ) as resp:
+            text = "".join(resp.iter_text())
+    for name, data in _frames(text):
+        if name == "tool_result":
+            print(f"tool_result: {json.dumps(data.get('tool'), ensure_ascii=False)}")
+    print(f"Agent 回答：{_tokens(text)}")
     await _print_audit(repositories)
 
 

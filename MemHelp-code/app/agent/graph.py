@@ -920,6 +920,7 @@ async def _run_agent_node(
         max_retries=int(getattr(settings, "tool_max_retries", 1)),
         emit=lambda payload: _emit(_stream_writer(), payload),
         registry=await _turn_registry(deps, repositories, retriever),
+        conversation_id=conversation_id,
     )
 
     payload: dict[str, Any] = {
@@ -991,6 +992,7 @@ async def _ticket_await_confirm(
         "description": str(args.get("description") or ""),
     }
 
+    started = time.monotonic()
     decision = interrupt(
         {
             "kind": "ticket_preview",
@@ -999,6 +1001,9 @@ async def _ticket_await_confirm(
             "preview": preview,
         }
     )
+    # 用户在预览卡片上停留的时间：取消路径也要进审计，否则「为什么没建」
+    # 只能看到一条没有耗时的拒绝记录。
+    waited_ms = int((time.monotonic() - started) * 1000)
     confirmed = bool(decision.get("confirmed")) if isinstance(decision, dict) else False
     trace = _trace(state, "ticket_await_confirm")
     pending_messages = list(state.get("pending_messages") or [])
@@ -1022,6 +1027,7 @@ async def _ticket_await_confirm(
                 conversation_id=conversation_id,
                 args=args,
                 error="用户取消建单，未执行",
+                duration_ms=waited_ms,
             ),
         )
         answer = "已取消建单，没有创建工单。"
@@ -1208,7 +1214,15 @@ def build_agent_graph(*, checkpointer: BaseCheckpointSaver | None = None):
     )
     builder.add_edge("refund_expand_queries", "refund_retrieve_policies")
     builder.add_edge("refund_retrieve_policies", "refund_agent")
-    builder.add_edge("refund_agent", "log_turn")
+    builder.add_conditional_edges(
+        "refund_agent",
+        lambda state: (
+            "ticket_await_confirm"
+            if state.get("pending_ticket_call")
+            else "log_turn"
+        ),
+        {"ticket_await_confirm": "ticket_await_confirm", "log_turn": "log_turn"},
+    )
     builder.add_conditional_edges(
         "agent",
         lambda state: (

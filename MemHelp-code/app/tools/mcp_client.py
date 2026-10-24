@@ -140,20 +140,35 @@ class McpToolProvider:
         for spec in self._cache:
             previous_by_server.setdefault(spec.mcp_server or "", []).append(spec)
 
-        collected: list[ToolSpec] = []
-        succeeded = 0
+        servers: list[str] = []
         for server in sorted(self._connections):
             if server not in self._read_only_servers:
                 logger.warning(
                     "ch08 MCP Server %s 不在只读白名单，整站拒绝接入", server
                 )
                 continue
+            servers.append(server)
+
+        async def _discover_one(
+            server: str,
+        ) -> tuple[str, list[Any] | None, Exception | None]:
             try:
                 tools = await asyncio.wait_for(
                     client.get_tools(server_name=server),
-                    timeout=max(self._timeout * 2, 1.0),
+                    timeout=max(self._timeout, 0.5),
                 )
+                return server, list(tools or ()), None
             except Exception as exc:  # noqa: BLE001 - 单个 Server 失败不影响其它
+                return server, None, exc
+
+        # 并发发现：串行时两个 3 秒的 Server 会把首 token 拖到十几秒；
+        # 并发后墙钟只受最慢的一个 Server 约束，失败仍是逐 Server 隔离的。
+        results = await asyncio.gather(*(_discover_one(server) for server in servers))
+
+        collected: list[ToolSpec] = []
+        succeeded = 0
+        for server, tools, exc in results:
+            if exc is not None:
                 logger.warning("ch08 MCP Server %s 发现失败，沿用旧清单：%s", server, exc)
                 collected.extend(previous_by_server.get(server, ()))
                 continue

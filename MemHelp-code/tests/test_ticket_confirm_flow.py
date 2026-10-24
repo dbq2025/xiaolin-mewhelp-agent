@@ -132,6 +132,17 @@ async def test_confirm_creates_ticket_with_number(
     assert snapshot.next == ()
 
 
+def test_refund_mode_can_also_pause_for_ticket_preview() -> None:
+    """退款模式的工具集里也有 create_ticket，就必须有暂停边。
+
+    review C2：ch05 的过滤被去掉后，``refund_agent`` 若仍只有 ``→log_turn``，
+    模型在退款流程里发起建单会留下一条没有 ToolMessage 的孤儿调用。
+    """
+    graph = build_agent_graph(checkpointer=memory_checkpointer())
+    edges = {(edge.source, edge.target) for edge in graph.get_graph().edges}
+    assert ("refund_agent", "ticket_await_confirm") in edges
+
+
 async def test_cancel_audits_permission_denied(
     test_settings, fake_repositories, sqlite_session
 ) -> None:

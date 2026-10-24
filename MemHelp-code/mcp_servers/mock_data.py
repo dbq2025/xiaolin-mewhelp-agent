@@ -14,6 +14,7 @@ from datetime import date, timedelta
 
 #: 物流轨迹的状态码；与 ``app/tools/presenter.py`` 的物流枚举一致。
 LOGISTICS_STATUSES: tuple[str, ...] = (
+    "CREATED",
     "PICKED_UP",
     "IN_TRANSIT",
     "OUT_FOR_DELIVERY",
@@ -22,10 +23,10 @@ LOGISTICS_STATUSES: tuple[str, ...] = (
 
 #: 退货进度状态码；与 presenter 的退货枚举一致。
 RETURN_STATUSES: tuple[str, ...] = (
-    "REQUESTED",
+    "APPLIED",
+    "REVIEWING",
     "APPROVED",
-    "SHIPPED_BACK",
-    "RECEIVED",
+    "REFUNDING",
     "REFUNDED",
     "REJECTED",
 )
@@ -56,15 +57,20 @@ def shipment_for(order_id: str) -> dict:
     carrier = rng.choice(CARRIERS)
     base = date(2026, 10, 20)
     steps = [
-        ("已揽收", "包裹已由快递员揽收"),
-        ("运输中", "包裹已到达转运中心"),
-        ("派送中", "快递员正在派送"),
-        ("已签收", "包裹已签收，感谢使用"),
+        ("已揽收", "杭州转运中心", "包裹已由快递员揽收"),
+        ("运输中", "上海转运中心", "包裹已到达转运中心"),
+        ("派送中", "上海市浦东新区", "快递员正在派送"),
+        ("已签收", "上海市浦东新区", "包裹已签收，感谢使用"),
     ]
     reached = LOGISTICS_STATUSES.index(status) + 1
     nodes = [
-        {"time": f"{_day(base, index)} 09:{rng.randint(10, 59)}", "text": text}
-        for index, (_, text) in enumerate(steps[:reached])
+        {
+            "time": f"{_day(base, index)} 09:{rng.randint(10, 59)}",
+            "location": location,
+            # CREATED 只是建单，第 0 个节点还没真正揽收。
+            "description": description if index else "物流单已创建，等待揽收",
+        }
+        for index, (_, location, description) in enumerate(steps[:reached])
     ]
     return {
         "order_id": order_id,
@@ -97,12 +103,11 @@ def return_progress_for(order_id: str) -> dict:
     rng = seed_for(order_id)
     status = rng.choice(RETURN_STATUSES)
     reached = RETURN_STATUSES.index(status) + 1
-    titles = ["已申请", "已通过审核", "已寄回", "商家已收货", "已退款", "已驳回"]
+    titles = ["已申请", "审核中", "已通过", "退款中", "已退款", "已驳回"]
     base = date(2026, 10, 18)
     steps = [
         {"title": title, "done": index < reached, "time": _day(base, index)}
         for index, title in enumerate(titles)
-        if index < 5
     ]
     return {
         "order_id": order_id,
