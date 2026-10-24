@@ -4,7 +4,7 @@
 
 **Goal:** 给客服系统接上 Langfuse 全链路 trace、按意图统计 token，并把三类答不上的问题经标准化/查重送入审核队列，审核通过后回写知识库；同时把 ch04 评估集跑成可比较的趋势。
 
-**Architecture:** 观测层用 Langfuse v4 + SDK 5（编译期挂 CallbackHandler + 手动根 span/tags）；置信度闸从单阈值升级为三特征逻辑回归，模型由 ch04 评估集留一法校准；入池与飞轮同步执行（标准化 → LLM 查重 → review_queue）；审核通过复用 ch03 的 `upsert_chunk` + 按 id 向量化；评估在后台子进程跑并写 `eval_runs`，前端是无构建的原生页面。
+**Architecture:** 观测层用 Langfuse Cloud + SDK 5（编译期挂 CallbackHandler + 手动根 span/tags）；置信度闸从单阈值升级为三特征逻辑回归，模型由 ch04 评估集留一法校准；入池与飞轮同步执行（标准化 → LLM 查重 → review_queue）；审核通过复用 ch03 的 `upsert_chunk` + 按 id 向量化；评估在后台子进程跑并写 `eval_runs`，前端是无构建的原生页面。
 
 **Tech Stack:** Python 3.12 / FastAPI / SQLAlchemy / LangGraph / Langfuse 5.0.4 / MySQL 8.4 / Milvus / 原生 HTML+JS。
 
@@ -744,7 +744,6 @@ git commit -m "feat(ch09): 评估趋势页面"
 
 **Files:**
 - Create: `scripts/demo_ch09.py`
-- Delete: `scripts/spike_langfuse.py`、`scripts/spike_langfuse_tags.py`、`scripts/spike_graph_config.py`、`scripts/spike_graph_trace.py`
 - Modify: `dev-notes/ch09.md`（收尾阶段）
 - Modify: `.env.example`（ch09 配置）
 
@@ -773,7 +772,7 @@ $env:UV_CACHE_DIR="F:\DeepSeek-Harness\memhelp-code-myself\.uv-cache"
 
 Run: `uv run pytest -q -p no:cacheprovider`
 Expected: 全绿（若既有用例因签名变化失败，逐个修到绿，不删断言）。
-删除四个 spike 脚本；确认 `dev-notes/ch09.md` 每个阶段都有记录。
+确认 `dev-notes/ch09.md` 每个阶段都有记录。
 
 - [ ] **Step 4: 写验收结论与交付说明**
 

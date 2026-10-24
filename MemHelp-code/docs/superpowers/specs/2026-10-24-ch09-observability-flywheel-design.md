@@ -1,7 +1,7 @@
 # 第九章设计 · 可观测性与数据飞轮（Langfuse / 证据置信度 / 问题池 / 审核队列 / 评估趋势）
 
 - 日期：2026-10-24
-- 状态：待用户评审
+- 状态：已批准（2026-10-24）；Langfuse 部署方式按用户 m00504 改为 Cloud，本地容器已清理
 - 关联：`dev-notes/ch09.md`、`sql/ch09-ddl.sql`、`docs/superpowers/plans/2026-10-24-ch09-observability-flywheel-plan.md`（待写）
 - 前置章节：ch03（知识库落库）、ch04（评估集 / 低置信度池）、ch05（图执行器 / 置信度闸）、ch06（意图路由）、ch08（工具执行引擎）
 
@@ -11,7 +11,7 @@
 
 ### 1.1 目标
 
-1. **Langfuse 全链路**：自部署 Langfuse；每条聊天请求一棵完整 trace 树，能点开看到每个节点的 prompt、模型调用、工具调用、检索结果、token 消耗与耗时。
+1. **Langfuse 全链路**：使用 Langfuse Cloud（日本区，凭据在 `.env`，不入库）；每条聊天请求一棵完整 trace 树，能点开看到每个节点的 prompt、模型调用、工具调用、检索结果、token 消耗与耗时。
 2. **按意图看成本**：意图识别结果写进 trace，能按意图维度汇总 token / 成本，回答「钱花在哪类问题上」。
 3. **三个入口统一入池**：检索证据置信度低、生成前自评不够、用户 👎，全部写 `low_confidence_questions`，各自标记 `source`；入池时把当轮召回片段（Top 条原文 + 得分）快照进新列 `retrieved_chunks`。
 4. **正式证据置信度闸**：用 `evidence_confidence`（精排 Top1 分、有效证据数、Top1-Top2 分差）替代 ch05 的最简阈值版；阈值在 ch04 评估集上留一法校准，不拍脑袋；闸的位置仍在知识检索之后、Agent 之前。
@@ -33,7 +33,7 @@
 
 | # | 决策 | 选择 | 理由 / 代价 |
 |---|---|---|---|
-| D1 | Langfuse 部署 | `MemHelp-code/deploy/langfuse/docker-compose.yml`，镜像 `langfuse/langfuse:4` + worker，Postgres/ClickHouse/Redis/MinIO 全自部署 | 已实际拉起（v4.69.0，`127.0.0.1:3000`）；数据不出本机 |
+| D1 | Langfuse 部署 | **Langfuse Cloud**（`https://jp.cloud.langfuse.com`），`LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_BASE_URL` 写在 `.env`（不入库）；用户 m00504 决定不再自部署 | 已用云端凭据实测 `GET /api/public/projects` 200（项目 `My Project`）；本地 Docker 容器/镜像/卷已删除，仓库不再保留 `deploy/langfuse/` |
 | D2 | SDK 版本 | `langfuse==5.0.4`（已 `uv add`） | 实测与 server 4.69 兼容；v5 是 OTel 架构，`CallbackHandler` 来自 `langfuse.langchain` |
 | D3 | 回调挂载点 | `builder.compile(...).with_config({"callbacks": [handler]})`，**只挂一次** | 探针证明返回仍是 `CompiledStateGraph`，`aget_state` / `checkpointer` / `stream_mode="custom"` 全部保留，无需代理对象 |
 | D4 | trace 根节点 | 在 `runner.astream_turn` 外层开一个 `chat-turn` 根 span，结束时补 `intent / route / gate / token_usage / stop_reason` | 意图在图中途才产生；根 span 一直活到本轮结束才能回写元数据 |
@@ -163,7 +163,7 @@ ORM 需与 DDL 对齐；SQLite 测试库用 `Base.metadata.create_all` 建新表
 LANGFUSE_ENABLED=true
 LANGFUSE_PUBLIC_KEY=pk-lf-...
 LANGFUSE_SECRET_KEY=sk-lf-...
-LANGFUSE_BASE_URL=http://127.0.0.1:3000
+LANGFUSE_BASE_URL=https://jp.cloud.langfuse.com
 LANGFUSE_ENVIRONMENT=dev
 LANGFUSE_FLUSH_AT=20
 LANGFUSE_FLUSH_INTERVAL=3
@@ -470,7 +470,7 @@ async def run_evaluation(*, trigger: Literal["定时", "手动"], limit: int | N
 
 | # | 验收标准 | 验证方式 |
 |---|---|---|
-| 1 | Langfuse 任意请求完整链路 | 打开 `http://127.0.0.1:3000` → 选一条 chat-turn → 看到根 span / 节点 / generation（prompt+usage）/ 工具 / 检索 |
+| 1 | Langfuse 任意请求完整链路 | 打开 `https://jp.cloud.langfuse.com` → 选一条 chat-turn → 看到根 span / 节点 / generation（prompt+usage）/ 工具 / 检索 |
 | 2 | 知识库没有的问题 → 兜底 + 待审 + 详情含原话与片段 | 演示脚本/手工提问 → 审核页详情 |
 | 3 | 审核通过后再问能答对 | 审核页点通过 → 同问题复问 → 回答且引用新块 |
 | 4 | 👎 落池 → 标准化查重 → 待审 | 聊天页点 👎 → `GET /api/review-queue` 出现 |
@@ -493,7 +493,7 @@ async def run_evaluation(*, trigger: Literal["定时", "手动"], limit: int | N
 ## 14. 交付物
 
 - 本 spec + plan + `dev-notes/ch09.md`（分阶段留痕）。
-- Langfuse 部署文件与启动命令（`deploy/langfuse/`）。
+- Langfuse Cloud 接入说明：`.env` 三个变量（已配置、已实测），仓库不含任何密钥或自部署文件。
 - 代码与测试；`sql/ch09-ddl.sql` 已应用。
 - 校准报告 `dev-notes/ch09-confidence-calibration.md`、模型 artifact。
 - 演示命令：起服务、问未知问题、审核通过、复问、👎、意图成本、评估两轮。
