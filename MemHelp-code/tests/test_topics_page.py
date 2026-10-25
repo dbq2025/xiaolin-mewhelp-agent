@@ -45,3 +45,38 @@ def test_topics_page_renders_bars_from_api(test_settings, sqlite_session):
     assert len(body["all_labels"]) == 17
     counts = {row["label"]: row["count"] for row in body["by_label"]}
     assert counts == {"退换货": 1, "尺码": 1}
+
+
+def test_admin_acceptance_and_question_pages_are_served(test_settings):
+    """后台首页、验收四页、类目问题列表都能挂出来，且引用的样式/脚本可达。"""
+    pages = {
+        "/admin/": "/acceptance/style.css",
+        "/acceptance/": "/acceptance/overview.js",
+        "/acceptance/eval/": "/acceptance/eval/eval.js",
+        "/acceptance/data/": "/acceptance/data/data.js",
+        "/acceptance/errors/": "/acceptance/errors/errors.js",
+        "/topics/questions/": "/topics/questions/questions.js",
+    }
+    with _client(test_settings) as client:
+        for page, asset in pages.items():
+            response = client.get(page)
+            assert response.status_code == 200, page
+            assert asset in response.text, page
+            assert client.get(asset).status_code == 200, asset
+
+
+def test_acceptance_api_reads_report_files(test_settings):
+    """验收接口读的是仓库里的报告快照，字段足够页面渲染。"""
+    with _client(test_settings) as client:
+        data = client.get("/api/acceptance/data").json()
+        assert len(data["taxonomy"]) == 17
+        assert data["splits"]["test"] > 0
+
+        errors = client.get("/api/acceptance/errors").json()
+        assert set(errors) >= {"run_id", "count", "rows"}
+
+        summary = client.get("/api/acceptance/summary")
+        if summary.status_code == 200:
+            body = summary.json()
+            assert set(body) >= {"run_id", "overall", "dataset", "worst_classes"}
+            assert len(body["worst_classes"]) <= 5

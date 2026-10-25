@@ -110,6 +110,7 @@ from app.schemas import (
     TicketConfirmRequest,
 )
 from app.sse import SSE_MEDIA_TYPE, sse_frame
+from app.acceptance import register_acceptance_routes
 from app.topics.routes import register_topic_routes
 from app.tools.executor import execute_tool
 from app.tools.knowledge import AnswerContextLike
@@ -2299,6 +2300,9 @@ def create_app(
 
     register_topic_routes(app, repositories_dependency=get_repositories)
 
+    # ch10 验收页：只读接口，数据来自 reports/ 与 data/ 的文件快照。
+    register_acceptance_routes(app)
+
     # -- 聊天页面（静态资源，无构建步骤）----------------------------------
 
     web_dir = PROJECT_ROOT / "web"
@@ -2376,6 +2380,43 @@ def create_app(
                 "/topics",
                 StaticFiles(directory=topics_dir, html=True),
                 name="topics",
+            )
+
+        # 验收：总览 / 评测详情 / 数据产物 / 错例复核，四页共用一份数据接口。
+        acceptance_dir = web_dir / "acceptance"
+        if acceptance_dir.is_dir():
+            reports_dir = PROJECT_ROOT / "reports" / "topics"
+            if reports_dir.is_dir():
+                # 必须在 /acceptance 之前挂：把评测生成的 confusion.html 原样给出去，
+                # 否则 /acceptance/reports/... 会被上面的 StaticFiles 截走变 404。
+                app.mount(
+                    "/acceptance/reports",
+                    StaticFiles(directory=reports_dir, html=True),
+                    name="acceptance-reports",
+                )
+
+            @app.get("/acceptance", include_in_schema=False)
+            async def acceptance_redirect() -> RedirectResponse:
+                return RedirectResponse(url="/acceptance/")
+
+            app.mount(
+                "/acceptance",
+                StaticFiles(directory=acceptance_dir, html=True),
+                name="acceptance",
+            )
+
+        # 后台首页：把各章的后台页收在一处，省得记地址。
+        admin_dir = web_dir / "admin"
+        if admin_dir.is_dir():
+
+            @app.get("/admin", include_in_schema=False)
+            async def admin_redirect() -> RedirectResponse:
+                return RedirectResponse(url="/admin/")
+
+            app.mount(
+                "/admin",
+                StaticFiles(directory=admin_dir, html=True),
+                name="admin",
             )
 
         @app.get("/", include_in_schema=False)

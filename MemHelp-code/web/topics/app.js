@@ -77,8 +77,10 @@ function renderChart(labels, counts) {
     if (count === 0) row.classList.add("zero");
     row.title = `${name}：${fmtInt(count)} 条`;
 
-    const label = document.createElement("div");
+    const label = document.createElement("a");
     label.className = "row-label";
+    label.href = `/topics/questions/?label=${encodeURIComponent(name)}`;
+    label.title = `看「${name}」下的具体问题`;
     label.textContent = name;
 
     const track = document.createElement("div");

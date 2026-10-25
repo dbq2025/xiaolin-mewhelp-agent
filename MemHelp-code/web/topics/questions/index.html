@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>类目问题列表 · MewHelp</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%230f766e'/%3E%3Ctext x='16' y='22' font-size='14' text-anchor='middle' fill='white'%3E%E9%A2%98%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/acceptance/style.css">
+</head>
+<body>
+
+<div class="app">
+  <header class="topbar">
+    <a class="brand" href="/topics/">
+      <div class="avatar-bot" aria-hidden="true">题</div>
+      <div class="brand-text">
+        <div class="brand-name">MewHelp · 类目问题列表</div>
+        <div class="brand-sub" id="sub">读取中…</div>
+      </div>
+    </a>
+
+    <nav class="nav" aria-label="主导航">
+      <a href="/topics/">主题</a>
+      <a href="/topics/questions/" class="active" aria-current="page">问题列表</a>
+      <a href="/acceptance/">验收</a>
+      <a href="/admin/">后台</a>
+    </nav>
+  </header>
+
+  <main class="page">
+
+    <section class="panel">
+      <div class="panel-head">
+        <h1 id="title">全部已归类问题</h1>
+        <span class="panel-meta" id="count-meta"></span>
+      </div>
+      <p class="panel-note">
+        多标签句子会把每个命中的类目都列出来；点任意标签可跳到那一类的列表。
+      </p>
+
+      <div id="filters" class="filters" aria-label="类目筛选"></div>
+
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr><th class="num">#</th><th>问题</th><th>标签</th><th>来源</th><th>归类时间</th></tr>
+          </thead>
+          <tbody id="question-rows">
+            <tr><td colspan="5" class="loading">读取中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <div class="empty" id="empty" hidden>
+      <div class="empty-icon" aria-hidden="true">□</div>
+      <h2 id="empty-title">这一类还没有问题</h2>
+      <p>要么还没跑批，要么这一类确实没攒到。回 <a class="link" href="/topics/">主题分布</a> 跑一批再看。</p>
+    </div>
+  </main>
+</div>
+
+<script src="/topics/questions/questions.js"></script>
+</body>
+</html>

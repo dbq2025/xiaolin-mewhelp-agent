@@ -207,7 +207,11 @@ button, a { font: inherit; }
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  text-decoration: none;
 }
+
+/* 类目名是指向「这一类有哪些问题」的链接 */
+a.row-label:hover { color: var(--brand); text-decoration: underline; }
 
 .bar-track {
   height: 18px;

@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>评测详情 · MewHelp</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%232563eb'/%3E%3Ctext x='16' y='22' font-size='14' text-anchor='middle' fill='white'%3EE%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/acceptance/style.css">
+</head>
+<body>
+
+<div class="app">
+  <header class="topbar">
+    <a class="brand" href="/acceptance/">
+      <div class="avatar-bot" aria-hidden="true">评</div>
+      <div class="brand-text">
+        <div class="brand-name">MewHelp · 评测详情</div>
+        <div class="brand-sub" id="sub">读取中…</div>
+      </div>
+    </a>
+
+    <nav class="nav" aria-label="主导航">
+      <a href="/acceptance/">总览</a>
+      <a href="/acceptance/eval/" class="active" aria-current="page">评测</a>
+      <a href="/acceptance/data/">数据</a>
+      <a href="/acceptance/errors/">错例</a>
+    </nav>
+  </header>
+
+  <main class="page">
+
+    <section class="stats three">
+      <div class="stat">
+        <div class="stat-label">macro-F1</div>
+        <div class="stat-value" id="stat-macro">—</div>
+        <div class="stat-hint">各类目等权，少数类不会被淹没</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">micro-F1</div>
+        <div class="stat-value" id="stat-micro">—</div>
+        <div class="stat-hint">按样本量加权，接近整体准确率</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Hamming loss</div>
+        <div class="stat-value" id="stat-hamming">—</div>
+        <div class="stat-hint">17 个位置里判错的占比，越低越好</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h1>每类目指标</h1>
+        <span class="panel-meta" id="eval-meta"></span>
+      </div>
+      <p class="panel-note">
+        阈值是在验证集上逐类扫出来的，测试集只报数、不参与调参。
+        support &lt; 10 的类目波动大，标了「样本不足」。
+      </p>
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>类目</th><th class="num">精确率</th><th class="num">召回率</th>
+              <th class="bar-cell">F1</th><th class="num">support</th>
+              <th class="num">TP</th><th class="num">FP</th><th class="num">FN</th>
+            </tr>
+          </thead>
+          <tbody id="class-rows">
+            <tr><td colspan="8" class="loading">读取中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h1>最易归错的类对</h1>
+        <span class="panel-meta">gold 有 A、预测成 B（不算漏标）</span>
+      </div>
+      <div class="table-wrap">
+        <table class="table">
+          <thead><tr><th>gold</th><th>被预测成</th><th class="num">次数</th></tr></thead>
+          <tbody id="pair-rows"></tbody>
+        </table>
+      </div>
+      <p class="panel-note" id="pair-empty" hidden>没有类对混淆：错的全是漏标或多标。这是好事。</p>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h1>混淆矩阵</h1>
+        <span class="panel-meta">17 × 17 热力色块，颜色越深越多</span>
+      </div>
+      <p class="panel-note">
+        完整矩阵是一个独立静态页（离线可看、无外部依赖）：
+        <a class="link" id="confusion-link" href="/acceptance/reports/" target="_blank" rel="noopener">打开混淆矩阵</a>
+      </p>
+    </section>
+
+    <div class="empty" id="empty" hidden>
+      <div class="empty-icon" aria-hidden="true">□</div>
+      <h2>还没有评测报告</h2>
+      <p>先跑 scripts/eval_topics.py。</p>
+    </div>
+  </main>
+</div>
+
+<script src="/acceptance/eval/eval.js"></script>
+</body>
+</html>

@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>错例复核 · MewHelp</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%23b42318'/%3E%3Ctext x='16' y='22' font-size='14' text-anchor='middle' fill='white'%3EX%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/acceptance/style.css">
+</head>
+<body>
+
+<div class="app">
+  <header class="topbar">
+    <a class="brand" href="/acceptance/">
+      <div class="avatar-bot" aria-hidden="true">错</div>
+      <div class="brand-text">
+        <div class="brand-name">MewHelp · 错例复核</div>
+        <div class="brand-sub" id="sub">读取中…</div>
+      </div>
+    </a>
+
+    <nav class="nav" aria-label="主导航">
+      <a href="/acceptance/">总览</a>
+      <a href="/acceptance/eval/">评测</a>
+      <a href="/acceptance/data/">数据</a>
+      <a href="/acceptance/errors/" class="active" aria-current="page">错例</a>
+    </nav>
+  </header>
+
+  <main class="page">
+
+    <section class="panel">
+      <div class="panel-head">
+        <h1>测试集错例（全量，不抽样）</h1>
+        <span class="panel-meta" id="count-meta"></span>
+      </div>
+      <p class="panel-note">
+        「漏」= gold 有、模型没给；「多」= 模型给了、gold 没有。
+        人工复核结论见 <code>reports/topics/ch10-v3/human_review.md</code>：22 条里模型错 13、gold 偏宽 8、gold 写错 1。
+      </p>
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr><th>问题</th><th>gold</th><th>预测</th><th>漏</th><th>多</th></tr>
+          </thead>
+          <tbody id="error-rows">
+            <tr><td colspan="5" class="loading">读取中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <div class="empty" id="empty" hidden>
+      <div class="empty-icon" aria-hidden="true">✓</div>
+      <h2>没有错例</h2>
+      <p>要么还没跑评测，要么模型在这份测试集上一条都没错。</p>
+    </div>
+  </main>
+</div>
+
+<script src="/acceptance/errors/errors.js"></script>
+</body>
+</html>

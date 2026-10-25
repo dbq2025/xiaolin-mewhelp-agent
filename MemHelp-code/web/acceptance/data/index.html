@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>数据产物 · MewHelp</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%237c3aed'/%3E%3Ctext x='16' y='22' font-size='14' text-anchor='middle' fill='white'%3ED%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/acceptance/style.css">
+</head>
+<body>
+
+<div class="app">
+  <header class="topbar">
+    <a class="brand" href="/acceptance/">
+      <div class="avatar-bot" aria-hidden="true">数</div>
+      <div class="brand-text">
+        <div class="brand-name">MewHelp · 数据产物</div>
+        <div class="brand-sub" id="sub">读取中…</div>
+      </div>
+    </a>
+
+    <nav class="nav" aria-label="主导航">
+      <a href="/acceptance/">总览</a>
+      <a href="/acceptance/eval/">评测</a>
+      <a href="/acceptance/data/" class="active" aria-current="page">数据</a>
+      <a href="/acceptance/errors/">错例</a>
+    </nav>
+  </header>
+
+  <main class="page">
+
+    <section class="panel">
+      <div class="panel-head">
+        <h1>17 类权威类目表</h1>
+        <span class="panel-meta" id="taxonomy-hash"></span>
+      </div>
+      <p class="panel-note">
+        这张表是全系统唯一一份：训练标签、sidecar 校验、前端展示都从它派生。
+        近邻类目靠「边界说明」划开 —— 修归保修维修、退归退换货；运费管钱、物流管货；价保是补差价、优惠活动是券和满减。
+      </p>
+      <div class="table-wrap">
+        <table class="table">
+          <thead><tr><th class="num">#</th><th>类目</th><th>边界说明</th></tr></thead>
+          <tbody id="taxonomy-rows">
+            <tr><td colspan="3" class="loading">读取中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h1>数据集与文件</h1>
+        <span class="panel-meta">按 80/10/10 分层；真实问题全部进测试集</span>
+      </div>
+      <div class="table-wrap">
+        <table class="table">
+          <thead><tr><th>文件</th><th class="num">大小</th><th>状态</th></tr></thead>
+          <tbody id="file-rows">
+            <tr><td colspan="3" class="loading">读取中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="panel-note">
+        训练集可以由 <code>scripts/build_topic_data.py</code> 重新造出来；测试集 gold 与抽审表是验收证据，进版本库。
+      </p>
+    </section>
+
+    <div class="empty" id="empty" hidden>
+      <div class="empty-icon" aria-hidden="true">□</div>
+      <h2>读不到数据产物</h2>
+      <p>先跑 scripts/build_topic_data.py 生成 data/topics/。</p>
+    </div>
+  </main>
+</div>
+
+<script src="/acceptance/data/data.js"></script>
+</body>
+</html>

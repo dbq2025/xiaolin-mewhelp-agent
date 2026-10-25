@@ -138,6 +138,47 @@ def register_topic_routes(
             },
         )
 
+    @app.get("/api/topics/questions")
+    async def topic_questions(
+        request: Request,
+        label: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+        repositories: Repositories = Depends(repositories_dependency),
+    ) -> JSONResponse:
+        """「类目问题列表」页：某类目下已归类的原文问题，带标签与归类时间。
+
+        ``label`` 不传就是全部已归类问题；未知类目直接 400，别让前端拿到空表还以为
+        这一类真的没有问题。
+        """
+        if label is not None and label not in CATEGORY_NAMES:
+            return _error(400, "unknown_label", f"未知类目：{label}")
+        limit = max(1, min(limit, 500))
+        offset = max(0, offset)
+        rows, total = await repositories.topics.list_classified(
+            label=label, limit=limit, offset=offset
+        )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "label": label,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "all_labels": list(CATEGORY_NAMES),
+                "items": [
+                    {
+                        "id": row.id,
+                        "text": row.raw_question,
+                        "labels": row.labels,
+                        "source": row.source,
+                        "classified_at": _iso(row.classified_at),
+                    }
+                    for row in rows
+                ],
+            },
+        )
+
     @app.post("/api/topics/classify-batch")
     async def topic_classify_batch(
         payload: BatchRequest,

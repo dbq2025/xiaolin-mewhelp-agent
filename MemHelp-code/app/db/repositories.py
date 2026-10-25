@@ -2070,6 +2070,17 @@ class TopicCount:
     count: int
 
 
+@dataclass(frozen=True)
+class ClassifiedQuestionRow:
+    """一条已归类的问题 + 它的标签，供「类目问题列表」页面回看原文。"""
+
+    id: int
+    raw_question: str
+    labels: list[str]
+    classified_at: datetime
+    source: str
+
+
 class TopicClassificationRepository:
     """``topic_classifications`` 的读写 —— 旁路批跑的落库端。
 
@@ -2124,6 +2135,52 @@ class TopicClassificationRepository:
 
     async def count_pending(self) -> int:
         return await _run(self._count_pending)
+
+    def _list_classified(
+        self, label: str | None, limit: int, offset: int
+    ) -> tuple[list[ClassifiedQuestionRow], int]:
+        """已归类的问题，可按类目过滤；返回 (当前页, 该过滤条件下的总数)。
+
+        标签是 JSON 数组，按标签过滤在 Python 侧做（与 ``label_counts`` 同一个理由：
+        换掉 JSON_TABLE / json_each 的方言分支）。管理页一次最多读几千行，够用。
+        """
+        stmt = (
+            select(
+                TopicClassification.question_id,
+                LowConfidenceQuestion.raw_question,
+                TopicClassification.labels,
+                TopicClassification.classified_at,
+                LowConfidenceQuestion.source,
+            )
+            .join(
+                LowConfidenceQuestion,
+                LowConfidenceQuestion.id == TopicClassification.question_id,
+            )
+            .order_by(TopicClassification.classified_at.desc(), TopicClassification.id.desc())
+        )
+        rows = self._session.execute(stmt).all()
+        if label:
+            rows = [row for row in rows if label in (row.labels or [])]
+        total = len(rows)
+        page = rows[offset : offset + limit]
+        return (
+            [
+                ClassifiedQuestionRow(
+                    id=int(row.question_id),
+                    raw_question=row.raw_question,
+                    labels=list(row.labels or []),
+                    classified_at=row.classified_at,
+                    source=row.source,
+                )
+                for row in page
+            ],
+            total,
+        )
+
+    async def list_classified(
+        self, *, label: str | None = None, limit: int = 100, offset: int = 0
+    ) -> tuple[list[ClassifiedQuestionRow], int]:
+        return await _run(self._list_classified, label, limit, offset)
 
     def _write_topic_rows(
         self, deduped: dict[int, list[str]], classified_at: datetime

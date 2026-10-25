@@ -130,3 +130,31 @@ def test_batch_uses_chunks_of_at_most_sixty_four(test_settings, sqlite_session, 
         r = client.post("/api/topics/classify-batch", json={"limit": 70})
     assert r.status_code == 200 and r.json()["processed"] == 70
     assert sizes == [64, 6]
+
+def test_questions_lists_classified_rows_and_filters_by_label(
+    test_settings, sqlite_session, monkeypatch
+):
+    """类目问题列表：默认全部、带 label 只出这一类、未知类目 400。"""
+    _seed_pending(sqlite_session, 3)
+    from app.db.models import LowConfidenceQuestion
+
+    ids = [row.id for row in sqlite_session.query(LowConfidenceQuestion).all()]
+    sqlite_session.add_all(
+        [
+            TopicClassification(question_id=ids[0], labels=["退换货", "尺码"]),
+            TopicClassification(question_id=ids[1], labels=["物流"]),
+        ]
+    )
+    sqlite_session.commit()
+
+    with _client(test_settings) as client:
+        everything = client.get("/api/topics/questions").json()
+        only_size = client.get("/api/topics/questions", params={"label": "尺码"}).json()
+        unknown = client.get("/api/topics/questions", params={"label": "不存在的类目"})
+
+    assert everything["total"] == 2 and len(everything["items"]) == 2
+    assert only_size["total"] == 1
+    assert only_size["items"][0]["labels"] == ["退换货", "尺码"]
+    assert only_size["all_labels"][0] == "退换货"
+    assert unknown.status_code == 400
+    assert unknown.json()["error"]["type"] == "unknown_label"

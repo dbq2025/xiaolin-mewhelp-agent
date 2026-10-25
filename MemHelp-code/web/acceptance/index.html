@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>验收总览 · MewHelp</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%230f766e'/%3E%3Ctext x='16' y='22' font-size='15' text-anchor='middle' fill='white'%3E%E9%AA%8C%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/acceptance/style.css">
+</head>
+<body>
+
+<div class="app">
+  <header class="topbar">
+    <a class="brand" href="/admin/" title="后台首页">
+      <div class="avatar-bot" aria-hidden="true">验</div>
+      <div class="brand-text">
+        <div class="brand-name">MewHelp · 验收总览</div>
+        <div class="brand-sub" id="sub">读取中…</div>
+      </div>
+    </a>
+
+    <nav class="nav" aria-label="主导航">
+      <a href="/chat/">对话</a>
+      <a href="/topics/">主题</a>
+      <a href="/acceptance/" class="active" aria-current="page">验收</a>
+      <a href="/admin/">后台</a>
+    </nav>
+  </header>
+
+  <main class="page">
+
+    <section class="stats" aria-label="核心指标">
+      <div class="stat">
+        <div class="stat-label">macro-F1</div>
+        <div class="stat-value" id="stat-macro">—</div>
+        <div class="stat-hint">17 类各自 F1 的算术平均</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">micro-F1</div>
+        <div class="stat-value" id="stat-micro">—</div>
+        <div class="stat-hint">把所有类目的 TP/FP/FN 加总后算</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">完全一致率</div>
+        <div class="stat-value" id="stat-exact">—</div>
+        <div class="stat-hint">整句标签集合与 gold 完全一致</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">多诉求命中</div>
+        <div class="stat-value" id="stat-multi">—</div>
+        <div class="stat-hint" id="stat-multi-hint">多标签句里全部类目都命中</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h1>往下看</h1>
+        <span class="panel-meta" id="run-meta"></span>
+      </div>
+      <div class="cards">
+        <a class="card" href="/acceptance/eval/">
+          <span class="card-kicker">eval</span>
+          <span class="card-title">评测详情</span>
+          <span class="card-desc">每类 P/R/F1、混淆矩阵、最易归错的类对</span>
+        </a>
+        <a class="card" href="/acceptance/data/">
+          <span class="card-kicker">data</span>
+          <span class="card-title">数据产物</span>
+          <span class="card-desc">训练/验证/测试集体量、17 类权威表、文件清单</span>
+        </a>
+        <a class="card" href="/acceptance/errors/">
+          <span class="card-kicker">errors</span>
+          <span class="card-title">错例复核</span>
+          <span class="card-desc">测试集上的每条错例：gold、预测、漏标与多标</span>
+        </a>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h1>语料与标注</h1>
+        <span class="panel-meta">每份语料里 gold ≥2 标签的句子数附在括号里</span>
+      </div>
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr><th>数据集</th><th class="num">条数</th><th class="num">多标签句</th><th>用途</th></tr>
+          </thead>
+          <tbody id="dataset-rows">
+            <tr><td colspan="4" class="loading">读取中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h1>最弱的 5 个类目</h1>
+        <span class="panel-meta">support &lt; 10 的类目只作参考</span>
+      </div>
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr><th>类目</th><th class="num">F1</th><th class="num">精确率</th><th class="num">召回率</th><th class="num">support</th><th></th></tr>
+          </thead>
+          <tbody id="worst-rows">
+            <tr><td colspan="6" class="loading">读取中…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <div class="empty" id="empty" hidden>
+      <div class="empty-icon" aria-hidden="true">□</div>
+      <h2>还没有评测报告</h2>
+      <p>先跑 <code>scripts/eval_topics.py</code>，这里会显示测试集上的指标。</p>
+    </div>
+
+    <p class="footnote" id="footnote">
+      真实问题子集只有十几条且类别集中，17 类宏平均会被结构性压低；判断模型好不好请看完全一致率与混淆矩阵。
+    </p>
+  </main>
+</div>
+
+<script src="/acceptance/overview.js"></script>
+</body>
+</html>

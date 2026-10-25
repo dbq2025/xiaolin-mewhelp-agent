@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>后台首页 · MewHelp</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%232563eb'/%3E%3Ctext x='16' y='22' font-size='14' text-anchor='middle' fill='white'%3EM%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/acceptance/style.css">
+</head>
+<body>
+
+<div class="app">
+  <header class="topbar">
+    <a class="brand" href="/admin/">
+      <div class="avatar-bot" aria-hidden="true">M</div>
+      <div class="brand-text">
+        <div class="brand-name">MewHelp · 后台</div>
+        <div class="brand-sub">运营看板与验收入口</div>
+      </div>
+    </a>
+
+    <nav class="nav" aria-label="主导航">
+      <a href="/chat/">对话</a>
+      <a href="/topics/">主题</a>
+      <a href="/acceptance/">验收</a>
+      <a href="/admin/" class="active" aria-current="page">后台</a>
+    </nav>
+  </header>
+
+  <main class="page">
+
+    <section class="panel">
+      <div class="panel-head">
+        <h1>主题分类（第 10 章）</h1>
+        <span class="panel-meta">旁路批跑：实时对话主链路不调它</span>
+      </div>
+      <div class="cards">
+        <a class="card" href="/topics/">
+          <span class="card-kicker">topics</span>
+          <span class="card-title">主题分布</span>
+          <span class="card-desc">17 类问题量条形图、待归类水位、手动跑一批</span>
+        </a>
+        <a class="card" href="/topics/questions/">
+          <span class="card-kicker">questions</span>
+          <span class="card-title">类目问题列表</span>
+          <span class="card-desc">按类目回看已归类的原文问题与多标签</span>
+        </a>
+        <a class="card" href="/acceptance/">
+          <span class="card-kicker">acceptance</span>
+          <span class="card-title">验收总览</span>
+          <span class="card-desc">测试集 macro/micro-F1、多诉求命中、最弱类目</span>
+        </a>
+        <a class="card" href="/acceptance/eval/">
+          <span class="card-kicker">eval</span>
+          <span class="card-title">评测详情</span>
+          <span class="card-desc">每类 P/R/F1、类对混淆、混淆矩阵入口</span>
+        </a>
+        <a class="card" href="/acceptance/data/">
+          <span class="card-kicker">data</span>
+          <span class="card-title">数据产物</span>
+          <span class="card-desc">17 类权威表、训练/验证/测试集体量、文件清单</span>
+        </a>
+        <a class="card" href="/acceptance/errors/">
+          <span class="card-kicker">errors</span>
+          <span class="card-title">错例复核</span>
+          <span class="card-desc">测试集全量错例：gold、预测、漏标、多标</span>
+        </a>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h1>其他后台页</h1>
+        <span class="panel-meta">前几章的运营与评估入口</span>
+      </div>
+      <div class="cards">
+        <a class="card" href="/review/">
+          <span class="card-kicker">review</span>
+          <span class="card-title">待审队列</span>
+          <span class="card-desc">低置信度回答的人工审核</span>
+        </a>
+        <a class="card" href="/rag-eval/">
+          <span class="card-kicker">rag-eval</span>
+          <span class="card-title">RAG 评估</span>
+          <span class="card-desc">检索与回答质量的批量评测</span>
+        </a>
+        <a class="card" href="/eval-trend/">
+          <span class="card-kicker">trend</span>
+          <span class="card-title">评估趋势</span>
+          <span class="card-desc">多次评测的趋势线</span>
+        </a>
+        <a class="card" href="/observability/">
+          <span class="card-kicker">observability</span>
+          <span class="card-title">观测与成本</span>
+          <span class="card-desc">意图与 token 成本</span>
+        </a>
+        <a class="card" href="/chat/">
+          <span class="card-kicker">chat</span>
+          <span class="card-title">对话</span>
+          <span class="card-desc">面向用户的客服对话页</span>
+        </a>
+      </div>
+    </section>
+
+    <p class="footnote">
+      演示前先起两个进程：sidecar（<code>uvicorn app.topics.service:app --port 8100</code>）与主应用（<code>uvicorn app.main:app --port 8000</code>）。
+      sidecar 没起时，「跑一批」会提示启动命令，不影响其他页面。
+    </p>
+  </main>
+</div>
+
+</body>
+</html>
