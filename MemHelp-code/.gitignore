@@ -82,8 +82,14 @@ pytest-tmp/
 data/topics/raw/
 data/topics/clean/
 data/topics/labeled/
-data/topics/review/
-data/topics/splits/
+# 测试集和它的 gold 是验收证据，必须进库；train/val/增强语料可以由
+# scripts/build_topic_data.py 重新生成，不占仓库体积。
+data/topics/splits/*
+!data/topics/splits/test.jsonl
+!data/topics/splits/test_gold.jsonl
 data/topics/logs/
 .hf-cache/
 .hf-probe/
+
+# 测试临时产物（沙箱退出后删不掉的目录，别让它进 status）
+tests/fixtures_topics/_tmp_out/

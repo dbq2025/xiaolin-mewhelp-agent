@@ -34,3 +34,7 @@ __pycache__/
 # ---- Superpowers 执行器的私有工作区（账本、任务提要、评审包）----
 # 它是 scratch 不是交付物：进度与决策最终落到 dev-notes/ 与 git 历史里。
 .superpowers/
+
+# ---- 根级 HF 缓存探测目录（ch10 定位 huggingface_hub 写盘问题时留下的）----
+.hf-cache/
+.hf-probe/
