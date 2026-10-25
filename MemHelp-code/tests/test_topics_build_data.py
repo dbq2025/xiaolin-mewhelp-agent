@@ -221,3 +221,99 @@ def test_generate_resume_counts_multi_group():
     assert out["generate"]["resumed"] == 2
     assert llm_resume.calls == fresh_calls - 1
 
+
+
+class _PairLLM:
+    """每次回两条：一条两标签（合格）、一条单标签（必须被滤掉）。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def invoke(self, messages):  # noqa: ANN001, ANN201 - 测试桩
+        import re
+
+        user = messages[-1]["content"]
+        match = re.search(r"必须同时提到「([^」]+)」和「([^」]+)」", user)
+        assert match, "force_multi 的 prompt 必须点名两个类目"
+        left, right = match.group(1), match.group(2)
+        self.calls += 1
+        lines = [
+            json.dumps(
+                {"text": f"多诉求{self.calls}号", "labels": [left, right]}, ensure_ascii=False
+            ),
+            json.dumps({"text": f"单诉求{self.calls}号", "labels": [left]}, ensure_ascii=False),
+        ]
+        return type("Msg", (), {"content": "\n".join(lines)})()
+
+
+def test_boost_multi_only_appends_pair_rows_to_train():
+    """多诉求补造只许进训练集，val/test 一个字节都不许动。"""
+
+    out = _build("clean", "split", "augment")
+    splits = Path(out["dirs"]["splits"])
+    before_train = _read_jsonl(splits / "train_aug.jsonl")
+    before_val = _read_jsonl(splits / "val.jsonl")
+    before_test = _read_jsonl(splits / "test.jsonl")
+
+    llm = _PairLLM()
+    result = build_dataset(
+        FIXTURES, steps=("boost_multi",), llm=llm, seed=1, out_dir=OUT, multi_boost=24
+    )
+
+    after_train = _read_jsonl(splits / "train_aug.jsonl")
+    added = after_train[len(before_train) :]
+    assert result["boost_multi"]["added"] == len(added) > 0
+    assert all(len(row["labels"]) == 2 for row in added), "单标签行不许混进多诉求补造"
+    assert all(row["id"].startswith("mb") for row in added)
+    assert _read_jsonl(splits / "val.jsonl") == before_val
+    assert _read_jsonl(splits / "test.jsonl") == before_test
+
+
+def test_hard_cases_only_append_to_train_and_reject_bad_labels():
+    """人工复核补的硬例：只进训练集、标签必须合法、重复与脏标签跳过。
+
+    评测报告里「猫窝可以机洗吗 → 保修维修」这类错误，靠改 prompt 修不掉
+    （权重已经学歪了），只能把纠正样本补回训练集。补进去的每一行都要能追溯到
+    ``hard_case: True``，否则以后分不清哪些是合成语料、哪些是人工介入。
+    """
+
+    out = _build("clean", "split", "augment")
+    splits = Path(out["dirs"]["splits"])
+    before_train = _read_jsonl(splits / "train_aug.jsonl")
+    before_val = _read_jsonl(splits / "val.jsonl")
+    before_test = _read_jsonl(splits / "test.jsonl")
+
+    hard = FIXTURES / "_tmp_hard_cases.jsonl"
+    rows = [
+        {"text": "记忆棉靠枕 A57 可以机洗吗？", "labels": ["商品信息"]},
+        {"text": "记忆棉靠枕 A57 可以机洗吗？", "labels": ["商品信息"]},  # 重复，跳过
+        {"text": "猫抓板用久了可以回收吗", "labels": ["其他"]},
+        {"text": "这条标签是编的", "labels": ["不存在的类目"]},  # 脏标签，拒收
+    ]
+    hard.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+    try:
+        result = build_dataset(
+            FIXTURES, steps=("hard_cases",), seed=1, out_dir=OUT, hard_cases=hard
+        )
+    finally:
+        hard.unlink(missing_ok=True)
+
+    after_train = _read_jsonl(splits / "train_aug.jsonl")
+    added = after_train[len(before_train) :]
+    assert result["hard_cases"]["added"] == len(added) == 2
+    assert result["hard_cases"]["rejected"] == 2
+    assert all(row["id"].startswith("hc") for row in added)
+    assert all(row["hard_case"] is True for row in added)
+    assert [row["labels"] for row in added] == [["商品信息"], ["其他"]]
+    assert _read_jsonl(splits / "val.jsonl") == before_val
+    assert _read_jsonl(splits / "test.jsonl") == before_test
+
+
+def test_hard_cases_without_file_is_a_noop():
+    out = _build("clean", "split", "augment")
+    result = build_dataset(FIXTURES, steps=("hard_cases",), seed=1, out_dir=OUT)
+    assert result["hard_cases"]["added"] == 0
+    assert "skipped" in result["hard_cases"]

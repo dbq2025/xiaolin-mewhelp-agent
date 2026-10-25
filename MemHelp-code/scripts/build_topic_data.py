@@ -36,7 +36,13 @@ from app.topics.synth import (
     parse_generated,
     parse_labeled,
 )
-from app.topics.taxonomy import CATEGORIES, TaxonomyError, taxonomy_hash, taxonomy_payload
+from app.topics.taxonomy import (
+    CATEGORIES,
+    TaxonomyError,
+    taxonomy_hash,
+    taxonomy_payload,
+    validate_labels,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUT = PROJECT_ROOT / "data" / "topics"
@@ -67,14 +73,19 @@ _STEP_ORDER: tuple[str, ...] = (
     "prelabel",
     "split",
     "augment",
+    "boost_multi",
+    "hard_cases",
     "export_taxonomy",
 )
 
-_LLM_STEPS = {"generate", "prelabel"}
+_LLM_STEPS = {"generate", "prelabel", "boost_multi"}
 _MULTI_RATIO = 0.25
 #: 单次生成的条数上限。一次要 88 条会被 max_tokens 截断，截断的 JSON 行
 #: 全变废行 —— 每次 25 条是能稳定完整返回的量级。
 _GENERATE_CHUNK = 25
+#: 补造多诉求时一块要几条。这里比生成阶段大：句子必须同时含两个诉求，
+#: 模型一次写 32 条仍然能完整返回，调用次数少一半。
+_BOOST_CHUNK = 32
 #: 生成阶段的断点文件：每块写完就追加、flush，重跑时从它续。
 _GENERATE_PARTIAL = "synthetic.partial.jsonl"
 
@@ -481,6 +492,204 @@ def _step_augment(
     return {"train": len(train), "train_aug": written, "added": written - len(train)}
 
 
+def _step_boost_multi(
+    dirs: dict[str, Path],
+    *,
+    llm: Any,
+    count: int,
+    seed: int,
+    workers: int = 1,
+    source_dir: Path | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """补造多诉求句子，**只追加到 train_aug.jsonl**。
+
+    生成阶段的 multi 分块只写「约三成」，模型实测只兑现了约 10%，训练集里
+    多标签样本不够，模型于是倾向于只报一个标签 —— 验收要求「买大了想退」能
+    同时命中多个类目，靠这样的训练集做不到。
+
+    为什么单独一步、而不是重跑整条流水线：test 的 gold 是逐条人工标的，重新
+    切分会让 160 条标注全部作废；多标签不足只伤害训练集，补进去就行。
+    """
+
+    if llm is None:
+        raise RuntimeError("--multi-boost 需要大模型（--allow-llm）")
+    if count <= 0:
+        return {"requested": 0, "added": 0, "rejected": 0}
+
+    splits = dirs["splits"]
+    train_path = splits / "train_aug.jsonl"
+    train = _read_jsonl(train_path)
+    if not train:
+        raise RuntimeError("train_aug.jsonl 为空：先跑 --split / --augment 再补造多诉求")
+
+    seen = {str(row.get("text", "")) for row in train}
+    # val/test 的句子也不许重复：补造语料和评测集撞句就是泄漏。
+    for name in ("val", "test"):
+        seen |= {str(row.get("text", "")) for row in _read_jsonl(splits / f"{name}.jsonl")}
+
+    typo_path = (Path(source_dir) if source_dir is not None else PROJECT_ROOT) / "typos.json"
+    typo_map = load_typo_map(typo_path) if typo_path.is_file() else None
+
+    by_name = {category.name: category for category in CATEGORIES}
+    per_pair = max(1, count // len(MULTI_PAIRS))
+    tasks: list[tuple[Category, str, int]] = []
+    for left, right in MULTI_PAIRS:
+        remaining = per_pair
+        while remaining > 0:
+            take = min(_BOOST_CHUNK, remaining)
+            tasks.append((by_name[left], right, take))
+            remaining -= take
+
+    def chunk(task: tuple[Category, str, int]) -> list[Any]:
+        category, right, take = task
+        messages = generation_messages(category, take, second_label=right, force_multi=True)
+        try:
+            return parse_generated(_invoke(llm, messages))
+        except TaxonomyError as exc:
+            print(f"[boost] {category.name}+{right} 标签越界：{exc}", file=sys.stderr, flush=True)
+            return []
+        except Exception as exc:  # noqa: BLE001 - 单块炸了不该带走整批
+            print(f"[boost] {category.name}+{right} 调用失败：{exc}", file=sys.stderr, flush=True)
+            return []
+
+    state = {"added": 0, "rejected": 0}
+
+    def merge(task: tuple[Category, str, int], parsed: list[Any]) -> None:
+        category, right, _take = task
+        batch: list[dict[str, Any]] = []
+        for item in parsed:
+            # 只要「两个诉求都在、且不多不少」的行：多打一个标签同样是脏数据。
+            if set(item.labels) != {category.name, right}:
+                state["rejected"] += 1
+                continue
+            cleaned = clean_text(item.text, typo_map=typo_map)
+            if is_noise(cleaned) or cleaned.text in seen:
+                state["rejected"] += 1
+                continue
+            seen.add(cleaned.text)
+            batch.append(
+                {
+                    "id": f"mb{len(train) + state['added'] + len(batch) + 1:04d}",
+                    "text": cleaned.text,
+                    "text_raw": item.text,
+                    "labels": validate_labels([category.name, right]),
+                    "source": "synthetic",
+                    "category": category.name,
+                    "gen_group": "multi",
+                    "boost": True,
+                    "changes": [
+                        {"rule": c.rule, "before": c.before, "after": c.after}
+                        for c in cleaned.changes
+                    ],
+                }
+            )
+        if batch:
+            _append_jsonl(train_path, batch)
+            state["added"] += len(batch)
+            print(
+                f"[boost] {category.name}+{right} +{len(batch)} 累计 {state['added']} 条",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    if workers <= 1:
+        for task in tasks:
+            merge(task, chunk(task))
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            # map 保序，merge 只在主线程跑 —— 追加写和 seen 都不需要加锁。
+            for task, parsed in zip(tasks, pool.map(chunk, tasks)):
+                merge(task, parsed)
+
+    return {
+        "requested": per_pair * len(MULTI_PAIRS),
+        "added": state["added"],
+        "rejected": state["rejected"],
+        "train_before": len(train),
+        "train_after": len(train) + state["added"],
+    }
+
+
+def _step_hard_cases(
+    dirs: dict[str, Path],
+    *,
+    path: Path | None,
+    source_dir: Path | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """把人工复核后补的硬例并进训练集（只追加，不动 val/test）。
+
+    评测报告里「猫窝可以机洗吗 → 保修维修」这类错误改 prompt 修不掉 ——
+    权重已经学歪了，只能把纠正样本补回训练集。每行打 ``hard_case: True``，
+    以后能一眼分清哪些是合成语料、哪些是人介入过的。
+    """
+
+    if path is None:
+        return {"requested": 0, "added": 0, "rejected": 0, "skipped": "没有 --hard-cases"}
+    path = Path(path)
+    if not path.is_file():
+        return {
+            "requested": 0,
+            "added": 0,
+            "rejected": 0,
+            "skipped": f"文件不存在：{path}",
+        }
+
+    splits = dirs["splits"]
+    train_path = splits / "train_aug.jsonl"
+    train = _read_jsonl(train_path)
+    seen = {str(row.get("text", "")) for row in train}
+    # val/test 的句子同样不许重复：硬例和评测集撞句就是泄漏。
+    for name in ("val", "test"):
+        seen |= {str(row.get("text", "")) for row in _read_jsonl(splits / f"{name}.jsonl")}
+
+    typo_path = (Path(source_dir) if source_dir is not None else PROJECT_ROOT) / "typos.json"
+    typo_map = load_typo_map(typo_path) if typo_path.is_file() else None
+
+    base = sum(1 for row in train if str(row.get("id", "")).startswith("hc"))
+    batch: list[dict[str, Any]] = []
+    rejected = 0
+    for row in _read_jsonl(path):
+        try:
+            labels = validate_labels(row.get("labels") or [])
+        except (TaxonomyError, TypeError):
+            rejected += 1
+            continue
+        cleaned = clean_text(str(row.get("text", "")), typo_map=typo_map)
+        if is_noise(cleaned) or cleaned.text in seen:
+            rejected += 1
+            continue
+        seen.add(cleaned.text)
+        batch.append(
+            {
+                "id": f"hc{base + len(batch) + 1:04d}",
+                "text": cleaned.text,
+                "text_raw": str(row.get("text", "")),
+                "labels": labels,
+                "source": "human_review",
+                "category": labels[0],
+                "hard_case": True,
+                "changes": [
+                    {"rule": c.rule, "before": c.before, "after": c.after}
+                    for c in cleaned.changes
+                ],
+            }
+        )
+
+    if batch:
+        _append_jsonl(train_path, batch)
+    return {
+        "requested": len(_read_jsonl(path)),
+        "added": len(batch),
+        "rejected": rejected,
+        "train_before": len(train),
+        "train_after": len(train) + len(batch),
+    }
+
+
 def export_taxonomy(out_dir: Path) -> str:
     """导出 sidecar 启动时要比对的那份快照 + 给人看的 markdown 表。"""
 
@@ -521,6 +730,8 @@ def build_dataset(
     copies: int = 1,
     batch_size: int = 20,
     workers: int = 1,
+    multi_boost: int = 0,
+    hard_cases: Path | str | None = None,
 ) -> dict[str, Any]:
     """按 ``steps`` 跑流水线，返回每步的摘要 + 产物目录。
 
@@ -564,6 +775,21 @@ def build_dataset(
             result = _step_split(dirs, seed=seed)
         elif step == "augment":
             result = _step_augment(dirs, seed=seed, copies=copies)
+        elif step == "boost_multi":
+            result = _step_boost_multi(
+                dirs,
+                llm=llm,
+                count=multi_boost,
+                seed=seed,
+                workers=workers,
+                source_dir=source,
+            )
+        elif step == "hard_cases":
+            result = _step_hard_cases(
+                dirs,
+                path=Path(hard_cases) if hard_cases is not None else None,
+                source_dir=source,
+            )
         else:  # export_taxonomy
             result = {"out": export_taxonomy(dirs["root"])}
         summary[step] = result
@@ -579,7 +805,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--prelabel", action="store_true", help="大模型预标 + 冲突表")
     parser.add_argument("--split", action="store_true", help="分层抽样 80/10/10")
     parser.add_argument("--augment", action="store_true", help="增强训练集")
+    parser.add_argument(
+        "--multi-boost",
+        dest="boost_multi",
+        type=int,
+        default=0,
+        metavar="N",
+        help="补造 N 条多诉求句子（只追加进训练集，不动 val/test）",
+    )
     parser.add_argument("--export-taxonomy", action="store_true", help="导出类目表快照")
+    parser.add_argument(
+        "--hard-cases",
+        dest="hard_cases",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="人工复核后补的硬例 jsonl（只追加进训练集）",
+    )
     parser.add_argument("--all", action="store_true", help="按顺序跑全部步骤")
     parser.add_argument("--allow-llm", action="store_true", help="允许真的调大模型")
     parser.add_argument("--count", type=int, default=1500, help="模拟问题总数")
@@ -623,6 +865,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         copies=args.copies,
         batch_size=args.batch_size,
         workers=args.workers,
+        multi_boost=args.boost_multi,
+        hard_cases=args.hard_cases,
     )
     return 0
 

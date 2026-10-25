@@ -72,3 +72,16 @@ def test_find_conflicts_flags_real_difference():
     assert find_conflicts(g, p) == [
         Conflict(text="a", generated=["尺码", "退换货"], prelabeled=["尺码"])
     ]
+
+
+def test_force_multi_prompt_demands_every_row():
+    """multi 分块原来只说「约三成」，模型就真只给三成 —— 多标签比例掉到 10%。"""
+
+    from app.topics.synth import generation_messages
+    from app.topics.taxonomy import CATEGORIES
+
+    category = next(c for c in CATEGORIES if c.name == "退换货")
+    content = generation_messages(category, 8, second_label="运费", force_multi=True)[-1]["content"]
+    assert "每一条" in content
+    assert "「退换货」" in content and "「运费」" in content
+    assert "约三成" not in content

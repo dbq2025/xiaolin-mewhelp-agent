@@ -59,16 +59,31 @@ def _taxonomy_block() -> str:
 
 
 def generation_messages(
-    category: Category, count: int, *, second_label: str | None = None
+    category: Category,
+    count: int,
+    *,
+    second_label: str | None = None,
+    force_multi: bool = False,
 ) -> list[dict[str, str]]:
-    """造模拟问题的 prompt。``second_label`` 用来定向造多诉求句子。"""
+    """造模拟问题的 prompt。``second_label`` 用来定向造多诉求句子。
 
-    multi = (
-        f"\n其中约三成句子要**同时**提到「{category.name}」和「{second_label}」两个诉求，"
-        "并给两个标签。"
-        if second_label
-        else ""
-    )
+    ``force_multi`` 与「约三成」的区别很关键：只写「约三成」时模型实测只兑现
+    了约 10%，训练集多标签比例从设计的 25% 掉到 10%，模型于是学会了「只报一个
+    标签」—— 补造多诉求语料时必须用 ``force_multi`` 把话说死。
+    """
+
+    if force_multi and second_label:
+        multi = (
+            f"\n这 {count} 条**每一条**都必须同时提到「{category.name}」和「{second_label}」"
+            "两个诉求，labels 必须同时给出这两个类目名，不许只给一个。"
+        )
+    elif second_label:
+        multi = (
+            f"\n其中约三成句子要**同时**提到「{category.name}」和「{second_label}」两个诉求，"
+            "并给两个标签。"
+        )
+    else:
+        multi = ""
     user = f"""照下面的权威类目表，写 {count} 条真实用户会说的电商客服问题，主题是「{category.name}」。
 
 类目表（编号. 名称：边界说明）：
