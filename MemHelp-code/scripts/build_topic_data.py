@@ -185,15 +185,52 @@ def _partner(category_name: str) -> str | None:
     return None
 
 
-def _step_generate(
-    dirs: dict[str, Path], *, llm: Any, count: int, seed: int, **kwargs: Any
-) -> dict[str, Any]:
-    """按类目造模拟问题，**逐块落盘**。
+def _generate_chunk(
+    llm: Any, category: Category, take: int, second: str | None
+) -> tuple[list[Any], str | None]:
+    """一个「调模型 + 解析」的分块，**不碰任何共享状态**，所以能丢进线程池。"""
+    messages = generation_messages(category, take, second_label=second)
+    error: str | None = None
+    for attempt in range(2):  # 一次坏输出重试一次，别让整批停在这一类
+        try:
+            raw = _invoke(llm, messages)
+        except Exception as exc:  # noqa: BLE001 - 网络抖动不该让整批停掉
+            print(
+                f"[generate] {category.name} 调用失败（{attempt + 1}/2）：{exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            error = "error"
+            continue
+        try:
+            parsed = parse_generated(raw)
+        except TaxonomyError as exc:
+            # 自造标签绝不能进语料：这里拦住、计数，重试一次还不行就跳过这段。
+            print(f"[generate] {category.name} 标签越界：{exc}", file=sys.stderr, flush=True)
+            error = "invalid"
+            continue
+        if parsed:
+            return parsed, None
+        print(f"[generate] {category.name} 第 {attempt + 1} 次为空", file=sys.stderr, flush=True)
+        error = "empty"
+    return [], error or "empty"
 
-    1500 条 = 68 次大模型调用，一次跑十几分钟；中途断掉要是从头再来，
-    既烧 token 又烧时间。所以每块解析完立刻追加到 ``synthetic.partial.jsonl``，
-    重跑时先读它、已够数的 (类目, 单/多诉求) 组直接跳过，全部跑完才汇总成
-    ``synthetic.jsonl`` 并删掉断点文件。
+
+def _step_generate(
+    dirs: dict[str, Path],
+    *,
+    llm: Any,
+    count: int,
+    seed: int,
+    workers: int = 1,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """按类目造模拟问题，**逐块落盘**，块与块之间可以并发。
+
+    1500 条 = 68 次大模型调用，串行跑要一个多小时；中途断掉要是从头再来，
+    既烧 token 又烧时间。所以：分块丢进线程池跑，**只有主线程**做去重、编号
+    和追加写 ``synthetic.partial.jsonl``；重跑时先读断点、已够数的组直接跳过，
+    全部跑完才汇总成 ``synthetic.jsonl`` 并删掉断点文件。
     """
 
     if llm is None:
@@ -206,10 +243,9 @@ def _step_generate(
         (str(row.get("category", "")), str(row.get("gen_group", ""))) for row in out
     )
     resumed = len(out)
-    fresh = 0
-    skipped = 0
-    invalid = 0
+    state = {"fresh": 0, "skipped": 0, "invalid": 0}
 
+    tasks: list[tuple[Category, str, str | None, int, tuple[str, str]]] = []
     for category in CATEGORIES:
         multi_n = int(round(per * _MULTI_RATIO))
         single_n = per - multi_n
@@ -221,50 +257,66 @@ def _step_generate(
             remaining = n - done.get(key, 0)
             while remaining > 0:
                 take = min(_GENERATE_CHUNK, remaining)
-                messages = generation_messages(category, take, second_label=second)
-                parsed = []
-                for attempt in range(2):  # 一次坏输出重试一次，别让整批停在这一类
-                    raw = _invoke(llm, messages)
-                    try:
-                        parsed = parse_generated(raw)
-                    except TaxonomyError as exc:
-                        # 自造标签绝不能进语料：这里拦住、计数，重试一次还不行就跳过这段。
-                        invalid += 1
-                        print(f"[generate] {category.name} 标签越界：{exc}", file=sys.stderr)
-                        parsed = []
-                    if parsed:
-                        break
-                    print(
-                        f"[generate] {category.name} 第 {attempt + 1} 次为空", file=sys.stderr
-                    )
-                skipped += take - len(parsed)
-                batch: list[dict[str, Any]] = []
-                for item in parsed:
-                    if item.text in seen:
-                        continue
-                    seen.add(item.text)
-                    batch.append(
-                        {
-                            "id": f"p{len(out) + 1:05d}",
-                            "text": item.text,
-                            "labels": item.labels,
-                            "source": "synthetic",
-                            "category": category.name,
-                            "gen_group": group,
-                        }
-                    )
-                if batch:
-                    _append_jsonl(partial, batch)
-                    out.extend(batch)
-                    fresh += len(batch)
-                done[key] += take
+                tasks.append((category, group, second, take, key))
                 remaining -= take
-                print(
-                    f"[generate] {category.name}/{group} {len(parsed)}/{take}"
-                    f" 累计 {len(out)} 条",
-                    file=sys.stderr,
-                    flush=True,
-                )
+
+    def merge(
+        task: tuple[Category, str, str | None, int, tuple[str, str]],
+        parsed: list[Any],
+        error: str | None,
+    ) -> None:
+        category, group, _second, take, key = task
+        if error == "invalid":
+            state["invalid"] += 1
+        state["skipped"] += take - len(parsed)
+        batch: list[dict[str, Any]] = []
+        for item in parsed:
+            if item.text in seen:
+                continue
+            seen.add(item.text)
+            batch.append(
+                {
+                    "id": f"p{len(out) + len(batch) + 1:05d}",
+                    "text": item.text,
+                    "labels": item.labels,
+                    "source": "synthetic",
+                    "category": category.name,
+                    "gen_group": group,
+                }
+            )
+        if batch:
+            _append_jsonl(partial, batch)
+            out.extend(batch)
+            state["fresh"] += len(batch)
+        done[key] += take
+        print(
+            f"[generate] {category.name}/{group} {len(parsed)}/{take}"
+            f" 累计 {len(out)} 条",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    if workers <= 1:
+        for task in tasks:
+            category, _group, second, take, _key = task
+            parsed, error = _generate_chunk(llm, category, take, second)
+            merge(task, parsed, error)
+    else:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(_generate_chunk, llm, task[0], task[3], task[2]): task
+                for task in tasks
+            }
+            for future in as_completed(futures):
+                task = futures[future]
+                try:
+                    parsed, error = future.result()
+                except Exception as exc:  # noqa: BLE001 - 单块炸了不该带走整批断点
+                    print(f"[generate] 分块异常：{exc}", file=sys.stderr, flush=True)
+                    parsed, error = [], "error"
+                merge(task, parsed, error)
 
     random.Random(seed).shuffle(out)
     for index, row in enumerate(out, 1):
@@ -275,10 +327,10 @@ def _step_generate(
     return {
         "requested": per * len(CATEGORIES),
         "kept": written,
-        "fresh": fresh,
+        "fresh": state["fresh"],
         "resumed": resumed,
-        "skipped": skipped,
-        "invalid_label_batches": invalid,
+        "skipped": state["skipped"],
+        "invalid_label_batches": state["invalid"],
     }
 
 
@@ -466,6 +518,7 @@ def build_dataset(
     count: int = 1500,
     copies: int = 1,
     batch_size: int = 20,
+    workers: int = 1,
 ) -> dict[str, Any]:
     """按 ``steps`` 跑流水线，返回每步的摘要 + 产物目录。
 
@@ -500,7 +553,7 @@ def build_dataset(
         if step == "from_db":
             result = _step_from_db(dirs)
         elif step == "generate":
-            result = _step_generate(dirs, llm=llm, count=count, seed=seed)
+            result = _step_generate(dirs, llm=llm, count=count, seed=seed, workers=workers)
         elif step == "clean":
             result = _step_clean(source, dirs, seed=seed)
         elif step == "prelabel":
@@ -530,6 +583,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--count", type=int, default=1500, help="模拟问题总数")
     parser.add_argument("--copies", type=int, default=1, help="每条训练样本的增强份数")
     parser.add_argument("--batch-size", type=int, default=20, help="预标每批条数")
+    parser.add_argument("--workers", type=int, default=8, help="生成/预标并发分块数")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--source", type=Path, default=PROJECT_ROOT, help="原始语料目录")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
@@ -566,6 +620,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         count=args.count,
         copies=args.copies,
         batch_size=args.batch_size,
+        workers=args.workers,
     )
     return 0
 

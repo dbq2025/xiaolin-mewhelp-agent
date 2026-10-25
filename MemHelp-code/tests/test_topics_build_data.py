@@ -134,3 +134,49 @@ def test_llm_steps_need_llm():
 
     with pytest.raises(RuntimeError):
         build_dataset(FIXTURES, steps=("generate",), llm=None, out_dir=OUT)
+
+
+class _ConcurrentLLM:
+    """记录同时在飞的调用数：串行跑永远到不了 2。"""
+
+    def __init__(self) -> None:
+        import threading
+
+        self._lock = threading.Lock()
+        self._active = 0
+        self.max_active = 0
+        self.calls = 0
+
+    def invoke(self, messages):  # noqa: ANN001, ANN201 - 测试桩
+        import time
+
+        with self._lock:
+            self.calls += 1
+            serial = self.calls
+            self._active += 1
+            self.max_active = max(self.max_active, self._active)
+        try:
+            time.sleep(0.02)
+        finally:
+            with self._lock:
+                self._active -= 1
+        line = json.dumps({"text": f"并发问题{serial}", "labels": ["其他"]}, ensure_ascii=False)
+        return type("Msg", (), {"content": line})()
+
+
+def test_generate_runs_chunks_concurrently():
+    """68 次调用串行要一小时：分块并发跑，落盘和去重只由主线程做。"""
+    OUT.mkdir(parents=True, exist_ok=True)
+    llm = _ConcurrentLLM()
+
+    out = build_dataset(
+        FIXTURES, steps=("generate",), llm=llm, seed=1, out_dir=OUT, count=68, workers=4
+    )
+
+    rows = _read_jsonl(Path(out["dirs"]["raw"], "synthetic.jsonl"))
+    # 桩每次只回一条，所以收上来的条数 = 调用次数（真实模型会按 take 条返回）
+    assert len(rows) == llm.calls > 17
+    assert len({row["text"] for row in rows}) == len(rows), "并发块之间不能写出重复问题"
+    assert len({row["id"] for row in rows}) == len(rows)
+    assert llm.max_active >= 2, "开了 workers 就该真有并发"
+    assert not (Path(out["dirs"]["raw"]) / "synthetic.partial.jsonl").is_file()
