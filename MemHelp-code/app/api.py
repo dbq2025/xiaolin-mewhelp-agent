@@ -18,6 +18,7 @@ guard 里抛 ``HTTPException`` 只会直接返回 422，**不会回落到第二�
 帧编码抽到 ``app.sse`` 并由 ``tests/test_sse.py`` 单独钉住。
 """
 
+import asyncio
 import hashlib
 import inspect
 import json
@@ -60,12 +61,25 @@ from app.errors import (
 from app.extract import ExtractionError, extract_request
 from app.knowledge.embedder import get_embedder
 from app.knowledge.hybrid import HybridRetriever
+from app.flywheel.service import FlywheelService
+from app.flywheel.snapshot import snapshot_for_turn
+from app.flywheel.review import (
+    ReviewAlreadyDecided,
+    ReviewNotFound,
+    approve_review,
+    reject_review,
+    review_detail,
+)
 from app.knowledge.pipeline import RagPipeline
 from app.knowledge.query import LlmRewriter, QueryUnderstander
 from app.knowledge.rerank import get_reranker
 from app.knowledge.sufficiency import SufficiencyJudge
 from app.knowledge.retrieval import warmup as warmup_rag
 from app.knowledge.vector_store import MilvusVectorStore
+from app.observability import tracing
+from app.observability.intent_cost import LangfuseNotConfigured, fetch_intent_costs
+from app.eval_runs import run_evaluation, summarize_trend
+from app.eval_schedule import start_scheduler, stop_scheduler
 from app.llm import get_chat_model
 from app.memory import InMemorySessionStore, get_session_store, new_session_id
 from app.rag_eval import (
@@ -89,7 +103,9 @@ from app.schemas import (
     ErrorResponse,
     ExtractRequest,
     FaithCaseUpdateRequest,
+    FeedbackRequest,
     RefundSelectRequest,
+    ReviewApproveRequest,
     SessionMessagesResponse,
     TicketConfirmRequest,
 )
@@ -300,6 +316,26 @@ async def get_repositories(request: Request):
         yield Repositories.from_session(session)
     finally:
         session.close()
+
+
+async def _manual_eval(app: FastAPI) -> None:
+    """后台跑一轮评估；失败只记日志，让前端在列表里看不到新行。"""
+    settings = app.state.settings or get_settings()
+    repositories = getattr(app.state, "repositories", None)
+    session = None
+    if repositories is None:
+        factory, _ = _ensure_database(app, settings)
+        session = factory()
+        repositories = Repositories.from_session(session)
+    try:
+        app.state.eval_running = True
+        await run_evaluation(repositories=repositories, trigger="手动", settings=settings)
+    except Exception:  # noqa: BLE001 - 后台任务不能把异常抛给事件循环
+        logger.exception("ch09 手动评估失败")
+    finally:
+        app.state.eval_running = False
+        if session is not None:
+            session.close()
 
 
 @lru_cache(maxsize=4)
@@ -581,6 +617,7 @@ async def _db_session_messages_payload(
 
     for index, row in enumerate(rows):
         item: dict[str, Any] = {
+            "id": row.id,
             "role": _ROLE_TO_API.get(row.role, row.role),
             "content": row.content or "",
         }
@@ -632,6 +669,62 @@ def _faith_case_payload(row: Any) -> dict[str, Any]:
         "last_seen_at": row.last_seen_at.isoformat() if row.last_seen_at else None,
         "resolution": row.resolution,
         "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,
+    }
+
+
+def _citations_as_snapshot(citations: Any) -> list[dict[str, Any]]:
+    """把回答里的 ``citations`` 退化成召回快照。
+
+    只用于 checkpoint 回捞失败时兜底：``citations`` 是给用户看的引用，
+    没有重排分数（``score`` 只能置 ``None``），但原文和位置还在，审核人
+    照样能判断「知识库缺这块」还是「有但没检到」。
+    """
+    if not isinstance(citations, list):
+        return []
+    snapshot: list[dict[str, Any]] = []
+    for index, item in enumerate(citations, start=1):
+        if not isinstance(item, dict):
+            continue
+        snapshot.append(
+            {
+                "n": item.get("n") or index,
+                "chunk_id": item.get("chunk_id"),
+                "section_path": item.get("section_path") or "",
+                "category": item.get("category") or "",
+                "quote": str(item.get("quote") or "")[:600],
+                "score": None,
+            }
+        )
+    return snapshot
+
+
+def _iso(value: Any) -> str | None:
+    return value.isoformat() if hasattr(value, "isoformat") else None
+
+
+def _review_item(row: Any) -> dict[str, Any]:
+    """待审行 → 列表页契约（不含原始提问，详情页才有）。"""
+    return {
+        "id": row.id,
+        "normalized_question": row.normalized_question,
+        "ai_suggested_answer": row.ai_suggested_answer,
+        "occurrence_count": row.occurrence_count,
+        "review_status": row.review_status,
+        "approved_answer": row.approved_answer,
+        "created_at": _iso(row.created_at),
+        "updated_at": _iso(row.updated_at),
+    }
+
+
+def _review_question(row: Any) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "conversation_id": row.conversation_id,
+        "raw_question": row.raw_question,
+        "source": row.source,
+        "reason": row.reason,
+        "created_at": _iso(row.created_at),
+        "retrieved_chunks": row.retrieved_chunks or [],
     }
 
 
@@ -749,6 +842,11 @@ async def _chat_stream_body(
             settings=settings,
             summarizer=summarizer,
             mcp_provider=mcp_provider,
+            flywheel=(
+                FlywheelService(repositories, model, settings)
+                if settings.flywheel_enabled
+                else None
+            ),
         ):
             frame = _sse_event(event)
             if frame is not None:
@@ -809,6 +907,11 @@ async def _refund_resume_body(
             settings=settings,
             summarizer=summarizer,
             mcp_provider=mcp_provider,
+            flywheel=(
+                FlywheelService(repositories, model, settings)
+                if settings.flywheel_enabled
+                else None
+            ),
         ):
             frame = _sse_event(event)
             if frame is not None:
@@ -871,6 +974,11 @@ async def _ticket_resume_body(
             settings=settings,
             summarizer=summarizer,
             mcp_provider=mcp_provider,
+            flywheel=(
+                FlywheelService(repositories, model, settings)
+                if settings.flywheel_enabled
+                else None
+            ),
         ):
             frame = _sse_event(event)
             if frame is not None:
@@ -1026,6 +1134,18 @@ async def _lifespan(app: FastAPI):
             _check_context_budget(current_settings)
             _attach_summarizer(app, current_settings)
             _attach_mcp_provider(app, current_settings)
+            # ch09：必须在编译图之前配置，build_agent_graph 才会把 callback 挂上。
+            tracing.configure(current_settings)
+            # ch09：定时评估需要进程级数据库；先建引擎（不连接），再由调度器复用。
+            if current_settings.eval_schedule_enabled:
+                try:
+                    _ensure_database(app, current_settings)
+                except Exception:  # noqa: BLE001 - 定时评估不可用不该阻断启动
+                    logger.warning("评估调度无法初始化数据库，将跳过", exc_info=True)
+            try:
+                app.state.eval_scheduler_task = start_scheduler(app)
+            except Exception:  # noqa: BLE001 - 调度失败不影响聊天
+                logger.warning("评估调度启动失败（已忽略）", exc_info=True)
 
         # ch05：编译图。生产开 SQLite checkpointer；测试注入 InMemorySaver。
         if getattr(app.state, "agent_graph", None) is None:
@@ -1069,6 +1189,16 @@ async def _lifespan(app: FastAPI):
 
         yield
     finally:
+        # ch09：先停调度器，避免它在本进程关库/关模型之后才醒来。
+        try:
+            await stop_scheduler(getattr(app.state, "eval_scheduler_task", None))
+        except Exception:  # noqa: BLE001 - 退出路径不该再抛
+            logger.debug("关闭评估调度失败（已忽略）", exc_info=True)
+        # ch09：先把 trace 刷出去，再关摘要器/嵌入客户端（它们可能还在打点）。
+        try:
+            tracing.shutdown()
+        except Exception:  # noqa: BLE001 - 退出路径不该再抛
+            logger.debug("关闭 Langfuse tracing 失败（已忽略）", exc_info=True)
         # ch07：先等后台摘要任务收敛。放在最前面 —— 它们还要写库，
         # 而后面几步会关掉需要的东西（checkpointer、嵌入客户端）。
         try:
@@ -1300,6 +1430,11 @@ def create_app(
                 settings=settings_,
                 summarizer=getattr(request.app.state, "summarizer", None),
                 mcp_provider=getattr(request.app.state, "mcp_provider", None),
+                flywheel=(
+                    FlywheelService(repositories_, model_, settings_)
+                    if settings_.flywheel_enabled
+                    else None
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             try:
@@ -1837,6 +1972,172 @@ def create_app(
             return _error(404, "not_found", f"台账里没有题号 {eval_id}。")
         return JSONResponse(status_code=200, content=_faith_case_payload(row))
 
+    # -- ch09：聊天页满意度反馈 ---------------------------------------------
+    #
+    # 👍 只记前端状态，不进池；👎 才把该轮用户问题送进飞轮。入池后立刻同步
+    # 标准化 + 查重，审核人打开后台就能看到，不用等定时任务。
+
+    @app.post("/api/feedback")
+    async def submit_feedback(
+        req: FeedbackRequest,
+        request: Request,
+        repositories_: Repositories = Depends(get_repositories),
+        settings_: Settings = Depends(get_app_settings),
+        model_: BaseChatModel = Depends(get_model),
+    ) -> JSONResponse:
+        """把一条 👎 落进问题池，并尽量回捞当轮召回片段。
+
+        幂等靠 ``reason`` 里的 ``[feedback:<message_id>]`` 标记：用户双击、
+        网络重试都不会把同一轮问题重复入池。
+        """
+        if req.rating == "up":
+            return JSONResponse(status_code=200, content={"ok": True, "ignored": True})
+
+        answer = await repositories_.messages.get(req.message_id)
+        if answer is None or answer.conversation_id is None:
+            return _error(404, "not_found", f"消息 {req.message_id} 不存在。")
+        if answer.role != "assistant":
+            return _error(
+                404, "not_found", "👎 只能提交给回答消息，不能提交给用户提问。"
+            )
+        owner = await repositories_.conversations.find_session_id(
+            answer.conversation_id
+        )
+        if owner != req.session_id:
+            return _error(
+                404, "not_found", "这条消息不属于该会话，不能提交反馈。"
+            )
+
+        marker = f"[feedback:{req.message_id}]"
+        if await repositories_.low_confidence.has_reason_fragment(marker):
+            return JSONResponse(
+                status_code=200, content={"ok": True, "duplicate": True}
+            )
+
+        user_row = await repositories_.messages.last_user_before(
+            answer.conversation_id, req.message_id
+        )
+        question = (user_row.content or "").strip() if user_row is not None else ""
+        if not question:
+            return _error(
+                409, "no_question", "找不到这条回答对应的用户问题，无法入池。"
+            )
+
+        snapshot = None
+        graph = getattr(request.app.state, "agent_graph", None)
+        if graph is not None:
+            snapshot = await snapshot_for_turn(
+                graph,
+                session_id=req.session_id,
+                user_message=question,
+                message_id=req.message_id,
+            )
+        if not snapshot:
+            snapshot = _citations_as_snapshot(answer.citations)
+
+        detail = f"：{req.reason.strip()}" if req.reason and req.reason.strip() else ""
+        reason = f"用户反馈未解决{detail} {marker}"
+        question_id = await repositories_.low_confidence.add(
+            answer.conversation_id,
+            question,
+            "user_feedback",
+            reason,
+            retrieved_chunks=snapshot or None,
+        )
+        if settings_.flywheel_enabled:
+            try:
+                await FlywheelService(repositories_, model_, settings_).ingest(
+                    question_id
+                )
+            except Exception:  # noqa: BLE001 - 飞轮失败不该让用户看到报错
+                logger.exception("👎 已入池，但飞轮处理失败（question_id=%s）", question_id)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "ok": True,
+                "question_id": question_id,
+                "snapshot_count": len(snapshot or []),
+            },
+        )
+
+    # -- ch09：审核队列 ------------------------------------------------------
+
+    @app.get("/api/review-queue")
+    async def review_queue_list(
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        repositories_: Repositories = Depends(get_repositories),
+    ) -> JSONResponse:
+        if status is not None and status not in ("待审", "通过", "驳回"):
+            return _error(422, "invalid_status", "status 只能是 待审/通过/驳回")
+        rows = await repositories_.reviews.list_rows(
+            status=status, limit=max(1, min(limit, 200)), offset=max(0, offset)
+        )
+        return JSONResponse(
+            status_code=200,
+            content={"items": [_review_item(row) for row in rows]},
+        )
+
+    @app.get("/api/review-queue/{review_id}")
+    async def review_queue_detail(
+        review_id: int,
+        repositories_: Repositories = Depends(get_repositories),
+    ) -> JSONResponse:
+        detail = await review_detail(repositories_, review_id)
+        if detail is None:
+            return _error(404, "review_not_found", f"待审问题 {review_id} 不存在")
+        return JSONResponse(
+            status_code=200,
+            content={
+                "review": _review_item(detail.review),
+                "questions": [
+                    _review_question(question) for question in detail.questions
+                ],
+                "snapshot": detail.snapshot,
+            },
+        )
+
+    @app.post("/api/review-queue/{review_id}/approve")
+    async def review_queue_approve(
+        review_id: int,
+        req: ReviewApproveRequest,
+        request: Request,
+        repositories_: Repositories = Depends(get_repositories),
+    ) -> JSONResponse:
+        settings_ = get_app_settings(request)
+        store = _vector_store_for(
+            settings_.milvus_uri, settings_.milvus_collection, settings_.embedding_dim
+        )
+        try:
+            payload = await approve_review(
+                repositories_,
+                review_id,
+                req.approved_answer,
+                vector_store=store,
+                embedder=get_embedder(settings_),
+            )
+        except ReviewNotFound as exc:
+            return _error(404, "review_not_found", redact(str(exc)))
+        except ReviewAlreadyDecided as exc:
+            return _error(409, "review_already_decided", redact(str(exc)))
+        except ValueError as exc:
+            return _error(422, "invalid_approved_answer", redact(str(exc)))
+        return JSONResponse(status_code=200, content=payload)
+
+    @app.post("/api/review-queue/{review_id}/reject")
+    async def review_queue_reject(
+        review_id: int,
+        repositories_: Repositories = Depends(get_repositories),
+    ) -> JSONResponse:
+        try:
+            await reject_review(repositories_, review_id)
+        except ReviewNotFound as exc:
+            return _error(404, "review_not_found", redact(str(exc)))
+        except ReviewAlreadyDecided as exc:
+            return _error(409, "review_already_decided", redact(str(exc)))
+        return JSONResponse(status_code=200, content={"ok": True})
+
     # -- 结构化提取（一次返回完整 JSON，不流式）---------------------------
 
     @app.post(
@@ -1857,6 +2158,97 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise _as_upstream_error(exc) from exc
         return JSONResponse(status_code=200, content=result.model_dump())
+
+    # -- ch09：按意图的 token 成本 -----------------------------------------
+
+    @app.get("/api/intent-cost")
+    async def intent_cost(request: Request, days: int = 7) -> JSONResponse:
+        """按意图汇总 Langfuse 里的 token / 成本。
+
+        没有配置云端凭据时返回空列表 + ``configured=false``，页面据此显示
+        「未接入」而不是报错；上游失败返回 502。
+        """
+        current = get_app_settings(request)
+        if not (
+            current.langfuse_enabled
+            and current.langfuse_public_key
+            and current.langfuse_secret_key
+        ):
+            return JSONResponse(
+                status_code=200,
+                content={"configured": False, "days": days, "items": [], "total_tokens": 0},
+            )
+        if days < 1 or days > 90:
+            return _error(422, "invalid_days", "days 必须在 1–90 之间")
+
+        try:
+            items = await fetch_intent_costs(current, days=days)
+        except LangfuseNotConfigured:
+            return JSONResponse(
+                status_code=200,
+                content={"configured": False, "days": days, "items": [], "total_tokens": 0},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("intent cost query failed")
+            return _error(502, "langfuse_unavailable", redact(str(exc)))
+
+        payload = [
+            {
+                "intent": item.intent,
+                "tokens": item.tokens,
+                "cost": item.cost,
+                "observations": item.observations,
+            }
+            for item in items
+        ]
+        return JSONResponse(
+            status_code=200,
+            content={
+                "configured": True,
+                "days": days,
+                "items": payload,
+                "total_tokens": sum(item.tokens for item in items),
+            },
+        )
+
+    # -- ch09：评估流水线 ---------------------------------------------------
+
+    @app.get("/api/eval-runs")
+    async def eval_runs_list(
+        limit: int = 20,
+        repositories_: Repositories = Depends(get_repositories),
+    ) -> JSONResponse:
+        """最近几轮评估 + 指标趋势（最近两轮对比）。"""
+        rows = await repositories_.eval_runs.list_recent(max(1, min(limit, 100)))
+        return JSONResponse(
+            status_code=200,
+            content={
+                "items": [
+                    {
+                        "id": row.id,
+                        "triggered_by": row.triggered_by,
+                        "dataset_size": row.dataset_size,
+                        "metrics": row.metrics,
+                        "created_at": _iso(row.created_at),
+                    }
+                    for row in rows
+                ],
+                "trend": summarize_trend(rows),
+            },
+        )
+
+    @app.post("/api/eval-runs/run")
+    async def eval_runs_run() -> JSONResponse:
+        """手动触发一轮评估；后台跑，前端轮询 ``GET /api/eval-runs`` 等新行。"""
+        task = getattr(app.state, "eval_run_task", None)
+        if (task is not None and not task.done()) or bool(
+            getattr(app.state, "eval_running", False)
+        ):
+            return _error(409, "eval_run_in_progress", "已有一轮评估在跑，请稍后再试")
+        app.state.eval_run_task = asyncio.create_task(
+            _manual_eval(app), name="ch09-manual-eval"
+        )
+        return JSONResponse(status_code=202, content={"started": True})
 
     # -- ch04：RAG 评估看板 -------------------------------------------------
     #
@@ -1919,6 +2311,49 @@ def create_app(
                 "/rag-eval",
                 StaticFiles(directory=rag_eval_dir, html=True),
                 name="rag-eval",
+            )
+
+        # 待审队列后台：同样是纯静态页，数据走 /api/review-queue。
+        review_dir = web_dir / "review"
+        if review_dir.is_dir():
+
+            @app.get("/review", include_in_schema=False)
+            async def review_redirect() -> RedirectResponse:
+                """不带斜杠也能进；审核人一般记 /review。"""
+                return RedirectResponse(url="/review/")
+
+            app.mount(
+                "/review",
+                StaticFiles(directory=review_dir, html=True),
+                name="review",
+            )
+
+        # 评估趋势：纯静态页，数据走 /api/eval-runs。
+        trend_dir = web_dir / "eval-trend"
+        if trend_dir.is_dir():
+
+            @app.get("/eval-trend", include_in_schema=False)
+            async def eval_trend_redirect() -> RedirectResponse:
+                return RedirectResponse(url="/eval-trend/")
+
+            app.mount(
+                "/eval-trend",
+                StaticFiles(directory=trend_dir, html=True),
+                name="eval-trend",
+            )
+
+        # 观测与成本：纯静态页，数据走 /api/intent-cost 与 /api/eval-runs。
+        observability_dir = web_dir / "observability"
+        if observability_dir.is_dir():
+
+            @app.get("/observability", include_in_schema=False)
+            async def observability_redirect() -> RedirectResponse:
+                return RedirectResponse(url="/observability/")
+
+            app.mount(
+                "/observability",
+                StaticFiles(directory=observability_dir, html=True),
+                name="observability",
             )
 
         @app.get("/", include_in_schema=False)

@@ -223,6 +223,36 @@ class Settings(BaseSettings):
     rag_rewrite_timeout: float = Field(
         default=3.0, gt=0, description="单次 Query 改写请求超时（秒）。"
     )
+    evidence_confidence_model: str = Field(
+        default="evals/ch09_confidence_model.json",
+        description=(
+            "ch09 正式证据置信度模型的 JSON artifact 路径（相对项目根）。"
+            "文件缺失或损坏时闸退回 ch05 的 RAG_MIN_RERANK_SCORE 阈值版。"
+        ),
+    )
+    knowledge_self_check: bool = Field(
+        default=True,
+        description=(
+            "ch09：置信度闸通过后、进 Agent 前是否再让模型自评一次「证据够不够」。"
+            "生产默认开；单元测试关掉，避免每次图测试都多一次模型调用。"
+        ),
+    )
+    self_check_timeout: float = Field(
+        default=5.0, gt=0, description="生成前自评的单次超时（秒）。"
+    )
+    flywheel_enabled: bool = Field(
+        default=True,
+        description=(
+            "ch09：入池后是否自动跑「标准化 → 查重 → 待审队列」。"
+            "生产默认开；离线单测关掉，避免多调几次模型。"
+        ),
+    )
+    flywheel_normalize_timeout: float = Field(
+        default=20.0, gt=0, description="问题标准化模型调用超时（秒）。"
+    )
+    flywheel_dedupe_timeout: float = Field(
+        default=15.0, gt=0, description="查重模型调用超时（秒）。"
+    )
 
     # -- ch05：Workflow 编排 + 主 Agent -------------------------------------
     checkpoint_db_path: str = Field(
@@ -254,6 +284,46 @@ class Settings(BaseSettings):
         description=(
             "每轮结构化日志的 JSONL 路径。**允许为空**：空串表示只打 logger，"
             "不写文件（测试默认如此）。"
+        ),
+    )
+
+    # -- ch09：Langfuse 观测 -------------------------------------------------
+    langfuse_enabled: bool = Field(
+        default=True,
+        description="总开关；false 或缺少任一连接项时，tracing 全降级为 no-op。",
+    )
+    langfuse_public_key: str = Field(default="", description="Langfuse 项目 public key。")
+    langfuse_secret_key: str = Field(default="", description="Langfuse 项目 secret key。")
+    langfuse_base_url: str = Field(
+        default="https://cloud.langfuse.com",
+        description="Langfuse 地址；自部署时换成自己的 URL。",
+    )
+    langfuse_environment: str = Field(
+        default="development",
+        description="trace 的环境标签（production / staging / development）。",
+    )
+
+    # -- ch09：评估流水线 ---------------------------------------------------
+
+    eval_schedule_enabled: bool = Field(
+        default=True,
+        description="是否在进程内定时跑 ch04 评估集并写 eval_runs。",
+    )
+    eval_schedule_interval_hours: float = Field(
+        default=24.0,
+        gt=0,
+        description="定时评估间隔（小时）；默认每天一轮。",
+    )
+    eval_script_path: str = Field(
+        default="evals/run_ch04_evals.py",
+        description="评估脚本相对项目根目录的路径。",
+    )
+    eval_generation_limit: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "生成段每桶取多少条；0 表示全部。生成模型偶发卡住时可设小值，"
+            "检索段仍跑全量，报告里会注明。"
         ),
     )
 
@@ -535,6 +605,9 @@ class Settings(BaseSettings):
         "mysql_user",
         "mysql_password",
         "mysql_database",
+        "langfuse_public_key",
+        "langfuse_secret_key",
+        "langfuse_base_url",
         mode="before",
     )
     @classmethod

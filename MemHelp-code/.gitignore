@@ -37,6 +37,10 @@ log/
 data/
 uploads/
 
+# ch09：每轮评估的临时报告（趋势数据在 eval_runs 表里）
+evals/reports/ch09-latest.json
+evals/reports/ch09-latest.md
+
 # ---- 编辑器 / 操作系统 ----
 .idea/
 .vscode/

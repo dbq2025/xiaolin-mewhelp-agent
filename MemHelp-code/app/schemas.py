@@ -378,3 +378,31 @@ class FaithCaseUpdateRequest(BaseModel):
         default=None,
         description="处置说明：标已解决要写清怎么解决的，标无需解决要写清为什么不用改。",
     )
+
+
+# --------------------------------------------------------------------------
+# ch09：聊天页满意度反馈
+# --------------------------------------------------------------------------
+
+
+class FeedbackRequest(BaseModel):
+    """一条回答的 👍 / 👎。
+
+    ``message_id`` 是 ``done`` 事件里带回来的 assistant 消息主键；服务端用它
+    反查同会话的上一轮 user 问题，所以前端不需要自己拼问题文本。
+    """
+
+    session_id: str = Field(min_length=1, description="会话 id。")
+    message_id: int = Field(gt=0, description="被反馈的 assistant 消息 id。")
+    rating: Literal["up", "down"] = Field(description="up=👍，down=👎。")
+    reason: str | None = Field(
+        default=None, max_length=1000, description="可选：用户填的补充说明。"
+    )
+
+
+class ReviewApproveRequest(BaseModel):
+    """审核通过时人工确认/改写的核准答案。"""
+
+    approved_answer: str = Field(
+        min_length=1, max_length=4000, description="写入知识库的最终答案。"
+    )

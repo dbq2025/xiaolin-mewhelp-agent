@@ -22,6 +22,8 @@ from typing import Any
 
 from langgraph.types import Command
 
+from app.observability import tracing
+
 __all__ = [
     "astream_resume",
     "astream_turn",
@@ -44,6 +46,7 @@ def _config(
     intent_cheap_model: Any = None,
     summarizer: Any = None,
     mcp_provider: Any = None,
+    flywheel: Any = None,
 ) -> dict[str, Any]:
     return {
         "configurable": {
@@ -58,6 +61,8 @@ def _config(
             "summarizer": summarizer,
             # ch08：MCP 工具发现器。None 表示本实例不接 MCP。
             "mcp_provider": mcp_provider,
+            # ch09：数据飞轮。None 表示入池后不自动标准化/查重。
+            "flywheel": flywheel,
         }
     }
 
@@ -138,6 +143,8 @@ def done_payload(values: dict[str, Any], *, session_id: str) -> dict[str, Any]:
     return {
         "finish_reason": finish_reason,
         "session_id": session_id,
+        # ch09：👎 反馈要精确到「这条回答」，前端把它挂到 bot 气泡上。
+        "message_id": values.get("message_id"),
         "trimmed": int(context.get("trimmed_messages") or 0),
         "kept": int(context.get("kept_messages") or 0),
         # ch07：三层结构的可观测字段。全部带默认值，ch01–ch06 的调用方
@@ -232,6 +239,7 @@ async def astream_turn(
     turn_id: str | None = None,
     summarizer: Any = None,
     mcp_provider: Any = None,
+    flywheel: Any = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """跑一轮图，逐条产出 token/status/tools/citations/done 事件。"""
     config = _config(
@@ -244,6 +252,7 @@ async def astream_turn(
         settings=settings,
         summarizer=summarizer,
         mcp_provider=mcp_provider,
+        flywheel=flywheel,
     )
 
     # 同一 thread 还在等订单选择时，不要把新消息塞进暂停中的图：
@@ -279,12 +288,17 @@ async def astream_turn(
         "user_message": message,
     }
 
-    async for event in _stream_events(graph, payload, config):
-        yield event
-
-    async for event in _finish_or_pause(graph, config, session_id=session_id):
-        yield event
-
+    done: dict[str, Any] | None = None
+    with tracing.turn_span(session_id, message) as span:
+        try:
+            async for event in _stream_events(graph, payload, config):
+                yield event
+            async for event in _finish_or_pause(graph, config, session_id=session_id):
+                if event.get("type") == "done":
+                    done = event.get("payload") or {}
+                yield event
+        finally:
+            span.finish(done or {})
 
 async def astream_resume(
     graph: Any,
@@ -300,6 +314,7 @@ async def astream_resume(
     summarizer: Any = None,
     mcp_provider: Any = None,
     resume_value: Any = None,
+    flywheel: Any = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """从中断点续跑；不重新跑 begin_turn。
 
@@ -316,14 +331,24 @@ async def astream_resume(
         settings=settings,
         summarizer=summarizer,
         mcp_provider=mcp_provider,
+        flywheel=flywheel,
     )
     resumed = Command(
         resume=resume_value if resume_value is not None else {"order_id": order_id}
     )
-    async for event in _stream_events(graph, resumed, config):
-        yield event
-    async for event in _finish_or_pause(graph, config, session_id=session_id):
-        yield event
+    snapshot = await graph.aget_state(config)
+    question = str((snapshot.values or {}).get("user_message") or "")
+    done: dict[str, Any] | None = None
+    with tracing.turn_span(session_id, question) as span:
+        try:
+            async for event in _stream_events(graph, resumed, config):
+                yield event
+            async for event in _finish_or_pause(graph, config, session_id=session_id):
+                if event.get("type") == "done":
+                    done = event.get("payload") or {}
+                yield event
+        finally:
+            span.finish(done or {})
 
 
 async def complete_turn(
@@ -340,6 +365,7 @@ async def complete_turn(
     turn_id: str | None = None,
     summarizer: Any = None,
     mcp_provider: Any = None,
+    flywheel: Any = None,
 ) -> tuple[str, dict[str, Any]]:
     """非流式：收齐 token 事件，返回完整回复与 done 摘要。"""
     parts: list[str] = []
@@ -358,6 +384,7 @@ async def complete_turn(
         turn_id=turn_id,
         summarizer=summarizer,
         mcp_provider=mcp_provider,
+        flywheel=flywheel,
     ):
         if event.get("type") == "token":
             parts.append(str(event.get("delta") or ""))

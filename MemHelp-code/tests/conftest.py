@@ -43,6 +43,14 @@ def test_settings() -> Settings:
         context_token_budget=2000,
         # ch05：测试不往仓库写 JSONL；需要日志的用例显式传路径。
         turn_log_path="",
+        # ch09：图单测不额外调一次自评模型（否则会吃掉 ScriptedChatModel 的脚本）；
+        # 需要验自评的用例显式打开并注入假判官。
+        knowledge_self_check=False,
+        # ch09：图/HTTP 单测默认不跑飞轮（否则假模型会被标准化/查重多调几次）；
+        # 飞轮自身由 test_ch09_flywheel.py 直接测服务。
+        flywheel_enabled=False,
+        # ch09：测试不启定时评估（否则 lifespan 会留一个 24h 的 asyncio 任务）。
+        eval_schedule_enabled=False,
     )
 
 

@@ -44,15 +44,18 @@ from app.db.models import (
     FAITH_CASE_STATUSES as _FAITH_CASE_STATUSES,
     LOW_CONFIDENCE_SOURCES as _LOW_CONFIDENCE_SOURCES,
     MESSAGE_ROLES,
+    REVIEW_STATUSES as _REVIEW_STATUSES,
     TICKET_TYPES as _TICKET_TYPES,
     Conversation,
     ConversationSummary,
+    EvalRun,
     FaithCase,
     Faq,
     KnowledgeChunk,
     LowConfidenceQuestion,
     Message,
     QaStaging,
+    ReviewQueue,
     Ticket,
     ToolAuditLog,
 )
@@ -70,6 +73,7 @@ TICKET_TYPES: tuple[str, ...] = _TICKET_TYPES
 #: ch04：低置信度入池入口与台账处置状态，同样取自 ORM 层的单一来源。
 LOW_CONFIDENCE_SOURCES: tuple[str, ...] = _LOW_CONFIDENCE_SOURCES
 FAITH_CASE_STATUSES: tuple[str, ...] = _FAITH_CASE_STATUSES
+REVIEW_STATUSES: tuple[str, ...] = _REVIEW_STATUSES
 
 #: ``LIKE`` 的转义字符。SQL 标准里 ``LIKE ... ESCAPE '\'`` 指定它；
 #: MySQL 默认就是 ``\``，但显式写出来才不依赖默认值。
@@ -135,6 +139,8 @@ class MessageRow:
     citations: list[dict[str, Any]] | None = None
     #: ch05：本轮建议动作（转人工 / 建工单）。刷新后按钮还能渲染，就靠它。
     actions: list[dict[str, Any]] | None = None
+    #: ch09：👎 反馈要按会话回捞，消息行得能回答「我属于哪个会话」。
+    conversation_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -249,6 +255,61 @@ class LowConfidenceRow:
     source: str
     reason: str | None
     created_at: datetime
+    #: ch09：当轮召回片段快照；老数据没有这一列的值。
+    retrieved_chunks: list[dict[str, Any]] | None = None
+    #: ch09：归并到的待审行；未归并时为 ``None``。
+    matched_review_id: int | None = None
+
+
+def _low_confidence_row(row: LowConfidenceQuestion) -> LowConfidenceRow:
+    return LowConfidenceRow(
+        id=int(row.id),
+        conversation_id=row.conversation_id,
+        raw_question=row.raw_question,
+        source=row.source,
+        reason=row.reason,
+        created_at=row.created_at,
+        retrieved_chunks=row.retrieved_chunks,
+        matched_review_id=row.matched_review_id,
+    )
+
+
+@dataclass(frozen=True)
+class ReviewRow:
+    """待审队列里的一条。"""
+
+    id: int
+    normalized_question: str
+    ai_suggested_answer: str | None
+    occurrence_count: int
+    review_status: str
+    approved_answer: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class EvalRunRow:
+    """一条评估记录。"""
+
+    id: int
+    triggered_by: str
+    dataset_size: int
+    metrics: dict[str, Any]
+    created_at: datetime
+
+
+def _review_row(row: ReviewQueue) -> ReviewRow:
+    return ReviewRow(
+        id=int(row.id),
+        normalized_question=row.normalized_question,
+        ai_suggested_answer=row.ai_suggested_answer,
+        occurrence_count=int(row.occurrence_count),
+        review_status=row.review_status,
+        approved_answer=row.approved_answer,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
 
 
 @dataclass(frozen=True)
@@ -652,8 +713,8 @@ class MessageRepository:
 
     def _append_many(
         self, conversation_id: int, rows: Sequence[dict[str, Any]]
-    ) -> None:
-        """一次事务写入多行。
+    ) -> list[int]:
+        """一次事务写入多行，返回新行 id（按传入顺序）。
 
         **先把所有 role 校验完再 add**：否则第二行非法时第一行已经进 Session，
         调用方 catch 了异常也不知道要不要 rollback。这里要么全写、要么一行不写。
@@ -661,31 +722,92 @@ class MessageRepository:
         for row in rows:
             self._check_role(str(row["role"]))
 
+        messages: list[Message] = []
         for row in rows:
-            self._session.add(
-                Message(
-                    conversation_id=conversation_id,
-                    role=row["role"],
-                    content=row.get("content"),
-                    tool_calls=row.get("tool_calls"),
-                    tool_call_id=row.get("tool_call_id"),
-                    tool_traces=row.get("tool_traces"),
-                    citations=row.get("citations"),
-                    actions=row.get("actions"),
-                )
+            message = Message(
+                conversation_id=conversation_id,
+                role=row["role"],
+                content=row.get("content"),
+                tool_calls=row.get("tool_calls"),
+                tool_call_id=row.get("tool_call_id"),
+                tool_traces=row.get("tool_traces"),
+                citations=row.get("citations"),
+                actions=row.get("actions"),
             )
+            self._session.add(message)
+            messages.append(message)
+        self._session.flush()
+        ids = [int(message.id) for message in messages]
         self._session.commit()
+        return ids
 
     async def append_many(
         self, conversation_id: int, rows: Sequence[dict[str, Any]]
-    ) -> None:
+    ) -> list[int]:
         """把一轮的多行（user / assistant tool_calls / tool / assistant）单事务写入。
 
         ch05 的 ReAct 一轮可能产生多组工具调用；逐行 ``append`` 每次 commit，
         中途失败会留下「有工具申请单、没有工具结果」的半截历史，下一轮回灌时
         上游会直接拒绝。单事务是这条链路的结构性保证。
+
+        返回 id 供 ch09 的 👎 反馈精确定位「是哪一条回答被差评」。
         """
-        await _run(self._append_many, conversation_id, rows)
+        return await _run(self._append_many, conversation_id, rows)
+
+    def _get(self, message_id: int) -> MessageRow | None:
+        row = self._session.get(Message, message_id)
+        if row is None:
+            return None
+        return MessageRow(
+            id=row.id,
+            role=row.role,
+            content=row.content,
+            tool_calls=row.tool_calls,
+            tool_call_id=row.tool_call_id,
+            created_at=row.created_at,
+            tool_traces=row.tool_traces,
+            citations=row.citations,
+            actions=row.actions,
+            conversation_id=row.conversation_id,
+        )
+
+    async def get(self, message_id: int) -> MessageRow | None:
+        """按主键取一条消息；不存在返回 ``None``。"""
+        return await _run(self._get, message_id)
+
+    def _last_user_before(
+        self, conversation_id: int, message_id: int
+    ) -> MessageRow | None:
+        row = self._session.scalars(
+            select(Message)
+            .where(
+                Message.conversation_id == conversation_id,
+                Message.role == "user",
+                Message.id < message_id,
+            )
+            .order_by(Message.id.desc())
+            .limit(1)
+        ).first()
+        if row is None:
+            return None
+        return MessageRow(
+            id=row.id,
+            role=row.role,
+            content=row.content,
+            tool_calls=row.tool_calls,
+            tool_call_id=row.tool_call_id,
+            created_at=row.created_at,
+            tool_traces=row.tool_traces,
+            citations=row.citations,
+            actions=row.actions,
+            conversation_id=row.conversation_id,
+        )
+
+    async def last_user_before(
+        self, conversation_id: int, message_id: int
+    ) -> MessageRow | None:
+        """同会话里、这条消息之前最近的一条 user 消息。👎 用它反查问题原话。"""
+        return await _run(self._last_user_before, conversation_id, message_id)
 
     def _list(self, conversation_id: int) -> list[MessageRow]:
         rows = self._session.scalars(
@@ -1435,6 +1557,7 @@ class LowConfidenceQuestionRepository:
         raw_question: str,
         source: str,
         reason: str | None,
+        retrieved_chunks: list[dict[str, Any]] | None,
     ) -> int:
         if source not in LOW_CONFIDENCE_SOURCES:
             raise ValueError(
@@ -1449,6 +1572,7 @@ class LowConfidenceQuestionRepository:
             raw_question=raw_question,
             source=source,
             reason=reason,
+            retrieved_chunks=retrieved_chunks or None,
         )
         self._session.add(row)
         self._session.commit()
@@ -1460,13 +1584,37 @@ class LowConfidenceQuestionRepository:
         raw_question: str,
         source: str,
         reason: str | None = None,
+        *,
+        retrieved_chunks: list[dict[str, Any]] | None = None,
     ) -> int:
         """把一条答不上来的原话落进池子，返回主键。
 
         :param source: ``retrieval_low_conf`` / ``self_check`` / ``user_feedback``。
         :param reason: 判「不能答」的原因，复盘时看的就是它。
+        :param retrieved_chunks: 当轮 Top-N 召回片段快照（原文 + 得分），
+            给人工审核判断「知识库真缺」还是「有但没检到」。
         """
-        return await _run(self._add, conversation_id, raw_question, source, reason)
+        return await _run(
+            self._add, conversation_id, raw_question, source, reason, retrieved_chunks
+        )
+
+    def _get(self, question_id: int) -> LowConfidenceRow | None:
+        row = self._session.get(LowConfidenceQuestion, question_id)
+        return None if row is None else _low_confidence_row(row)
+
+    async def get(self, question_id: int) -> LowConfidenceRow | None:
+        return await _run(self._get, question_id)
+
+    def _attach_review(self, question_id: int, review_id: int) -> None:
+        row = self._session.get(LowConfidenceQuestion, question_id)
+        if row is None:
+            raise ValueError(f"低置信度问题 {question_id} 不存在")
+        row.matched_review_id = review_id
+        self._session.commit()
+
+    async def attach_review(self, question_id: int, review_id: int) -> None:
+        """记下这条原话被归并到哪一行待审问题。"""
+        await _run(self._attach_review, question_id, review_id)
 
     def _list_recent(self, limit: int) -> list[LowConfidenceRow]:
         rows = self._session.scalars(
@@ -1474,21 +1622,35 @@ class LowConfidenceQuestionRepository:
             .order_by(LowConfidenceQuestion.id.desc())
             .limit(limit)
         ).all()
-        return [
-            LowConfidenceRow(
-                id=int(row.id),
-                conversation_id=row.conversation_id,
-                raw_question=row.raw_question,
-                source=row.source,
-                reason=row.reason,
-                created_at=row.created_at,
-            )
-            for row in rows
-        ]
+        return [_low_confidence_row(row) for row in rows]
 
     async def list_recent(self, limit: int = 20) -> list[LowConfidenceRow]:
         """最近入池的若干条（新的在前）。"""
         return await _run(self._list_recent, limit)
+
+    def _list_for_review(self, review_id: int) -> list[LowConfidenceRow]:
+        rows = self._session.scalars(
+            select(LowConfidenceQuestion)
+            .where(LowConfidenceQuestion.matched_review_id == review_id)
+            .order_by(LowConfidenceQuestion.id.asc())
+        ).all()
+        return [_low_confidence_row(row) for row in rows]
+
+    async def list_for_review(self, review_id: int) -> list[LowConfidenceRow]:
+        """归并到某条待审问题的全部原始提问（审核详情页要逐条展示）。"""
+        return await _run(self._list_for_review, review_id)
+
+    def _has_reason_fragment(self, fragment: str) -> bool:
+        found = self._session.scalar(
+            select(LowConfidenceQuestion.id).where(
+                LowConfidenceQuestion.reason.like(f"%{fragment}%")
+            )
+        )
+        return found is not None
+
+    async def has_reason_fragment(self, fragment: str) -> bool:
+        """``reason`` 里是否已有某个标记；👎 双击幂等靠它。"""
+        return await _run(self._has_reason_fragment, fragment)
 
     def _count_by_source(self) -> dict[str, int]:
         rows = self._session.execute(
@@ -1753,6 +1915,140 @@ class ToolAuditRepository:
 
 
 # ---------------------------------------------------------------------------
+# ch09：待审队列 / 评估记录
+# ---------------------------------------------------------------------------
+
+
+class ReviewQueueRepository:
+    """``review_queue`` 的读写 —— 一行一个去重后的知识缺口。
+
+    查重命中时只累加 ``occurrence_count``，绝不新增第二行；原始提问留在
+    低置信度池里，用 ``matched_review_id`` 指回来。
+    """
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def _add(self, normalized_question: str, ai_suggested_answer: str | None) -> int:
+        if not normalized_question.strip():
+            raise ValueError("标准化问题不能为空")
+        row = ReviewQueue(
+            normalized_question=normalized_question,
+            ai_suggested_answer=ai_suggested_answer,
+        )
+        self._session.add(row)
+        self._session.commit()
+        return int(row.id)
+
+    async def add(self, normalized_question: str, ai_suggested_answer: str | None) -> int:
+        return await _run(self._add, normalized_question, ai_suggested_answer)
+
+    def _get(self, review_id: int) -> ReviewRow | None:
+        row = self._session.get(ReviewQueue, review_id)
+        return None if row is None else _review_row(row)
+
+    async def get(self, review_id: int) -> ReviewRow | None:
+        return await _run(self._get, review_id)
+
+    def _list_rows(
+        self, status: str | None, limit: int, offset: int
+    ) -> list[ReviewRow]:
+        statement = select(ReviewQueue).order_by(ReviewQueue.id.desc())
+        if status is not None:
+            statement = statement.where(ReviewQueue.review_status == status)
+        rows = self._session.scalars(statement.limit(limit).offset(offset)).all()
+        return [_review_row(row) for row in rows]
+
+    async def list_rows(
+        self, status: str | None = None, limit: int = 50, offset: int = 0
+    ) -> list[ReviewRow]:
+        return await _run(self._list_rows, status, limit, offset)
+
+    def _pending_questions(self, limit: int) -> list[tuple[int, str]]:
+        rows = self._session.scalars(
+            select(ReviewQueue)
+            .where(ReviewQueue.review_status == "待审")
+            .order_by(ReviewQueue.id.desc())
+            .limit(limit)
+        ).all()
+        return [(int(row.id), row.normalized_question) for row in rows]
+
+    async def pending_questions(self, limit: int = 50) -> list[tuple[int, str]]:
+        """待审的 ``(id, 标准化问题)``，供查重时让模型判断是否同义。"""
+        return await _run(self._pending_questions, limit)
+
+    def _increment(self, review_id: int) -> bool:
+        row = self._session.get(ReviewQueue, review_id)
+        if row is None:
+            return False
+        row.occurrence_count = int(row.occurrence_count) + 1
+        self._session.commit()
+        return True
+
+    async def increment(self, review_id: int) -> bool:
+        return await _run(self._increment, review_id)
+
+    def _set_status(
+        self, review_id: int, status: str, approved_answer: str | None
+    ) -> bool:
+        if status not in REVIEW_STATUSES:
+            raise ValueError(f"非法审核状态 {status!r}，只允许 {REVIEW_STATUSES}")
+        row = self._session.get(ReviewQueue, review_id)
+        if row is None:
+            return False
+        row.review_status = status
+        if approved_answer is not None:
+            row.approved_answer = approved_answer
+        self._session.commit()
+        return True
+
+    async def set_status(
+        self, review_id: int, status: str, approved_answer: str | None = None
+    ) -> bool:
+        return await _run(self._set_status, review_id, status, approved_answer)
+
+
+class EvalRunRepository:
+    """``eval_runs`` 的追加与读取（一行一轮，只追加不改写）。"""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def _add(self, triggered_by: str, dataset_size: int, metrics: dict[str, Any]) -> int:
+        row = EvalRun(
+            triggered_by=triggered_by,
+            dataset_size=dataset_size,
+            metrics=metrics,
+        )
+        self._session.add(row)
+        self._session.commit()
+        return int(row.id)
+
+    async def add(
+        self, triggered_by: str, dataset_size: int, metrics: dict[str, Any]
+    ) -> int:
+        return await _run(self._add, triggered_by, dataset_size, metrics)
+
+    def _list_recent(self, limit: int) -> list[EvalRunRow]:
+        rows = self._session.scalars(
+            select(EvalRun).order_by(EvalRun.id.desc()).limit(limit)
+        ).all()
+        return [
+            EvalRunRow(
+                id=int(row.id),
+                triggered_by=row.triggered_by,
+                dataset_size=int(row.dataset_size),
+                metrics=row.metrics,
+                created_at=row.created_at,
+            )
+            for row in rows
+        ]
+
+    async def list_recent(self, limit: int = 20) -> list[EvalRunRow]:
+        return await _run(self._list_recent, limit)
+
+
+# ---------------------------------------------------------------------------
 # 容器
 # ---------------------------------------------------------------------------
 
@@ -1781,6 +2077,10 @@ class Repositories:
     summaries: ConversationSummaryRepository
     #: ch08：工具调用审计（只追加，不挂外键）
     audit: ToolAuditRepository
+    #: ch09：待审队列
+    reviews: ReviewQueueRepository
+    #: ch09：评估记录
+    eval_runs: EvalRunRepository
 
     @classmethod
     def from_session(cls, session: Session) -> "Repositories":
@@ -1800,4 +2100,6 @@ class Repositories:
             faith_cases=FaithCaseRepository(session),
             summaries=ConversationSummaryRepository(session),
             audit=ToolAuditRepository(session),
+            reviews=ReviewQueueRepository(session),
+            eval_runs=EvalRunRepository(session),
         )

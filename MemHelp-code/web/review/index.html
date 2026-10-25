@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>待审队列 · MewHelp</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%232563eb'/%3E%3Ctext x='16' y='22' font-size='15' text-anchor='middle' fill='white'%3E%E5%AE%A1%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/review/style.css">
+</head>
+<body>
+
+<div class="app">
+  <header class="topbar">
+    <a class="brand" href="/chat/" title="回到对话页">
+      <div class="avatar-bot" aria-hidden="true">审</div>
+      <div class="brand-text">
+        <div class="brand-name">MewHelp · 待审队列</div>
+        <div class="brand-sub" id="queue-sub">读取中…</div>
+      </div>
+    </a>
+
+    <nav class="nav" aria-label="主导航">
+      <a href="/chat/">对话</a>
+      <a href="/rag-eval/">评估</a>
+      <a href="/review/" class="active" aria-current="page">审核</a>
+      <a href="/observability/">观测</a>
+    </nav>
+
+    <div class="topbar-actions">
+      <button class="btn-ghost" id="btn-refresh" type="button">刷新</button>
+    </div>
+  </header>
+
+  <main class="page">
+    <div class="tabs" role="tablist" aria-label="按状态过滤">
+      <button class="tab active" data-status="待审" role="tab" aria-selected="true">待审</button>
+      <button class="tab" data-status="通过" role="tab" aria-selected="false">通过</button>
+      <button class="tab" data-status="驳回" role="tab" aria-selected="false">驳回</button>
+      <button class="tab" data-status="" role="tab" aria-selected="false">全部</button>
+    </div>
+
+    <section class="panel" id="list-panel">
+      <div class="table-head">
+        <span>标准化问题</span>
+        <span>出现</span>
+        <span>示例答案</span>
+        <span>状态</span>
+        <span>操作</span>
+      </div>
+      <div id="rows" class="rows" aria-live="polite"></div>
+      <div class="empty" id="empty" hidden>
+        <div class="empty-icon" aria-hidden="true">✓</div>
+        <h2 id="empty-title">暂无待审问题</h2>
+        <p id="empty-hint">用户答不上来的问题会自动出现在这里。</p>
+      </div>
+      <div class="empty" id="error-panel" hidden>
+        <div class="empty-icon bad" aria-hidden="true">!</div>
+        <h2>队列没能加载</h2>
+        <p id="error-message"></p>
+        <button class="btn-primary" id="btn-retry" type="button">重试</button>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- 详情抽屉 -->
+<div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+<aside class="drawer" id="drawer" hidden aria-label="审核详情">
+  <div class="drawer-head">
+    <div>
+      <div class="eyebrow" id="detail-status">待审</div>
+      <h2 id="detail-question">—</h2>
+    </div>
+    <button class="icon-btn" id="btn-close-drawer" type="button" aria-label="关闭">×</button>
+  </div>
+
+  <div class="drawer-body">
+    <section class="block">
+      <h3>AI 建议答案</h3>
+      <p class="answer-box" id="detail-suggested">—</p>
+    </section>
+
+    <section class="block">
+      <h3>用户的原始问法 <span class="count" id="detail-count">0</span></h3>
+      <ul class="question-list" id="detail-questions"></ul>
+    </section>
+
+    <section class="block">
+      <h3>当时的召回片段</h3>
+      <p class="hint">对照这些片段判断：知识库是真缺这块，还是有但没检到。</p>
+      <div class="chunks" id="detail-chunks"></div>
+    </section>
+
+    <section class="block" id="approved-block" hidden>
+      <h3>已核准答案</h3>
+      <p class="answer-box approved" id="detail-approved">—</p>
+    </section>
+  </div>
+
+  <div class="drawer-actions" id="detail-actions">
+    <button class="btn-ghost danger" id="btn-reject" type="button">驳回</button>
+    <button class="btn-primary" id="btn-approve" type="button">通过并写入知识库</button>
+  </div>
+</aside>
+
+<!-- 通过弹窗 -->
+<div class="modal-backdrop" id="approve-backdrop" hidden></div>
+<div class="modal" id="approve-modal" hidden role="dialog" aria-modal="true" aria-labelledby="approve-title">
+  <h2 id="approve-title">通过审核</h2>
+  <p class="hint">确认后的答案会写入知识库，并立即向量化；下一个问到同样问题的用户就能得到它。</p>
+  <label class="field">
+    <span>核准答案</span>
+    <textarea id="approve-answer" rows="7" placeholder="确认或改写一个可直接回复用户的答案"></textarea>
+  </label>
+  <div class="modal-actions">
+    <button class="btn-ghost" id="btn-cancel-approve" type="button">取消</button>
+    <button class="btn-primary" id="btn-confirm-approve" type="button">确认通过</button>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden aria-live="polite"></div>
+
+<script src="/review/app.js"></script>
+</body>
+</html>

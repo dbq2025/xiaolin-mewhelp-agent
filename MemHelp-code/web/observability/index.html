@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>观测与成本 · 小邻客服</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%232563eb'/%3E%3Ctext x='16' y='22' font-size='15' text-anchor='middle' fill='white'%3E%E8%A7%82%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/observability/style.css">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <a class="brand" href="/chat/">
+        <span class="avatar-bot" aria-hidden="true">观</span>
+        <span>
+          <span class="brand-name">小邻客服</span>
+          <span class="brand-sub">ch09 · 观测与成本</span>
+        </span>
+      </a>
+      <nav class="nav" aria-label="主导航">
+        <a href="/chat/">对话</a>
+        <a href="/rag-eval/">评估看板</a>
+        <a href="/review/">待审队列</a>
+        <a href="/eval-trend/">趋势</a>
+        <a class="active" href="/observability/" aria-current="page">观测</a>
+      </nav>
+      <div class="topbar-actions">
+        <div class="seg" role="group" aria-label="统计窗口">
+          <button class="seg-btn active" data-days="7" type="button">7 天</button>
+          <button class="seg-btn" data-days="14" type="button">14 天</button>
+          <button class="seg-btn" data-days="30" type="button">30 天</button>
+        </div>
+        <button class="btn-ghost" id="btn-refresh" type="button">刷新</button>
+      </div>
+    </header>
+
+    <main class="page">
+      <section class="hero">
+        <div>
+          <h1>观测与成本</h1>
+          <p class="sub" id="hero-sub">按意图看 token 花在哪类问题上，同时盯住评估指标有没有退。</p>
+        </div>
+        <span class="chip" id="source-chip">数据源：Langfuse Metrics + eval_runs</span>
+      </section>
+
+      <section class="kpis" id="kpis"></section>
+
+      <section class="grid">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>按意图的 token 成本</h2>
+            <span class="muted" id="cost-sub"></span>
+          </div>
+          <div class="table-wrap" id="cost-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>意图</th>
+                  <th class="num">tokens</th>
+                  <th class="share">占比</th>
+                  <th class="num">成本</th>
+                  <th class="num">聚合行</th>
+                </tr>
+              </thead>
+              <tbody id="cost-rows"></tbody>
+            </table>
+          </div>
+          <div id="cost-empty" class="empty" hidden>
+            <div class="empty-icon" id="cost-empty-icon">◎</div>
+            <h2 id="cost-empty-title">窗口内还没有带意图标签的 trace</h2>
+            <p id="cost-empty-text">先聊几轮再回来看。</p>
+          </div>
+        </section>
+
+        <aside class="side">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>评估指标</h2>
+              <a class="link" href="/eval-trend/">趋势 →</a>
+            </div>
+            <div class="mini-cards" id="metric-cards"></div>
+            <div id="metric-empty" class="empty small" hidden>
+              <p>还没有评估记录，去 <a href="/eval-trend/">趋势页</a> 跑一轮。</p>
+            </div>
+            <p class="panel-foot" id="metric-foot"></p>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2>运行健康</h2>
+              <span class="muted" id="health-time"></span>
+            </div>
+            <ul class="health" id="health-list"></ul>
+          </section>
+        </aside>
+      </section>
+
+      <p class="footnote">
+        成本与 token 来自 <code>/api/intent-cost</code>（Langfuse Metrics API v2，按 <code>intent:</code> 标签聚合），
+        指标来自 <code>/api/eval-runs</code>（<code>eval_runs</code> 表）。
+        成本显示 <code>0.0000</code> 表示 Langfuse 里没有配置该模型的单价 —— 这里不替你猜价。
+        完整链路请到 Langfuse Cloud 项目里看，本页只做汇总。
+      </p>
+    </main>
+  </div>
+  <div id="toast" class="toast" hidden></div>
+  <script src="/observability/observability.js"></script>
+</body>
+</html>
