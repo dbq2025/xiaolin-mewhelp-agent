@@ -21,6 +21,7 @@ import argparse
 import json
 import random
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -74,6 +75,16 @@ _MULTI_RATIO = 0.25
 #: 单次生成的条数上限。一次要 88 条会被 max_tokens 截断，截断的 JSON 行
 #: 全变废行 —— 每次 25 条是能稳定完整返回的量级。
 _GENERATE_CHUNK = 25
+#: 生成阶段的断点文件：每块写完就追加、flush，重跑时从它续。
+_GENERATE_PARTIAL = "synthetic.partial.jsonl"
+
+
+def _append_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8", newline="\n") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+        handle.flush()
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -177,11 +188,25 @@ def _partner(category_name: str) -> str | None:
 def _step_generate(
     dirs: dict[str, Path], *, llm: Any, count: int, seed: int, **kwargs: Any
 ) -> dict[str, Any]:
+    """按类目造模拟问题，**逐块落盘**。
+
+    1500 条 = 68 次大模型调用，一次跑十几分钟；中途断掉要是从头再来，
+    既烧 token 又烧时间。所以每块解析完立刻追加到 ``synthetic.partial.jsonl``，
+    重跑时先读它、已够数的 (类目, 单/多诉求) 组直接跳过，全部跑完才汇总成
+    ``synthetic.jsonl`` 并删掉断点文件。
+    """
+
     if llm is None:
         raise RuntimeError("--generate 需要大模型（--allow-llm）")
     per = max(1, count // len(CATEGORIES))
-    seen: set[str] = set()
-    out: list[dict[str, Any]] = []
+    partial = dirs["raw"] / _GENERATE_PARTIAL
+    out: list[dict[str, Any]] = _read_jsonl(partial)
+    seen = {str(row.get("text", "")) for row in out}
+    done: Counter[tuple[str, str]] = Counter(
+        (str(row.get("category", "")), str(row.get("gen_group", ""))) for row in out
+    )
+    resumed = len(out)
+    fresh = 0
     skipped = 0
     invalid = 0
 
@@ -191,8 +216,9 @@ def _step_generate(
         partner = _partner(category.name)
         if partner is None:
             single_n, multi_n = per, 0  # 没搭配就全造单诉求，不硬凑
-        for n, second in ((single_n, None), (multi_n, partner)):
-            remaining = n
+        for group, n, second in (("single", single_n, None), ("multi", multi_n, partner)):
+            key = (category.name, second or "")
+            remaining = n - done.get(key, 0)
             while remaining > 0:
                 take = min(_GENERATE_CHUNK, remaining)
                 messages = generation_messages(category, take, second_label=second)
@@ -212,24 +238,45 @@ def _step_generate(
                         f"[generate] {category.name} 第 {attempt + 1} 次为空", file=sys.stderr
                     )
                 skipped += take - len(parsed)
+                batch: list[dict[str, Any]] = []
                 for item in parsed:
                     if item.text in seen:
                         continue
                     seen.add(item.text)
-                    out.append(
+                    batch.append(
                         {
-                            "id": f"s{len(out) + 1:04d}",
+                            "id": f"p{len(out) + 1:05d}",
                             "text": item.text,
                             "labels": item.labels,
                             "source": "synthetic",
+                            "category": category.name,
+                            "gen_group": group,
                         }
                     )
+                if batch:
+                    _append_jsonl(partial, batch)
+                    out.extend(batch)
+                    fresh += len(batch)
+                done[key] += take
                 remaining -= take
+                print(
+                    f"[generate] {category.name}/{group} {len(parsed)}/{take}"
+                    f" 累计 {len(out)} 条",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
     random.Random(seed).shuffle(out)
+    for index, row in enumerate(out, 1):
+        row["id"] = f"s{index:04d}"
+        row.pop("gen_group", None)
     written = _write_jsonl(dirs["raw"] / "synthetic.jsonl", out)
+    partial.unlink(missing_ok=True)
     return {
         "requested": per * len(CATEGORIES),
         "kept": written,
+        "fresh": fresh,
+        "resumed": resumed,
         "skipped": skipped,
         "invalid_label_batches": invalid,
     }

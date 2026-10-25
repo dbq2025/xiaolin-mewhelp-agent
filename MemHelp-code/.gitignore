@@ -84,5 +84,6 @@ data/topics/clean/
 data/topics/labeled/
 data/topics/review/
 data/topics/splits/
+data/topics/logs/
 .hf-cache/
 .hf-probe/

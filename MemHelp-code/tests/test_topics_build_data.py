@@ -91,6 +91,44 @@ def test_export_taxonomy_writes_json_and_markdown():
     assert data["hash"]
 
 
+class _FakeLLM:
+    """只回一条问题，用来数「到底调了几次」。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def invoke(self, messages):  # noqa: ANN001, ANN201 - 测试桩
+        self.calls += 1
+        text = f"模拟问题{self.calls}"
+        line = json.dumps({"text": text, "labels": ["其他"]}, ensure_ascii=False)
+        return type("Msg", (), {"content": line})()
+
+
+def test_generate_resumes_from_partial_file():
+    """生成 68 次调用太贵：已落盘的类目不能重造，否则一崩就全白跑。"""
+
+    OUT.mkdir(parents=True, exist_ok=True)
+    raw = OUT / "raw"
+    raw.mkdir(parents=True, exist_ok=True)
+    seeded = {
+        "id": "s0001",
+        "text": "已有问题",
+        "labels": ["退换货"],
+        "source": "synthetic",
+        "category": "退换货",
+    }
+    (raw / "synthetic.partial.jsonl").write_text(
+        json.dumps(seeded, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    llm = _FakeLLM()
+    out = build_dataset(FIXTURES, steps=("generate",), llm=llm, seed=1, out_dir=OUT, count=17)
+    rows = _read_jsonl(Path(out["dirs"]["raw"], "synthetic.jsonl"))
+    assert len(rows) == 17
+    assert llm.calls == 16, "已生成的类目不该再调大模型"
+    assert any(row["text"] == "已有问题" for row in rows), "断点数据必须并进最终语料"
+    assert not (raw / "synthetic.partial.jsonl").is_file(), "成功后清掉断点，避免下次误续"
+
+
 def test_llm_steps_need_llm():
     import pytest
 
