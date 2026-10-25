@@ -638,3 +638,36 @@ class ToolAuditLog(Base):
         Index("idx_audit_tool_name", "tool_name"),
         Index("idx_audit_status", "status"),
     )
+
+
+# ---------------------------------------------------------------------------
+# ch10：主题分类结果
+# ---------------------------------------------------------------------------
+
+
+class TopicClassification(Base):
+    """旁路分类器对低置信度问题的一次归类结果。
+
+    ``labels`` 存**中文类目名**（按类目表顺序），不存编号：编号只在训练脚本
+    里当下标用，落库后要能被人直接读。多标签直接存 JSON 数组 —— 另开一张
+    关联表会把「按标签计数」变成一次 join 聚合，而这张表只服务于分布统计。
+
+    ``question_id`` 上有唯一约束，语义是「重跑覆盖，不是追加」：批跑从上次
+    水位重来（sidecar 崩了、进程被中断）时，没有这个约束同一道题会被算两次，
+    把主题分布整体带偏，而且带偏的方向取决于中断了几次。
+    """
+
+    __tablename__ = "topic_classifications"
+
+    id: Mapped[int] = mapped_column(_AUTOINC_PK, primary_key=True, autoincrement=True)
+    question_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("low_confidence_questions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    labels: Mapped[list] = mapped_column(JSON, nullable=False)
+    classified_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (UniqueConstraint("question_id", name="uk_question_id"),)

@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -58,6 +59,7 @@ from app.db.models import (
     ReviewQueue,
     Ticket,
     ToolAuditLog,
+    TopicClassification,
 )
 
 T = TypeVar("T")
@@ -2049,6 +2051,151 @@ class EvalRunRepository:
 
 
 # ---------------------------------------------------------------------------
+# ch10：主题分类结果
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PendingQuestionRow:
+    """一道还没归类的问题。只带批跑真正要用的三列。"""
+
+    id: int
+    raw_question: str
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class TopicCount:
+    label: str
+    count: int
+
+
+class TopicClassificationRepository:
+    """``topic_classifications`` 的读写 —— 旁路批跑的落库端。
+
+    **只被旁路调用**：实时对话主链路不碰这张表（那是 ch10 的硬边界，
+    加一次同步归类就等于给主链路加几十毫秒）。
+
+    聚合类方法（``label_counts`` / ``multi_label_count``）把行读进 Python
+    再数：``labels`` 是 JSON 数组，按标签拆行要依赖方言的 JSON 函数
+    （MySQL ``JSON_TABLE`` / SQLite ``json_each`` 写法不同）。这张表的量级是
+    「上万行、偶尔跑一次统计」，多读几 MB 换掉一处方言分支是划算的。
+    """
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def _list_pending(self, limit: int) -> list[PendingQuestionRow]:
+        stmt = (
+            select(
+                LowConfidenceQuestion.id,
+                LowConfidenceQuestion.raw_question,
+                LowConfidenceQuestion.created_at,
+            )
+            .outerjoin(
+                TopicClassification,
+                TopicClassification.question_id == LowConfidenceQuestion.id,
+            )
+            .where(TopicClassification.id.is_(None))
+            .order_by(LowConfidenceQuestion.id)
+            .limit(limit)
+        )
+        return [
+            PendingQuestionRow(
+                id=int(row.id), raw_question=row.raw_question, created_at=row.created_at
+            )
+            for row in self._session.execute(stmt).all()
+        ]
+
+    async def list_pending(self, limit: int = 50) -> list[PendingQuestionRow]:
+        return await _run(self._list_pending, limit)
+
+    def _count_pending(self) -> int:
+        stmt = (
+            select(func.count())
+            .select_from(LowConfidenceQuestion)
+            .outerjoin(
+                TopicClassification,
+                TopicClassification.question_id == LowConfidenceQuestion.id,
+            )
+            .where(TopicClassification.id.is_(None))
+        )
+        return int(self._session.scalar(stmt) or 0)
+
+    async def count_pending(self) -> int:
+        return await _run(self._count_pending)
+
+    def _upsert_many(
+        self, rows: Sequence[tuple[int, list[str]]], classified_at: datetime
+    ) -> int:
+        # 同批里同一道题出现两次时后写覆盖先写，否则第二次会撞唯一键。
+        deduped = dict(rows)
+        if not deduped:
+            return 0
+        existing = set(
+            self._session.scalars(
+                select(TopicClassification.question_id).where(
+                    TopicClassification.question_id.in_(list(deduped))
+                )
+            ).all()
+        )
+        for question_id, labels in deduped.items():
+            if question_id in existing:
+                self._session.execute(
+                    update(TopicClassification)
+                    .where(TopicClassification.question_id == question_id)
+                    .values(labels=list(labels), classified_at=classified_at)
+                )
+            else:
+                self._session.add(
+                    TopicClassification(
+                        question_id=question_id,
+                        labels=list(labels),
+                        classified_at=classified_at,
+                    )
+                )
+        # 单事务：一批要么全进，要么全不进，中断后重跑不会留下半批。
+        self._session.commit()
+        return len(deduped)
+
+    async def upsert_many(
+        self, rows: Sequence[tuple[int, list[str]]], *, classified_at: datetime
+    ) -> int:
+        return await _run(self._upsert_many, rows, classified_at)
+
+    def _label_counts(self) -> list[TopicCount]:
+        counter: Counter[str] = Counter()
+        for labels in self._session.scalars(select(TopicClassification.labels)).all():
+            counter.update(labels or [])
+        ordered = sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
+        return [TopicCount(label=label, count=count) for label, count in ordered]
+
+    async def label_counts(self) -> list[TopicCount]:
+        return await _run(self._label_counts)
+
+    def _total_classified(self) -> int:
+        return int(
+            self._session.scalar(select(func.count()).select_from(TopicClassification)) or 0
+        )
+
+    async def total_classified(self) -> int:
+        return await _run(self._total_classified)
+
+    def _multi_label_count(self) -> int:
+        rows = self._session.scalars(select(TopicClassification.labels)).all()
+        return sum(1 for labels in rows if labels and len(labels) > 1)
+
+    async def multi_label_count(self) -> int:
+        return await _run(self._multi_label_count)
+
+    def _last_classified_at(self) -> datetime | None:
+        return self._session.scalar(select(func.max(TopicClassification.classified_at)))
+
+    async def last_classified_at(self) -> datetime | None:
+        return await _run(self._last_classified_at)
+
+
+# ---------------------------------------------------------------------------
 # 容器
 # ---------------------------------------------------------------------------
 
@@ -2081,6 +2228,8 @@ class Repositories:
     reviews: ReviewQueueRepository
     #: ch09：评估记录
     eval_runs: EvalRunRepository
+    #: ch10：主题分类结果（旁路写入，主链路只读分布）
+    topics: TopicClassificationRepository
 
     @classmethod
     def from_session(cls, session: Session) -> "Repositories":
@@ -2102,4 +2251,5 @@ class Repositories:
             audit=ToolAuditRepository(session),
             reviews=ReviewQueueRepository(session),
             eval_runs=EvalRunRepository(session),
+            topics=TopicClassificationRepository(session),
         )
