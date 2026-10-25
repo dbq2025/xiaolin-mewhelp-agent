@@ -516,6 +516,40 @@ class Settings(BaseSettings):
         ),
     )
 
+    # -- ch10：主题分类旁路 ------------------------------------------------
+    topic_service_url: str = Field(
+        default="http://127.0.0.1:8100",
+        description=(
+            "ch10：旁路推理 sidecar 的地址。**主应用不装 torch**，"
+            "分类请求一律发到这里；连不上就返 503 并提示启动命令。"
+        ),
+    )
+    topic_service_timeout: float = Field(
+        default=30.0,
+        gt=0,
+        description="ch10：单次 sidecar 调用的超时（秒）；一批 100 条约几秒，留足余量。",
+    )
+    topic_batch_limit: int = Field(
+        default=100,
+        ge=1,
+        description="ch10：一次批跑最多归多少条。批太大显存与请求时长都不好控。",
+    )
+    topic_batch_min_pending: int = Field(
+        default=50,
+        ge=0,
+        description=(
+            "ch10：水位线。积压少于它时前端提示「先攒一攒」，**只提示不拦截** ——"
+            "拦下来会让调试时没法跑小批。"
+        ),
+    )
+    topic_model_dir: str = Field(
+        default="models/topics",
+        description=(
+            "ch10：模型产物目录（相对项目根）。sidecar 取其中最近一次 run；"
+            "也可用 TOPIC_MODEL_DIR 环境变量直接指到某个 run。"
+        ),
+    )
+
     @model_validator(mode="after")
     def _layer_ratios_must_sum_to_one(self) -> "Settings":
         """层 1 + 层 2 必须刚好把历史预算分完。

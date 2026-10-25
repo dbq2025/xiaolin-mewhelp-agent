@@ -301,6 +301,12 @@ def _isolate_real_env_file(monkeypatch):
         "OTHER_CHARS_PER_TOKEN",
         "MESSAGE_OVERHEAD_TOKENS",
         "APP_LOG_PATH",
+        # ch10 新增：宿主机设了 TOPIC_* 时，分布/水位/批跑用例会依赖那台机器。
+        "TOPIC_SERVICE_URL",
+        "TOPIC_SERVICE_TIMEOUT",
+        "TOPIC_BATCH_LIMIT",
+        "TOPIC_BATCH_MIN_PENDING",
+        "TOPIC_MODEL_DIR",
     ):
         monkeypatch.delenv(name, raising=False)
 

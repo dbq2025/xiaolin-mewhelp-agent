@@ -110,6 +110,7 @@ from app.schemas import (
     TicketConfirmRequest,
 )
 from app.sse import SSE_MEDIA_TYPE, sse_frame
+from app.topics.routes import register_topic_routes
 from app.tools.executor import execute_tool
 from app.tools.knowledge import AnswerContextLike
 from app.tools.registry import build_registry
@@ -2291,6 +2292,13 @@ def create_app(
         """重跑任务状态（供页面轮询）。"""
         return JSONResponse(status_code=200, content={"run": app.state.rag_eval_runner.status()})
 
+    # -- ch10：主题分类旁路 -------------------------------------------------
+    #
+    # 只挂两个接口，**不在这里加载模型**：推理在独立 sidecar 里（方案 B），
+    # 主应用连 torch 都不装。详细取舍见 app/topics/routes.py 顶部的说明。
+
+    register_topic_routes(app, repositories_dependency=get_repositories)
+
     # -- 聊天页面（静态资源，无构建步骤）----------------------------------
 
     web_dir = PROJECT_ROOT / "web"
@@ -2354,6 +2362,20 @@ def create_app(
                 "/observability",
                 StaticFiles(directory=observability_dir, html=True),
                 name="observability",
+            )
+
+        # 主题分布：纯静态页，数据走 /api/topics/distribution。
+        topics_dir = web_dir / "topics"
+        if topics_dir.is_dir():
+
+            @app.get("/topics", include_in_schema=False)
+            async def topics_redirect() -> RedirectResponse:
+                return RedirectResponse(url="/topics/")
+
+            app.mount(
+                "/topics",
+                StaticFiles(directory=topics_dir, html=True),
+                name="topics",
             )
 
         @app.get("/", include_in_schema=False)
