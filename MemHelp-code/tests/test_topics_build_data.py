@@ -180,3 +180,44 @@ def test_generate_runs_chunks_concurrently():
     assert len({row["id"] for row in rows}) == len(rows)
     assert llm.max_active >= 2, "开了 workers 就该真有并发"
     assert not (Path(out["dirs"]["raw"]) / "synthetic.partial.jsonl").is_file()
+
+def test_generate_resume_counts_multi_group():
+    """multi 组的断点必须被认出来：键用 (类目, single|multi)，不是 (类目, 搭配类目)。
+
+    之前用 (类目, second or "") 当键、落盘却写 gen_group，两边永远对不上，
+    于是每次重跑都把全部类目重造一遍 —— 语料悄悄涨到 1986 条。
+    """
+    import shutil
+
+    OUT.mkdir(parents=True, exist_ok=True)
+    llm_fresh = _FakeLLM()
+    build_dataset(FIXTURES, steps=("generate",), llm=llm_fresh, seed=1, out_dir=OUT, count=102)
+    fresh_calls = llm_fresh.calls
+    assert fresh_calls > 17
+
+    shutil.rmtree(OUT, ignore_errors=True)
+    raw = OUT / "raw"
+    raw.mkdir(parents=True, exist_ok=True)
+    seeded = [
+        {
+            "id": f"sx{index}",
+            "text": f"已有的多诉求问题{index}",
+            "labels": ["物流"],
+            "source": "synthetic",
+            "category": "物流",
+            "gen_group": "multi",
+        }
+        for index in (1, 2)
+    ]
+    (raw / "synthetic.partial.jsonl").write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in seeded) + "\n",
+        encoding="utf-8",
+    )
+
+    llm_resume = _FakeLLM()
+    out = build_dataset(FIXTURES, steps=("generate",), llm=llm_resume, seed=1, out_dir=OUT, count=102)
+
+    # count=102 → 每类 6 条，multi 组 2 条：这两条已经在断点里，物流的 multi 块不该再调
+    assert out["generate"]["resumed"] == 2
+    assert llm_resume.calls == fresh_calls - 1
+

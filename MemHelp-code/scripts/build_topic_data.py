@@ -239,8 +239,10 @@ def _step_generate(
     partial = dirs["raw"] / _GENERATE_PARTIAL
     out: list[dict[str, Any]] = _read_jsonl(partial)
     seen = {str(row.get("text", "")) for row in out}
+    # 键必须和落盘的 gen_group 用同一套：用搭配类目当键的话，断点永远对不上，
+    # 每次重跑都会把全部类目重造一遍（真踩过，语料悄悄翻倍）。
     done: Counter[tuple[str, str]] = Counter(
-        (str(row.get("category", "")), str(row.get("gen_group", ""))) for row in out
+        (str(row.get("category", "")), str(row.get("gen_group") or "single")) for row in out
     )
     resumed = len(out)
     state = {"fresh": 0, "skipped": 0, "invalid": 0}
@@ -253,7 +255,7 @@ def _step_generate(
         if partner is None:
             single_n, multi_n = per, 0  # 没搭配就全造单诉求，不硬凑
         for group, n, second in (("single", single_n, None), ("multi", multi_n, partner)):
-            key = (category.name, second or "")
+            key = (category.name, group)
             remaining = n - done.get(key, 0)
             while remaining > 0:
                 take = min(_GENERATE_CHUNK, remaining)
