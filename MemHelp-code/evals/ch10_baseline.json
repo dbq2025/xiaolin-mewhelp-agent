@@ -1,0 +1,10 @@
+{
+  "run_id": "ch10-v3",
+  "macro_f1": 0.971275,
+  "micro_f1": 0.966102,
+  "exact_match": 0.925,
+  "multilabel_hit2": 7,
+  "multilabel_cases": 16,
+  "tolerance": 0.03,
+  "note": "ch10-v3（boost_multi 600 + 96 条人工复核硬例）在 160 条人工 gold 测试集上的结果（含 1 条标注修正）；macro-F1 掉 0.03 以上视为回归"
+}

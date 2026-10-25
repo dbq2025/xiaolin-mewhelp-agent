@@ -1,0 +1,160 @@
+{"id": "s1018", "text": "价保补的钱是退到原支付账户，还是退到余额里？", "gold": ["价保"], "pred": ["价保"], "fallback": false, "source": "synthetic"}
+{"id": "s0477", "text": "请问价保是签收后几天内有效呀，过了还能补吗", "gold": ["价保"], "pred": ["价保"], "fallback": false, "source": "synthetic"}
+{"id": "s1390", "text": "我上周买的鞋今天降了五十，还能申请价保补差价吗", "gold": ["价保"], "pred": ["价保"], "fallback": false, "source": "synthetic"}
+{"id": "s0800", "text": "降价后我重新拍了一单，原来那单价保还能退差额吗？", "gold": ["价保"], "pred": ["价保"], "fallback": false, "source": "synthetic"}
+{"id": "s0557", "text": "订单里找不到价保入口，是不是要等确认收货才有", "gold": ["价保"], "pred": ["价保"], "fallback": false, "source": "synthetic"}
+{"id": "s1166", "text": "我用了分期付款，现在降价了还能走价保流程吗", "gold": ["价保"], "pred": ["价保"], "fallback": false, "source": "synthetic"}
+{"id": "s0310", "text": "价保补差价能不能退到银行卡，原路退回要等太久了。", "gold": ["价保"], "pred": ["价保"], "fallback": false, "source": "synthetic"}
+{"id": "s1033", "text": "会员价降了五块钱，这个差价价保给不给补啊", "gold": ["价保"], "pred": ["价保", "会员积分"], "fallback": false, "source": "synthetic"}
+{"id": "s1066", "text": "请问秒杀买的商品现在降价了，价保是按秒杀价补吗？", "gold": ["优惠活动", "价保"], "pred": ["价保"], "fallback": false, "source": "synthetic"}
+{"id": "s1059", "text": "满三百减五十我还差十几块，能帮我推荐个凑单商品吗？", "gold": ["优惠活动"], "pred": ["优惠活动"], "fallback": false, "source": "synthetic"}
+{"id": "s0868", "text": "我拍下后活动结束了，订单还能按活动价付款吗？", "gold": ["优惠活动"], "pred": ["优惠活动"], "fallback": false, "source": "synthetic"}
+{"id": "s0505", "text": "这个满减活动到几号结束，现在下单还能赶上吗？", "gold": ["优惠活动"], "pred": ["优惠活动"], "fallback": false, "source": "synthetic"}
+{"id": "s0535", "text": "店铺首页那个一元秒杀，是不是要整点刷新才能抢？", "gold": ["优惠活动"], "pred": ["优惠活动"], "fallback": false, "source": "synthetic"}
+{"id": "s0247", "text": "店铺券和平台券可以一起叠加使用吗，能省多少钱？", "gold": ["优惠活动"], "pred": ["优惠活动"], "fallback": false, "source": "synthetic"}
+{"id": "s0446", "text": "优惠券叠加规则在哪里看，我想确认一下能不能一起使用。", "gold": ["优惠活动"], "pred": ["优惠活动"], "fallback": false, "source": "synthetic"}
+{"id": "s0073", "text": "新客首单立减和店铺优惠券能同时用在一个订单吗？", "gold": ["优惠活动"], "pred": ["优惠活动"], "fallback": false, "source": "synthetic"}
+{"id": "s0100", "text": "店铺满减和平台跨店满减是一起算的吗，哪个优先？", "gold": ["优惠活动"], "pred": ["优惠活动"], "fallback": false, "source": "synthetic"}
+{"id": "s1053", "text": "请问我不想要这个赠品了，能单独退掉赠品吗？", "gold": ["退换货", "优惠活动"], "pred": ["优惠活动"], "fallback": false, "source": "synthetic"}
+{"id": "s0246", "text": "会员等级越高积分倍率越高吗，具体规则在哪看", "gold": ["会员积分"], "pred": ["会员积分"], "fallback": false, "source": "synthetic"}
+{"id": "s1477", "text": "我买完东西怎么没看到积分到账，是要确认收货才有吗", "gold": ["会员积分"], "pred": ["会员积分"], "fallback": false, "source": "synthetic"}
+{"id": "s1412", "text": "我手机号换了，原来的会员积分还能转到新账号吗", "gold": ["账号", "会员积分"], "pred": ["账号", "会员积分"], "fallback": false, "source": "synthetic"}
+{"id": "s0652", "text": "会员积分多久过期啊，我攒了好久别给我清零了。", "gold": ["会员积分"], "pred": ["会员积分"], "fallback": false, "source": "synthetic"}
+{"id": "s0164", "text": "会员等级怎么升啊，成长值不够是不是会员积分就少？", "gold": ["会员积分"], "pred": ["会员积分"], "fallback": false, "source": "synthetic"}
+{"id": "s0545", "text": "会员积分过期前会有提醒吗，在哪设置通知？", "gold": ["会员积分"], "pred": ["会员积分"], "fallback": false, "source": "synthetic"}
+{"id": "s0613", "text": "积分兑换后不想要了能退吗，还没去门店核销呢", "gold": ["退换货", "会员积分"], "pred": ["会员积分"], "fallback": false, "source": "synthetic"}
+{"id": "s0812", "text": "我想查下今年一共攒了多少积分，在哪个页面看明细？", "gold": ["会员积分"], "pred": ["会员积分"], "fallback": false, "source": "synthetic"}
+{"id": "s0394", "text": "忘记账号密码了，会员积分兑换记录还能找回来吗？", "gold": ["账号", "会员积分"], "pred": ["账号", "会员积分"], "fallback": false, "source": "synthetic"}
+{"id": "s0807", "text": "请问刚申请了维修进度在哪儿查啊，大概多久能好？", "gold": ["保修维修"], "pred": ["保修维修"], "fallback": false, "source": "synthetic"}
+{"id": "s0388", "text": "请问保修是从签收那天开始算还是下单那天算？", "gold": ["保修维修"], "pred": ["保修维修"], "fallback": false, "source": "synthetic"}
+{"id": "s0780", "text": "请问维修期间有没有备用机可以借我用一下啊？", "gold": ["保修维修"], "pred": ["保修维修"], "fallback": false, "source": "synthetic"}
+{"id": "s0079", "text": "这个电饭煲用半年就坏了，还在保修期内吧，能免费修不？", "gold": ["保修维修"], "pred": ["保修维修"], "fallback": false, "source": "synthetic"}
+{"id": "s1300", "text": "耳机一边没声音了，保修期内能直接寄回去修吗？", "gold": ["保修维修"], "pred": ["保修维修"], "fallback": false, "source": "synthetic"}
+{"id": "s1282", "text": "我的保修期快到了，想做个全面检查需要收费吗？", "gold": ["保修维修"], "pred": ["保修维修"], "fallback": false, "source": "synthetic"}
+{"id": "s1279", "text": "换下来的旧配件能还给我吗，还是维修点会回收啊？", "gold": ["保修维修"], "pred": ["保修维修"], "fallback": false, "source": "synthetic"}
+{"id": "s1376", "text": "我这边有官方维修网点吗，怎么查最近的地址啊？", "gold": ["保修维修"], "pred": ["保修维修"], "fallback": false, "source": "synthetic"}
+{"id": "s0749", "text": "到手三天就漏水，保修维修怎么弄，我要退还是换", "gold": ["退换货", "质量问题", "保修维修"], "pred": ["保修维修"], "fallback": false, "source": "synthetic"}
+{"id": "s0319", "text": "刚收到的吹风机插电没反应，是坏的，我要换新还要问下保修多久", "gold": ["退换货", "质量问题", "保修维修"], "pred": ["质量问题", "保修维修"], "fallback": false, "source": "synthetic"}
+{"id": "s0261", "text": "你们客服电话怎么一直打不通，人工服务到底怎么进。", "gold": ["其他"], "pred": ["其他"], "fallback": true, "source": "synthetic"}
+{"id": "s0939", "text": "你们这客服半天不回一句，能不能来个活人跟我说？", "gold": ["其他"], "pred": ["其他"], "fallback": true, "source": "synthetic"}
+{"id": "s1057", "text": "你们公司招不招人啊，我想来当客服可以吗？", "gold": ["其他"], "pred": ["其他"], "fallback": true, "source": "synthetic"}
+{"id": "s1064", "text": "我想投诉刚才的客服，他全程都在打断我说话，实在过分。", "gold": ["其他"], "pred": ["其他"], "fallback": true, "source": "synthetic"}
+{"id": "s0526", "text": "你们客服回消息能不能快点，我真的着急问事情呢。", "gold": ["其他"], "pred": ["其他"], "fallback": true, "source": "synthetic"}
+{"id": "s0753", "text": "麻烦转个能听懂人话的客服，别再来回踢皮球。", "gold": ["其他"], "pred": ["其他"], "fallback": true, "source": "synthetic"}
+{"id": "s0654", "text": "你们这机器人答非所问，转人工怎么这么难。", "gold": ["其他"], "pred": ["其他"], "fallback": true, "source": "synthetic"}
+{"id": "s0869", "text": "我要找你们主管投诉客服，刚才沟通让我非常不舒服。", "gold": ["其他"], "pred": ["其他"], "fallback": true, "source": "synthetic"}
+{"id": "s0955", "text": "你们这客服怎么回事，问什么都不正面回答，真气人。", "gold": ["其他"], "pred": ["其他"], "fallback": true, "source": "synthetic"}
+{"id": "s1235", "text": "麻烦能开一张带明细的电子专票吗？不要汇总开。", "gold": ["发票"], "pred": ["发票"], "fallback": false, "source": "synthetic"}
+{"id": "s1359", "text": "发票上的名字写错了，能重新开一张不", "gold": ["发票"], "pred": ["发票"], "fallback": false, "source": "synthetic"}
+{"id": "s0150", "text": "发票金额能不能按商品实付金额帮我开就好呀？", "gold": ["发票"], "pred": ["发票"], "fallback": false, "source": "synthetic"}
+{"id": "s0254", "text": "我想开张电子普通发票，抬头写我个人名字就行可以吗", "gold": ["发票"], "pred": ["发票"], "fallback": false, "source": "synthetic"}
+{"id": "s0457", "text": "我要开公司增值税专用发票，需要提供哪些资料呀？", "gold": ["发票"], "pred": ["发票"], "fallback": false, "source": "synthetic"}
+{"id": "s1393", "text": "我想开公司抬头的普票，需要提供啥资料", "gold": ["发票"], "pred": ["发票"], "fallback": false, "source": "synthetic"}
+{"id": "s0466", "text": "发票开的是个人抬头，现在想改成公司抬头还可以吗", "gold": ["发票"], "pred": ["发票"], "fallback": false, "source": "synthetic"}
+{"id": "s1180", "text": "我刚下的单还没开票，现在申请开电子专票可以吗", "gold": ["发票"], "pred": ["发票"], "fallback": false, "source": "synthetic"}
+{"id": "s1268", "text": "发票开专票的信息我发你了，地址写错麻烦改成公司地址", "gold": ["发票"], "pred": ["发票", "订单修改"], "fallback": false, "source": "synthetic"}
+{"id": "s1338", "text": "请问这个桌子承重多少公斤，桌面是什么板材", "gold": ["商品信息"], "pred": ["商品信息"], "fallback": false, "source": "synthetic"}
+{"id": "s1478", "text": "这款保温杯内胆是304不锈钢吗，装热水安全不？", "gold": ["商品信息"], "pred": ["商品信息"], "fallback": false, "source": "synthetic"}
+{"id": "s0878", "text": "这款手表防水多少米，能戴着洗澡游泳吗？", "gold": ["商品信息"], "pred": ["商品信息"], "fallback": false, "source": "synthetic"}
+{"id": "s0096", "text": "这衣服是什么材质的呀，贴身穿会不会扎人皮肤？", "gold": ["商品信息"], "pred": ["商品信息"], "fallback": false, "source": "synthetic"}
+{"id": "s0037", "text": "这个型号的打印机墨盒能用在惠普2132上吗？", "gold": ["商品信息"], "pred": ["商品信息"], "fallback": false, "source": "synthetic"}
+{"id": "s1014", "text": "这个手机壳适配苹果15吗，镜头孔位对得上不？", "gold": ["商品信息"], "pred": ["商品信息"], "fallback": false, "source": "synthetic"}
+{"id": "s1112", "text": "这款洗衣液成分温和吗，婴儿衣服能不能用？", "gold": ["商品信息"], "pred": ["商品信息"], "fallback": false, "source": "synthetic"}
+{"id": "s1193", "text": "请问这款奶粉是原装进口的吗，保质期到几月", "gold": ["商品信息"], "pred": ["商品信息"], "fallback": false, "source": "synthetic"}
+{"id": "s0768", "text": "请问啥时候补货呀，另外这材质会不会容易起球？", "gold": ["库存补货", "商品信息"], "pred": ["库存补货", "商品信息"], "fallback": false, "source": "synthetic"}
+{"id": "s1255", "text": "这鞋子码数偏大还是偏小啊，我平时穿38的。", "gold": ["尺码"], "pred": ["尺码"], "fallback": false, "source": "synthetic"}
+{"id": "s0553", "text": "我腿比较粗，这裤子选大一码会不会太肥啊", "gold": ["尺码"], "pred": ["尺码"], "fallback": false, "source": "synthetic"}
+{"id": "s0594", "text": "平时穿M码，这裤子是不是偏大一码，要拍小吗？", "gold": ["尺码"], "pred": ["尺码"], "fallback": false, "source": "synthetic"}
+{"id": "s1188", "text": "我体重95斤身高158，连衣裙选S码会大吗？", "gold": ["尺码"], "pred": ["尺码"], "fallback": false, "source": "synthetic"}
+{"id": "s1306", "text": "我胸围100腰围85，按你们尺码表上衣该拍哪个码？", "gold": ["尺码"], "pred": ["尺码"], "fallback": false, "source": "synthetic"}
+{"id": "s0796", "text": "男生175体重140，这件卫衣想要宽松点选L还是XL？", "gold": ["尺码"], "pred": ["尺码"], "fallback": false, "source": "synthetic"}
+{"id": "s1427", "text": "这鞋内长23.5厘米，对应你们家是几码啊", "gold": ["尺码"], "pred": ["尺码"], "fallback": false, "source": "synthetic"}
+{"id": "s0049", "text": "同样L码，这件和上次买的穿起来一样大吗？", "gold": ["尺码"], "pred": ["尺码"], "fallback": false, "source": "synthetic"}
+{"id": "s0864", "text": "尺码选错了，是直接换货还是退了重新拍？", "gold": ["退换货", "尺码"], "pred": ["退换货", "尺码"], "fallback": false, "source": "synthetic"}
+{"id": "s0072", "text": "请问儿童款小号什么时候补货，娃等着开学用呢。", "gold": ["库存补货"], "pred": ["库存补货"], "fallback": false, "source": "synthetic"}
+{"id": "s0776", "text": "这瓶洗发水断货了，请问补货以后大概多久能发呀。", "gold": ["库存补货"], "pred": ["库存补货"], "fallback": false, "source": "synthetic"}
+{"id": "s0761", "text": "这款手机壳缺货了，能不能到货后优先给我留一个？", "gold": ["库存补货"], "pred": ["库存补货"], "fallback": false, "source": "synthetic"}
+{"id": "s0200", "text": "店里这款缺货好久了，预计哪一天能重新上架补货呀。", "gold": ["库存补货"], "pred": ["库存补货"], "fallback": false, "source": "synthetic"}
+{"id": "s0347", "text": "到货通知怎么设置，补货了会不会发消息提醒我？", "gold": ["库存补货"], "pred": ["库存补货"], "fallback": false, "source": "synthetic"}
+{"id": "s1341", "text": "你们店那个保温杯啥时候补货啊？我蹲好几天了", "gold": ["库存补货"], "pred": ["库存补货"], "fallback": false, "source": "synthetic"}
+{"id": "s0187", "text": "缺货的白色什么时候到货，能到了通知我一下吗？", "gold": ["库存补货"], "pred": ["库存补货"], "fallback": false, "source": "synthetic"}
+{"id": "s0272", "text": "预售款写着十五天内发货，是按付款时间算还是补货到算？", "gold": ["库存补货"], "pred": ["库存补货"], "fallback": false, "source": "synthetic"}
+{"id": "s0501", "text": "我这边支付一直转圈圈，是网络问题还是你们系统问题", "gold": ["支付"], "pred": ["支付"], "fallback": false, "source": "synthetic"}
+{"id": "s1039", "text": "我想改一下支付方式，现在这个方式付不了怎么办", "gold": ["支付"], "pred": ["支付"], "fallback": false, "source": "synthetic"}
+{"id": "s1453", "text": "刚才用余额付的，怎么又从我银行卡扣了一遍钱", "gold": ["支付"], "pred": ["支付"], "fallback": false, "source": "synthetic"}
+{"id": "s0798", "text": "我想用信用卡付，为什么显示不支持这个支付方式", "gold": ["支付"], "pred": ["支付"], "fallback": false, "source": "synthetic"}
+{"id": "s0335", "text": "支付宝已经扣款成功，但订单显示还没支付呢", "gold": ["支付"], "pred": ["支付"], "fallback": false, "source": "synthetic"}
+{"id": "s0139", "text": "银行卡扣款成功了但订单没反应，一般要等多久才正常？", "gold": ["支付"], "pred": ["支付"], "fallback": false, "source": "synthetic"}
+{"id": "s0349", "text": "请问这个能不能用信用卡支付，手续费谁出啊", "gold": ["支付"], "pred": ["支付"], "fallback": false, "source": "synthetic"}
+{"id": "s0203", "text": "付款的时候提示银行卡过期，换卡后怎么继续付", "gold": ["支付"], "pred": ["支付"], "fallback": false, "source": "synthetic"}
+{"id": "s0216", "text": "我微信付了两次钱，订单只显示一笔，麻烦把多的取消一单。", "gold": ["支付", "订单修改"], "pred": ["支付", "订单修改"], "fallback": false, "source": "synthetic"}
+{"id": "s0419", "text": "快递员说放门口了，但我没看到，物流显示签收怎么办", "gold": ["物流"], "pred": ["物流"], "fallback": false, "source": "synthetic"}
+{"id": "s0726", "text": "单号查不到物流记录，是不是还没揽收帮忙确认下", "gold": ["物流"], "pred": ["物流"], "fallback": false, "source": "synthetic"}
+{"id": "s1495", "text": "请问这个快递员电话打不通，能帮我联系一下吗？", "gold": ["物流"], "pred": ["物流"], "fallback": false, "source": "synthetic"}
+{"id": "s0586", "text": "请问这个物流好像发错方向了，能帮我查一下吗？", "gold": ["物流"], "pred": ["物流"], "fallback": false, "source": "synthetic"}
+{"id": "s1013", "text": "我买的东西物流三天没更新了，能帮我查查到哪了吗", "gold": ["物流"], "pred": ["物流"], "fallback": false, "source": "synthetic"}
+{"id": "s1335", "text": "显示签收了但我没收到包裹，请问到底放哪里了啊？", "gold": ["物流"], "pred": ["物流"], "fallback": false, "source": "synthetic"}
+{"id": "s1366", "text": "麻烦帮我催一下快递，物流好几天没动静了谢谢", "gold": ["物流"], "pred": ["物流"], "fallback": false, "source": "synthetic"}
+{"id": "s1476", "text": "为啥物流显示从我们市又发回去了，是不是错了", "gold": ["物流"], "pred": ["物流"], "fallback": false, "source": "synthetic"}
+{"id": "s0989", "text": "快递被商家退回了，我没收到货，这个退款怎么操作", "gold": ["退换货", "物流"], "pred": ["退换货", "物流"], "fallback": false, "source": "synthetic"}
+{"id": "s1451", "text": "刚下单发现信息填错了，能取消一下让我重新下单吗", "gold": ["订单修改"], "pred": ["订单修改"], "fallback": false, "source": "synthetic"}
+{"id": "s1098", "text": "我不小心提交了两次，如果有重复订单麻烦取消一个", "gold": ["订单修改"], "pred": ["订单修改"], "fallback": false, "source": "synthetic"}
+{"id": "s0091", "text": "刚才那单买错了规格，能帮我修改成另一个套餐吗", "gold": ["订单修改"], "pred": ["订单修改"], "fallback": false, "source": "synthetic"}
+{"id": "s1373", "text": "订单里的手机号写错了，能帮我改一下联系电话吗。", "gold": ["订单修改"], "pred": ["订单修改"], "fallback": false, "source": "synthetic"}
+{"id": "s1113", "text": "我这两个订单能合并成一个发吗，地址是一样的。", "gold": ["订单修改"], "pred": ["订单修改"], "fallback": false, "source": "synthetic"}
+{"id": "s0495", "text": "订单好像重复下了两单，帮我取消其中一个吧", "gold": ["订单修改"], "pred": ["订单修改"], "fallback": false, "source": "synthetic"}
+{"id": "s1252", "text": "订单里的收货人名字写错了，能改成我本名吗", "gold": ["订单修改"], "pred": ["订单修改"], "fallback": false, "source": "synthetic"}
+{"id": "s1230", "text": "收货地址写错小区了，麻烦改成阳光花园3栋。", "gold": ["订单修改"], "pred": ["订单修改"], "fallback": false, "source": "synthetic"}
+{"id": "s0161", "text": "差评挂在上面影响我二次购买吗，能不能帮忙隐藏？", "gold": ["评价"], "pred": ["评价"], "fallback": false, "source": "synthetic"}
+{"id": "s1472", "text": "评价是不是必须等确认收货以后才能写啊，我现在就想写", "gold": ["评价"], "pred": ["评价"], "fallback": false, "source": "synthetic"}
+{"id": "s0302", "text": "评价里能留联系方式吗，商家让我晒单时写清楚。", "gold": ["评价"], "pred": ["评价"], "fallback": false, "source": "synthetic"}
+{"id": "s0015", "text": "追评能不能改啊，我上次追评打错字了看着难受", "gold": ["评价"], "pred": ["评价"], "fallback": false, "source": "synthetic"}
+{"id": "s0728", "text": "商家诱导我给好评能投诉吗，评价申诉入口在哪？", "gold": ["评价"], "pred": ["评价"], "fallback": false, "source": "synthetic"}
+{"id": "s0195", "text": "给差评能匿名吗，不想让别人看到我的名字。", "gold": ["评价"], "pred": ["评价"], "fallback": false, "source": "synthetic"}
+{"id": "s1146", "text": "我给了个中评，商家说影响店铺让我改成好评", "gold": ["评价"], "pred": ["评价"], "fallback": false, "source": "synthetic"}
+{"id": "s0041", "text": "你们能不能把那条恶意差评删掉啊，他压根就没买过", "gold": ["评价"], "pred": ["评价"], "fallback": false, "source": "synthetic"}
+{"id": "s1379", "text": "收到的杯子有裂纹，我拍图评价还能拿奖励不？", "gold": ["质量问题", "评价"], "pred": ["质量问题", "评价"], "fallback": false, "source": "synthetic"}
+{"id": "s1485", "text": "账号被冻结了登不上，能不能帮我解冻一下啊", "gold": ["账号"], "pred": ["账号"], "fallback": false, "source": "synthetic"}
+{"id": "s0013", "text": "刷脸认证一直不通过，是不是我账号哪里有问题", "gold": ["账号"], "pred": ["账号"], "fallback": false, "source": "synthetic"}
+{"id": "s0284", "text": "收到异地登录提醒，这个账号现在是不是不安全", "gold": ["账号"], "pred": ["账号"], "fallback": false, "source": "synthetic"}
+{"id": "s0297", "text": "账号实名认证的时候身份证号填错了，现在还能改吗，急死了", "gold": ["账号"], "pred": ["账号"], "fallback": false, "source": "synthetic"}
+{"id": "s1262", "text": "账号好像被盗了，现在一直登不上去，咋办啊", "gold": ["账号"], "pred": ["账号"], "fallback": false, "source": "synthetic"}
+{"id": "s0750", "text": "我想把账号绑定的手机号换成现在用的新号码", "gold": ["账号"], "pred": ["账号"], "fallback": false, "source": "synthetic"}
+{"id": "s1056", "text": "我账号绑定的邮箱想换成QQ邮箱，可以吗", "gold": ["账号"], "pred": ["账号"], "fallback": false, "source": "synthetic"}
+{"id": "s0739", "text": "我微信登录的账号，想改成手机号登录咋弄啊", "gold": ["账号"], "pred": ["账号"], "fallback": false, "source": "synthetic"}
+{"id": "s1280", "text": "面膜撕开包装里面都干掉了，这还能往脸上敷吗", "gold": ["质量问题"], "pred": ["质量问题"], "fallback": false, "source": "synthetic"}
+{"id": "s0050", "text": "少发了一件，箱子里只装了两件，还缺一件呢", "gold": ["质量问题"], "pred": ["质量问题"], "fallback": false, "source": "synthetic"}
+{"id": "s0928", "text": "收到的颜色跟我下单的完全不一样，是不是发错了", "gold": ["质量问题"], "pred": ["质量问题"], "fallback": false, "source": "synthetic"}
+{"id": "s1070", "text": "行李箱刚拿到手，轮子一落地就掉了一个，咋用", "gold": ["质量问题"], "pred": ["质量问题"], "fallback": false, "source": "synthetic"}
+{"id": "s0668", "text": "买的花瓶底座是歪的，放桌上晃来晃去站不稳", "gold": ["质量问题"], "pred": ["质量问题"], "fallback": false, "source": "synthetic"}
+{"id": "s0530", "text": "面包拆开发现里面发霉了，保质期还没到，咋整", "gold": ["质量问题"], "pred": ["质量问题"], "fallback": false, "source": "synthetic"}
+{"id": "s1435", "text": "新收到的锅盖边上有磕碰凹陷，做工也太糙了吧", "gold": ["质量问题"], "pred": ["质量问题"], "fallback": false, "source": "synthetic"}
+{"id": "s1241", "text": "新买的毛巾一沾水就严重掉毛，这属于质量问题不", "gold": ["质量问题"], "pred": ["质量问题"], "fallback": false, "source": "synthetic"}
+{"id": "s0556", "text": "我收到的东西有破损，想退货需要拍照片吗？", "gold": ["退换货", "质量问题"], "pred": ["退换货"], "fallback": false, "source": "synthetic"}
+{"id": "s0655", "text": "我买的冰箱是发物流的，送货上楼要加运费吗", "gold": ["运费"], "pred": ["物流", "运费"], "fallback": false, "source": "synthetic"}
+{"id": "s0119", "text": "老板这个包邮吗？我看详情页好像没写运费多少", "gold": ["运费"], "pred": ["运费"], "fallback": false, "source": "synthetic"}
+{"id": "s0848", "text": "退货运费是谁出啊，这种是你们承担还是我自己出", "gold": ["运费"], "pred": ["退换货", "运费"], "fallback": false, "source": "synthetic"}
+{"id": "s1474", "text": "我买两件分开寄的话是不是还要再多收一次运费", "gold": ["运费"], "pred": ["运费"], "fallback": false, "source": "synthetic"}
+{"id": "s1410", "text": "我买的这个还在预售，那预售的也要收运费吗", "gold": ["运费"], "pred": ["运费"], "fallback": false, "source": "synthetic"}
+{"id": "s1421", "text": "运费险是怎么用的，退货的时候会自动赔付吗", "gold": ["运费"], "pred": ["运费"], "fallback": false, "source": "synthetic"}
+{"id": "s1342", "text": "运费险怎么用啊，退货时是自动赔付吗", "gold": ["运费"], "pred": ["运费"], "fallback": false, "source": "synthetic"}
+{"id": "s0042", "text": "换货运费到底怎么算呀，来回两趟邮费都要我承担吗", "gold": ["运费"], "pred": ["退换货", "运费"], "fallback": false, "source": "synthetic"}
+{"id": "s0415", "text": "退款审核通过了，钱怎么还没退到我银行卡？", "gold": ["退换货"], "pred": ["退换货"], "fallback": false, "source": "synthetic"}
+{"id": "s1162", "text": "退货退款申请已经提交了，一般大概多久能审核通过呀？", "gold": ["退换货"], "pred": ["退换货"], "fallback": false, "source": "synthetic"}
+{"id": "s0942", "text": "换货的话，是你们先寄新的还是我先寄回旧货？", "gold": ["退换货"], "pred": ["退换货"], "fallback": false, "source": "synthetic"}
+{"id": "s0682", "text": "这件外套我穿大了，想换个小一码，需要重新拍吗？", "gold": ["退换货", "尺码"], "pred": ["退换货", "尺码"], "fallback": false, "source": "synthetic"}
+{"id": "s0821", "text": "想换个同款其他样式的，换货申请到底在哪里提交？", "gold": ["退换货"], "pred": ["退换货"], "fallback": false, "source": "synthetic"}
+{"id": "s0799", "text": "我申请退款三天了还没到账，能帮我查下进度吗？", "gold": ["退换货"], "pred": ["退换货"], "fallback": false, "source": "synthetic"}
+{"id": "s0487", "text": "收到货感觉不合适，七天无理由退货怎么走流程？", "gold": ["退换货"], "pred": ["退换货"], "fallback": false, "source": "synthetic"}
+{"id": "r4", "text": "你们支持货到付款吗", "gold": ["支付"], "pred": ["支付"], "fallback": false, "source": "real"}
+{"id": "r5", "text": "你们支持货到付款吗?", "gold": ["支付"], "pred": ["支付"], "fallback": false, "source": "real"}
+{"id": "r7", "text": "生日当月下单有额外折扣吗？", "gold": ["优惠活动"], "pred": ["优惠活动"], "fallback": false, "source": "real"}
+{"id": "r8", "text": "记忆棉靠枕 A57 可以机洗吗？", "gold": ["商品信息"], "pred": ["商品信息"], "fallback": false, "source": "real"}
+{"id": "r9", "text": "收纳箱 F98 能承受多少公斤？", "gold": ["商品信息"], "pred": ["商品信息"], "fallback": false, "source": "real"}
+{"id": "r10", "text": "棉麻桌布 F51 洗了会缩水吗？", "gold": ["商品信息"], "pred": ["商品信息"], "fallback": false, "source": "real"}
+{"id": "r16", "text": "保温杯 B12 可以用洗碗机洗吗？", "gold": ["商品信息"], "pred": ["商品信息"], "fallback": false, "source": "real"}
+{"id": "r17", "text": "玻璃保鲜盒 G21 可以进烤箱吗？", "gold": ["商品信息"], "pred": ["商品信息"], "fallback": false, "source": "real"}
+{"id": "r22", "text": "硅胶折叠水杯 K12 能装刚烧开的水吗？", "gold": ["商品信息"], "pred": ["商品信息"], "fallback": false, "source": "real"}
+{"id": "r24", "text": "猫窝可以扔洗衣机里洗吗", "gold": ["商品信息"], "pred": ["商品信息"], "fallback": false, "source": "real"}
+{"id": "r25", "text": "猫抓板用久了可以回收吗?", "gold": ["其他"], "pred": ["商品信息", "保修维修"], "fallback": false, "source": "real"}
+{"id": "r28", "text": "小鸡窝可以回收吗?可以放在洗衣机中洗吗?", "gold": ["其他"], "pred": ["商品信息"], "fallback": false, "source": "real"}

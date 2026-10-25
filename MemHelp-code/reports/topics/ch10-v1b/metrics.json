@@ -1,0 +1,371 @@
+{
+  "run_id": "ch10-v1b",
+  "model_dir": "models\\topics\\ch10-v1",
+  "overall": {
+    "micro_precision": 0.954286,
+    "micro_recall": 0.948864,
+    "micro_f1": 0.951567,
+    "macro_precision": 0.960665,
+    "macro_recall": 0.957347,
+    "macro_f1": 0.956845,
+    "weighted_f1": 0.950091,
+    "hamming_loss": 0.00625,
+    "exact_match": 0.91875,
+    "samples": 160.0
+  },
+  "per_class": [
+    {
+      "label": "退换货",
+      "precision": 0.833333,
+      "recall": 0.714286,
+      "f1": 0.769231,
+      "support": 14,
+      "tp": 10,
+      "fp": 2,
+      "fn": 4,
+      "tn": 144
+    },
+    {
+      "label": "物流",
+      "precision": 0.9,
+      "recall": 1.0,
+      "f1": 0.947368,
+      "support": 9,
+      "tp": 9,
+      "fp": 1,
+      "fn": 0,
+      "tn": 150
+    },
+    {
+      "label": "尺码",
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 10,
+      "tp": 10,
+      "fp": 0,
+      "fn": 0,
+      "tn": 150
+    },
+    {
+      "label": "发票",
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 9,
+      "tp": 9,
+      "fp": 0,
+      "fn": 0,
+      "tn": 151
+    },
+    {
+      "label": "质量问题",
+      "precision": 1.0,
+      "recall": 0.833333,
+      "f1": 0.909091,
+      "support": 12,
+      "tp": 10,
+      "fp": 0,
+      "fn": 2,
+      "tn": 148
+    },
+    {
+      "label": "运费",
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 8,
+      "tp": 8,
+      "fp": 0,
+      "fn": 0,
+      "tn": 152
+    },
+    {
+      "label": "优惠活动",
+      "precision": 1.0,
+      "recall": 0.909091,
+      "f1": 0.952381,
+      "support": 11,
+      "tp": 10,
+      "fp": 0,
+      "fn": 1,
+      "tn": 149
+    },
+    {
+      "label": "价保",
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 9,
+      "tp": 9,
+      "fp": 0,
+      "fn": 0,
+      "tn": 151
+    },
+    {
+      "label": "支付",
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 11,
+      "tp": 11,
+      "fp": 0,
+      "fn": 0,
+      "tn": 149
+    },
+    {
+      "label": "订单修改",
+      "precision": 0.9,
+      "recall": 1.0,
+      "f1": 0.947368,
+      "support": 9,
+      "tp": 9,
+      "fp": 1,
+      "fn": 0,
+      "tn": 150
+    },
+    {
+      "label": "库存补货",
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 9,
+      "tp": 9,
+      "fp": 0,
+      "fn": 0,
+      "tn": 151
+    },
+    {
+      "label": "商品信息",
+      "precision": 0.888889,
+      "recall": 1.0,
+      "f1": 0.941176,
+      "support": 16,
+      "tp": 16,
+      "fp": 2,
+      "fn": 0,
+      "tn": 142
+    },
+    {
+      "label": "保修维修",
+      "precision": 0.909091,
+      "recall": 1.0,
+      "f1": 0.952381,
+      "support": 10,
+      "tp": 10,
+      "fp": 1,
+      "fn": 0,
+      "tn": 149
+    },
+    {
+      "label": "账号",
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 10,
+      "tp": 10,
+      "fp": 0,
+      "fn": 0,
+      "tn": 150
+    },
+    {
+      "label": "会员积分",
+      "precision": 0.9,
+      "recall": 1.0,
+      "f1": 0.947368,
+      "support": 9,
+      "tp": 9,
+      "fp": 1,
+      "fn": 0,
+      "tn": 150
+    },
+    {
+      "label": "评价",
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 9,
+      "tp": 9,
+      "fp": 0,
+      "fn": 0,
+      "tn": 151
+    },
+    {
+      "label": "其他",
+      "precision": 1.0,
+      "recall": 0.818182,
+      "f1": 0.9,
+      "support": 11,
+      "tp": 9,
+      "fp": 0,
+      "fn": 2,
+      "tn": 149
+    }
+  ],
+  "pair_confusions": [
+    {
+      "gold_label": "其他",
+      "pred_label": "商品信息",
+      "count": 2
+    },
+    {
+      "gold_label": "其他",
+      "pred_label": "保修维修",
+      "count": 1
+    }
+  ],
+  "real_subset": {
+    "samples": 12,
+    "macro_f1": 0.169118,
+    "exact_match": 0.833333
+  },
+  "multilabel_cases": {
+    "total": 20,
+    "multi_cases": 16,
+    "hit2": 6,
+    "target": "16/16",
+    "misses": [
+      {
+        "text": "买大了想退，运费谁出",
+        "labels": [
+          "尺码",
+          "退换货",
+          "运费"
+        ],
+        "pred": [
+          "退换货",
+          "运费"
+        ],
+        "missing": [
+          "尺码"
+        ]
+      },
+      {
+        "text": "屏幕碎了保修吗，维修要钱吗，运费谁出",
+        "labels": [
+          "质量问题",
+          "保修维修",
+          "运费"
+        ],
+        "pred": [
+          "保修维修"
+        ],
+        "missing": [
+          "质量问题",
+          "运费"
+        ]
+      },
+      {
+        "text": "地址写错了能改吗，不然就退了",
+        "labels": [
+          "订单修改",
+          "退换货"
+        ],
+        "pred": [
+          "订单修改"
+        ],
+        "missing": [
+          "退换货"
+        ]
+      },
+      {
+        "text": "退货要自己垫运费吗，退款多久到",
+        "labels": [
+          "退换货",
+          "运费",
+          "支付"
+        ],
+        "pred": [
+          "退换货",
+          "运费"
+        ],
+        "missing": [
+          "支付"
+        ]
+      },
+      {
+        "text": "发错货了，补发还是退款，运费谁出",
+        "labels": [
+          "质量问题",
+          "退换货",
+          "运费"
+        ],
+        "pred": [
+          "退换货",
+          "运费"
+        ],
+        "missing": [
+          "质量问题"
+        ]
+      },
+      {
+        "text": "保修期多久，维修收费吗",
+        "labels": [
+          "保修维修",
+          "质量问题"
+        ],
+        "pred": [
+          "保修维修"
+        ],
+        "missing": [
+          "质量问题"
+        ]
+      },
+      {
+        "text": "实物和图片不一样，色差太大能退吗",
+        "labels": [
+          "商品信息",
+          "质量问题",
+          "退换货"
+        ],
+        "pred": [
+          "退换货",
+          "质量问题"
+        ],
+        "missing": [
+          "商品信息"
+        ]
+      },
+      {
+        "text": "下单后多久发货，是不是缺货了",
+        "labels": [
+          "物流",
+          "库存补货"
+        ],
+        "pred": [
+          "库存补货"
+        ],
+        "missing": [
+          "物流"
+        ]
+      },
+      {
+        "text": "支付失败但扣钱了，订单还改得了吗",
+        "labels": [
+          "支付",
+          "订单修改"
+        ],
+        "pred": [
+          "支付"
+        ],
+        "missing": [
+          "订单修改"
+        ]
+      },
+      {
+        "text": "价保退差价，券会退吗",
+        "labels": [
+          "价保",
+          "优惠活动"
+        ],
+        "pred": [
+          "价保"
+        ],
+        "missing": [
+          "优惠活动"
+        ]
+      }
+    ]
+  },
+  "elapsed_s": 0.4
+}
