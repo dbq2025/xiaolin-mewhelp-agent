@@ -34,7 +34,7 @@ htmlcov/
 *.log
 logs/
 log/
-data/
+data/*
 uploads/
 
 # ch10：这一章是数据章，语料与切分文件就是交付物，所以 data/topics 要进库。
@@ -84,3 +84,5 @@ data/topics/clean/
 data/topics/labeled/
 data/topics/review/
 data/topics/splits/
+.hf-cache/
+.hf-probe/
