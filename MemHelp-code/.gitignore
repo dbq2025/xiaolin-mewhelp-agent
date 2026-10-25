@@ -37,6 +37,23 @@ log/
 data/
 uploads/
 
+# ch10：这一章是数据章，语料与切分文件就是交付物，所以 data/topics 要进库。
+# 写成 `data/*` + 反向规则，而不是直接 `data` —— 直接忽略 `data` 目录时
+# git 根本不往目录里看，`!data/topics/` 再怎么否定都救不回来。
+data/*
+!data/topics/
+
+# ch10：模型权重几百 MB，绝不能进库；只放行两个**小**的、要长期跟踪量的产物。
+# 逐层写是因为 git 不会进入被排除的目录：想放行深层文件，就得先把每一层
+# 父目录都重新包含进来（`models/` 一把梭会让后面的 `!` 全部失效）。
+models/*
+!models/topics/
+models/topics/*
+!models/topics/*/
+models/topics/*/*
+!models/topics/*/thresholds.json
+!models/topics/*/metrics.json
+
 # ch09：每轮评估的临时报告（趋势数据在 eval_runs 表里）
 evals/reports/ch09-latest.json
 evals/reports/ch09-latest.md
@@ -62,3 +79,8 @@ pytest-tmp/
 
 # Superpowers 执行器的临时工作区（ledger / briefs），不随代码提交
 .superpowers/
+data/topics/raw/
+data/topics/clean/
+data/topics/labeled/
+data/topics/review/
+data/topics/splits/
