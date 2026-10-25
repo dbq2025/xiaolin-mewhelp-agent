@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>主题分布 · MewHelp</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%232563eb'/%3E%3Ctext x='16' y='22' font-size='15' text-anchor='middle' fill='white'%3E%E9%A2%98%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/topics/style.css">
+</head>
+<body>
+
+<div class="app">
+  <header class="topbar">
+    <a class="brand" href="/chat/" title="回到对话页">
+      <div class="avatar-bot" aria-hidden="true">题</div>
+      <div class="brand-text">
+        <div class="brand-name">MewHelp · 主题分布</div>
+        <div class="brand-sub" id="sub">读取中…</div>
+      </div>
+    </a>
+
+    <nav class="nav" aria-label="主导航">
+      <a href="/chat/">对话</a>
+      <a href="/rag-eval/">评估</a>
+      <a href="/review/">审核</a>
+      <a href="/observability/">观测</a>
+      <a href="/topics/" class="active" aria-current="page">主题</a>
+    </nav>
+
+    <div class="topbar-actions">
+      <button class="btn-ghost" id="btn-refresh" type="button">刷新</button>
+      <button class="btn-primary" id="btn-run" type="button">跑一批</button>
+    </div>
+  </header>
+
+  <main class="page">
+
+    <!-- sidecar 没起 / 批跑失败时才有内容 -->
+    <div class="banner" id="banner" hidden>
+      <span class="banner-icon" aria-hidden="true">!</span>
+      <div class="banner-body">
+        <strong id="banner-title">批跑没跑成</strong>
+        <span id="banner-message"></span>
+      </div>
+      <button class="btn-ghost" id="btn-banner-close" type="button" aria-label="关闭提示">×</button>
+    </div>
+
+    <section class="stats" aria-label="总览">
+      <div class="stat">
+        <div class="stat-label">已归类</div>
+        <div class="stat-value" id="stat-total">—</div>
+        <div class="stat-hint" id="stat-total-hint">累计写入 topic_classifications</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">待归类</div>
+        <div class="stat-value" id="stat-pending">—</div>
+        <div class="stat-hint" id="stat-pending-hint">低置信度池里还没归的</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">多标签占比</div>
+        <div class="stat-value" id="stat-multi">—</div>
+        <div class="stat-hint">一句话命中 2 个及以上主题</div>
+      </div>
+    </section>
+
+    <div class="watermark" id="watermark" hidden>
+      <span class="dot" aria-hidden="true"></span>
+      <span id="watermark-text"></span>
+    </div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h1>各类目问题量</h1>
+        <span class="panel-meta" id="panel-meta"></span>
+      </div>
+
+      <div class="chart" id="chart" aria-live="polite"></div>
+
+      <div class="empty" id="empty" hidden>
+        <div class="empty-icon" aria-hidden="true">□</div>
+        <h2>还没有归类结果</h2>
+        <p>低置信度问题攒够一批后，点右上角「跑一批」，各类目的量就会出现在这里。</p>
+      </div>
+
+      <div class="empty" id="error-panel" hidden>
+        <div class="empty-icon bad" aria-hidden="true">!</div>
+        <h2>数据没能加载</h2>
+        <p id="error-message"></p>
+        <button class="btn-primary" id="btn-retry" type="button">重试</button>
+      </div>
+    </section>
+
+    <p class="footnote">
+      统计口径：一行 = 一条被归类的问题；多标签问题会在每个命中类目里各计 1，
+      所以各条之和 ≥ 已归类数。
+    </p>
+  </main>
+</div>
+
+<script src="/topics/app.js"></script>
+</body>
+</html>

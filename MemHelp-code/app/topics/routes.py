@@ -23,6 +23,7 @@ from app.config import Settings, get_settings
 from app.db.repositories import Repositories
 from app.topics.batch import TopicServiceUnavailable, run_batch
 from app.topics.infer import TopicPrediction
+from app.topics.taxonomy import CATEGORY_NAMES
 
 LOGGER = logging.getLogger("app.topics.routes")
 
@@ -126,6 +127,9 @@ def register_topic_routes(
             content={
                 "total": total,
                 "by_label": [{"label": row.label, "count": row.count} for row in counts],
+                # 17 类的完整清单（含计数为 0 的）：前端据此画满 17 行，而不是把
+                # 类目表在 JS 里再抄一份 —— 抄一份就一定会和 taxonomy.py 漂移。
+                "all_labels": list(CATEGORY_NAMES),
                 # 分母为 0 时给 0.0 而不是 None：前端可以直接乘 100 画百分比。
                 "multi_label_share": (multi / total) if total else 0.0,
                 "pending": pending,

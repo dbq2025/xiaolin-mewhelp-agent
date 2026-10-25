@@ -47,11 +47,13 @@ def test_distribution_shape_on_empty_db(test_settings, sqlite_session):
     assert set(body) == {
         "total",
         "by_label",
+        "all_labels",
         "multi_label_share",
         "pending",
         "min_pending",
         "last_classified_at",
     }
+    assert len(body["all_labels"]) == 17 and body["all_labels"][0] == "退换货"
     assert body["total"] == 0 and body["by_label"] == [] and body["pending"] == 0
     assert body["multi_label_share"] == 0.0
     assert body["min_pending"] == test_settings.topic_batch_min_pending
