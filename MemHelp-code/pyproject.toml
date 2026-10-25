@@ -32,6 +32,27 @@ dependencies = [
     "langfuse>=5.0.4",
 ]
 
+[project.optional-dependencies]
+# ch10：主题分类器的 ML 依赖。**主应用不装这组** —— app/api.py 那条链路
+# 永远不背 300MB 的 torch，靠测试 tests/test_topics_isolation.py 钉住。
+ml = [
+    # 2.9.1 是 cu128 索引上 win/cp312 的最高版本。RTX 5060 是 sm_120，
+    # PyPI 默认轮子（cu126 及更早）会在第一次前向时崩在
+    # "no kernel image is available for execution on the device"。
+    "torch==2.9.1",
+    "transformers>=5.0",
+    "safetensors>=0.8",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+# 只有 torch 走 cu128 索引，其余依赖仍从 PyPI 解析。
+torch = { index = "pytorch-cu128" }
+
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",

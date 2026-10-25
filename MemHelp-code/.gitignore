@@ -59,3 +59,6 @@ pytest-cache-files-*/
 pytest-cache/
 pytest-tmp/
 
+
+# Superpowers 执行器的临时工作区（ledger / briefs），不随代码提交
+.superpowers/
