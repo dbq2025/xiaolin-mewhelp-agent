@@ -58,6 +58,29 @@ def _normalize_thresholds(thresholds: Mapping[str, float]) -> dict[str, float]:
     return {name: float(thresholds[name]) for name in CATEGORY_NAMES}
 
 
+def judge_scores(
+    scores: Mapping[str, float], thresholds: Mapping[str, float]
+) -> TopicPrediction:
+    """把一行 17 个概率判成标签。训练侧算「调阈值后」的指标也走这里，
+    保证报告里的 F1 与 sidecar 实际行为是同一套规则。"""
+
+    fired = [
+        index
+        for index, name in enumerate(CATEGORY_NAMES, start=1)
+        if name != OTHER_LABEL and scores[name] >= thresholds[name]
+    ]
+    if fired:
+        # 「其他」即使过阈值也让位：它是兜底类，不与其他类共现（D10）。
+        return TopicPrediction(
+            labels=names_at(fired), scores=dict(scores), fallback=False
+        )
+    # 一个都没过阈值 → 兜底「其他」。这条路径的比例要报出来：
+    # 兜底率异常升高通常意味着模型退化了，而不是「问题真的都归其他」。
+    return TopicPrediction(
+        labels=validate_labels([OTHER_LABEL]), scores=dict(scores), fallback=True
+    )
+
+
 class TopicClassifier:
     """阈值化 + 兜底的判定器。构造它不需要模型，``load()`` 才需要。"""
 
@@ -66,14 +89,21 @@ class TopicClassifier:
         scorer: Scorer,
         thresholds: Mapping[str, float],
         model_taxonomy_hash: str,
+        *,
+        max_length: int = MAX_LENGTH,
     ) -> None:
         self._scorer = scorer
         self._thresholds = _normalize_thresholds(thresholds)
         self._model_taxonomy_hash = model_taxonomy_hash
+        self._max_length = int(max_length)
 
     @property
     def model_taxonomy_hash(self) -> str:
         return self._model_taxonomy_hash
+
+    @property
+    def max_length(self) -> int:
+        return self._max_length
 
     @classmethod
     def from_parts(
@@ -83,6 +113,7 @@ class TopicClassifier:
         *,
         model_taxonomy_hash: str = "",
         current_hash: str | None = None,
+        max_length: int = MAX_LENGTH,
     ) -> "TopicClassifier":
         if current_hash is not None and model_taxonomy_hash != current_hash:
             raise TopicModelError(
@@ -90,7 +121,7 @@ class TopicClassifier:
                 f"模型 {model_taxonomy_hash!r} vs 当前 {current_hash!r}。"
                 "改过类目表就必须重训，否则标签会整体错位。"
             )
-        return cls(scorer, thresholds, model_taxonomy_hash)
+        return cls(scorer, thresholds, model_taxonomy_hash, max_length=max_length)
 
     @classmethod
     def load(cls, model_dir: Path) -> "TopicClassifier":
@@ -114,12 +145,16 @@ class TopicClassifier:
 
         payload = json.loads(thresholds_path.read_text(encoding="utf-8"))
         thresholds = payload.get("thresholds", payload) if isinstance(payload, dict) else payload
+        max_length = int(
+            payload.get("max_length", MAX_LENGTH) if isinstance(payload, dict) else MAX_LENGTH
+        )
 
         return cls.from_parts(
-            _torch_scorer(model_dir),
+            _torch_scorer(model_dir, max_length),
             thresholds,
             model_taxonomy_hash=snapshot_hash,
             current_hash=taxonomy_hash(),
+            max_length=max_length,
         )
 
     def predict(self, texts: Sequence[str]) -> list[TopicPrediction]:
@@ -139,24 +174,10 @@ class TopicClassifier:
                 f"每行必须是 {len(CATEGORY_NAMES)} 个类目分数，实际 {len(row)} 个"
             )
         scores = {name: float(score) for name, score in zip(CATEGORY_NAMES, row)}
-        fired = [
-            index
-            for index, name in enumerate(CATEGORY_NAMES, start=1)
-            if name != OTHER_LABEL and scores[name] >= self._thresholds[name]
-        ]
-        if fired:
-            # 「其他」即使过阈值也让位：它是兜底类，不与其他类共现（D10）。
-            return TopicPrediction(
-                labels=names_at(fired), scores=scores, fallback=False
-            )
-        # 一个都没过阈值 → 兜底「其他」。这条路径的比例要报出来：
-        # 兜底率异常升高通常意味着模型退化了，而不是「问题真的都归其他」。
-        return TopicPrediction(
-            labels=validate_labels([OTHER_LABEL]), scores=scores, fallback=True
-        )
+        return judge_scores(scores, self._thresholds)
 
 
-def _torch_scorer(model_dir: Path) -> Scorer:
+def _torch_scorer(model_dir: Path, max_length: int = MAX_LENGTH) -> Scorer:
     """把 HF 权重包成 ``scorer``。torch/transformers 只在这里 import。"""
 
     import torch
@@ -173,7 +194,7 @@ def _torch_scorer(model_dir: Path) -> Scorer:
             list(texts),
             padding=True,
             truncation=True,
-            max_length=MAX_LENGTH,
+            max_length=max_length,
             return_tensors="pt",
         )
         encoded = {key: value.to(device) for key, value in encoded.items()}

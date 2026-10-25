@@ -100,9 +100,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not model_dir.is_dir():
         raise SystemExit(f"找不到模型目录：{model_dir}（先跑 scripts/train_topics.py）")
 
-    test_rows = _read_jsonl(Path(args.test))
+    raw_test_rows = _read_jsonl(Path(args.test))
+    # 还没人工标 gold 的行不能进指标：拿预标当 gold 等于自己考自己。
+    test_rows = [row for row in raw_test_rows if row.get("labels") and not row.get("needs_human_label")]
+    skipped_unlabeled = len(raw_test_rows) - len(test_rows)
+    if skipped_unlabeled:
+        print(f"[eval] 跳过 {skipped_unlabeled} 条未标 gold 的问题")
     if not test_rows:
-        raise SystemExit("测试集为空")
+        raise SystemExit("测试集为空（或全部未标 gold）")
 
     classifier = TopicClassifier.load(model_dir)
     started = time.perf_counter()
@@ -141,6 +146,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "pair_confusions": pairs,
         "real_subset": real_subset,
         "multilabel_cases": cases_summary,
+        "skipped_unlabeled": skipped_unlabeled,
         "elapsed_s": round(time.perf_counter() - started, 1),
     }
     _write(out_dir / "metrics.json", json.dumps(payload, ensure_ascii=False, indent=2) + "\n")

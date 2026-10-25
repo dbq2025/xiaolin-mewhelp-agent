@@ -543,9 +543,9 @@ class Settings(BaseSettings):
         ),
     )
     topic_model_dir: str = Field(
-        default="models/topics",
+        default="models/topics/latest",
         description=(
-            "ch10：模型产物目录（相对项目根）。sidecar 取其中最近一次 run；"
+            "ch10：sidecar 默认加载的模型产物目录（相对项目根），指向 `latest` 软拷贝；"
             "也可用 TOPIC_MODEL_DIR 环境变量直接指到某个 run。"
         ),
     )

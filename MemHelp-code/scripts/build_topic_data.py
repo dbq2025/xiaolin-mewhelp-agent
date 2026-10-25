@@ -404,17 +404,19 @@ def _step_prelabel(
             labeled_counts[kind] = 0
             continue
         labeled: list[dict[str, Any]] = []
+        missing: list[str] = []
         for start in range(0, len(rows), batch_size):
             batch = rows[start : start + batch_size]
             raw = _invoke(llm, labeling_messages([row["text"] for row in batch]))
             parsed_items = parse_labeled(raw)
-            parsed = {item.text: item for item in parsed_items}
+            by_id = {item.id: item for item in parsed_items if item.id is not None}
+            by_text = {item.text: item for item in parsed_items}
             generated_items = [
                 ParsedQuestion(text=row["text"], labels=list(row["labels"]))
                 for row in batch
                 if row.get("labels")
             ]
-            for conflict in find_conflicts(generated_items, parsed_items):
+            for conflict in find_conflicts(generated_items, by_text):
                 conflicts.append(
                     {
                         "text": conflict.text,
@@ -422,16 +424,25 @@ def _step_prelabel(
                         "prelabeled": "|".join(conflict.prelabeled),
                     }
                 )
-            for row in batch:
-                item = parsed.get(row["text"])
+            for index, row in enumerate(batch):
+                item = by_id.get(index) or by_text.get(row["text"])
                 generated = list(row.get("labels", []))
                 if item is None:
+                    missing.append(row["text"])
                     labeled.append({**row, "labels": generated, "rationale": ""})
                     continue
                 # 真实问题的标签就取预标结果；合成问题保留生成标签作为权威，
                 # 预标只用来发现分歧（两边都可能是错的，得人工看）。
                 labels = item.labels if not generated else generated
                 labeled.append({**row, "labels": labels, "rationale": item.rationale})
+        if missing:
+            # 按文本精确匹配时，模型改写一个标点就会静默丢样本 + 丢分歧。
+            # 现在按 id 对，仍然对不上就说明模型漏行/改行，必须当场停下。
+            sample = "；".join(missing[:3])
+            raise RuntimeError(
+                f"预标结果缺 {len(missing)} 条（示例：{sample}），"
+                "模型可能漏行或改写了原文；重跑该步或换更稳的模型"
+            )
         _write_jsonl(dirs["labeled"] / f"{kind}.jsonl", labeled)
         labeled_counts[kind] = len(labeled)
 

@@ -390,3 +390,21 @@ sidecar 启动时校验三件事，任一失败直接拒绝启动并打印原因
 | 人工标注主观（尤其近邻类） | 每条带 rationale；错误归因里「边界争议」比例超 20% 就回改边界规则 |
 | 测试集只有 150 条，F1 波动大 | 报告附每类 support；support <10 的类目 F1 标注「样本不足，仅供参考」 |
 | 阈值扫描过拟合 val | val 只有 150 条；阈值步长 0.05 避免锯齿；报告同时给 0.5 固定阈值的对照数 |
+
+## 12. 实施中的偏离与补充（2026-10-25 收尾定稿）
+
+交付版为 `ch10-v3`（测试集 160 条人工 gold：macro-F1 0.9713 / micro 0.9661 / exact 0.9250 / 多诉求命中 7/16）。
+相对上文设计，落地时有以下补充/偏离，均已写入代码与 `dev-notes/ch10.md`：
+
+- **合成语料多标签比例**：prompt 只写「约三成」时模型只兑现约 10%，训练集多标签掉到 10%、模型学会只报主诉求。
+  新增 `boost_multi` 步骤（`force_multi=True` 把话说死，只追加进训练集），补 600 条后训练集多标签达 28%。
+- **人工复核硬例**：真机联调发现「猫窝/猫抓板 → 保修维修」成片误判，新增 `hard_cases` 流水线步骤与
+  `data/topics/extra/hard_cases.jsonl`（96 条，刻意避开测试集原句防泄漏），只追加训练集。
+- **阈值产物**：`thresholds.json` 增加 `max_length`，`TopicClassifier.load` 读回，避免训练/推理截断长度漂移；
+  `val` 上调阈值得到的 tuned 指标改为复用 `infer.judge_scores()`，与线上「其他独占 + 兜底」同一套规则。
+- **评测口径**：多诉求命中率的分母只算 gold ≥2 标签的用例；未标 gold（`needs_human_label`）的行跳过并计数；
+  真实子集 macro-F1 必须附「17 类宏平均 + 真实样本集中」的结构性稀释说明。
+- **落库幂等**：`upsert_many` 撞唯一键时回滚重试一次（并发批跑），DDL 补 `ON DELETE CASCADE` 与 ORM 对齐。
+- **部署默认值**：sidecar 默认加载 `models/topics/latest`，可用 `TOPIC_MODEL_DIR` 或 `Settings.topic_model_dir` 覆盖。
+- **测试范围**：按用户收尾要求「最简覆盖核心路径」，并发重试等边界场景不做单测，靠实现 + 手工联调验证；
+  Minor 遗留（CSV 转义、地址 regex 覆盖、run_id 秒级竞态）记在 dev-notes 遗留清单。

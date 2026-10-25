@@ -85,3 +85,13 @@ def test_force_multi_prompt_demands_every_row():
     assert "每一条" in content
     assert "「退换货」" in content and "「运费」" in content
     assert "约三成" not in content
+
+
+def test_parse_labeled_keeps_batch_id():
+    """预标按 id 对回原句：模型改个标点也不该丢样本。"""
+
+    raw = '{"id": 3, "text": "退货怎么退", "labels": ["退换货"], "rationale": "字面要退货"}'
+    parsed = parse_labeled(raw)
+    assert len(parsed) == 1
+    assert parsed[0].id == 3
+    assert parsed[0].text == "退货怎么退"

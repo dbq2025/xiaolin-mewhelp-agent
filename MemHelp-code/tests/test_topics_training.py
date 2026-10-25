@@ -147,8 +147,10 @@ def test_train_model_smoke_writes_artifacts_and_reloads():
             assert (out_dir / name).is_file(), f"缺产物 {name}"
         # transformers v5 把词表收进 tokenizer.json，v4 是 vocab.txt，两种都算齐全
         assert (out_dir / "tokenizer.json").is_file() or (out_dir / "vocab.txt").is_file()
-        thresholds = json.loads((out_dir / "thresholds.json").read_text(encoding="utf-8"))
-        thresholds = thresholds.get("thresholds", thresholds)
+        payload = json.loads((out_dir / "thresholds.json").read_text(encoding="utf-8"))
+        # 训练长度必须落盘：服务端要靠它对齐截断，否则训练 128 / 推理 64 会静默漂移。
+        assert payload["max_length"] == 16
+        thresholds = payload.get("thresholds", payload)
         assert set(thresholds) == set(CATEGORY_NAMES)
         assert metrics["val_macro_f1"] >= 0.0
         assert metrics["epochs_run"] >= 1

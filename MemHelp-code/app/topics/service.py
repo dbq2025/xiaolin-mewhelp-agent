@@ -37,8 +37,31 @@ LOGGER = logging.getLogger("app.topics.service")
 #: 再大就要开始担心 OOM 和请求超时了。
 MAX_BATCH = 64
 
-#: 默认模型目录（可用 ``TOPIC_MODEL_DIR`` 覆盖）。取最近一次训完的 run 由部署方决定。
-DEFAULT_MODEL_DIR = Path(__file__).resolve().parents[2] / "models" / "topics"
+#: 项目根（sidecar 可能从任意 cwd 启动，默认路径必须锚在仓库上）。
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+#: 默认模型目录（可用 ``TOPIC_MODEL_DIR`` 或 ``Settings.topic_model_dir`` 覆盖）。
+#: 指向 ``latest`` 软拷贝：训练产物落在 ``models/topics/<run_id>/``，服务不裸指 run。
+DEFAULT_MODEL_DIR = PROJECT_ROOT / "models" / "topics" / "latest"
+
+
+def _configured_model_dir() -> Path:
+    """没有显式参数/环境变量时，读 ``Settings.topic_model_dir``（相对项目根）。
+
+    sidecar 只做推理，不需要 OpenAI 凭据；配置不完整时退回默认目录，别为了读一个
+    路径把服务卡死在启动阶段。
+    """
+
+    override = os.environ.get("TOPIC_MODEL_DIR")
+    if override:
+        return Path(override)
+    try:
+        from app.config import get_settings
+
+        configured = Path(get_settings().topic_model_dir)
+    except Exception:  # noqa: BLE001 - 配置缺失/非法都不该拦住推理服务
+        return DEFAULT_MODEL_DIR
+    return configured if configured.is_absolute() else PROJECT_ROOT / configured
 
 
 class ClassifyRequest(BaseModel):
@@ -50,9 +73,7 @@ def create_app(
 ) -> FastAPI:
     """造一个 sidecar。``classifier`` 只给测试注入，线上走 ``model_dir``。"""
 
-    model_path = Path(
-        model_dir if model_dir is not None else os.environ.get("TOPIC_MODEL_DIR", DEFAULT_MODEL_DIR)
-    )
+    model_path = Path(model_dir) if model_dir is not None else _configured_model_dir()
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:

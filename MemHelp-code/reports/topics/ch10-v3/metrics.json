@@ -343,5 +343,6 @@
       }
     ]
   },
-  "elapsed_s": 0.4
+  "skipped_unlabeled": 0,
+  "elapsed_s": 0.3
 }

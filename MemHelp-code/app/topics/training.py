@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
+from app.topics.infer import judge_scores
 from app.topics.taxonomy import (
     CATEGORY_NAMES,
     taxonomy_hash as compute_taxonomy_hash,
@@ -329,10 +330,13 @@ def train_model(
         model.load_state_dict(best_state)
     probs = _val_probabilities(model, tokenizer, val_rows, config, device)
     swept = threshold_sweep(val_targets, probs, CATEGORY_NAMES)
-    tuned_pred = [
-        [int(prob >= swept[name]["threshold"]) for name, prob in zip(CATEGORY_NAMES, row)]
-        for row in probs
-    ]
+    swept_thresholds = {name: value["threshold"] for name, value in swept.items()}
+    # 与 sidecar 同一套判定（含「其他」独占 / 兜底），否则报告里的 tuned 指标
+    # 描述的是一个线上并不存在的分类器。
+    tuned_pred = []
+    for row in probs:
+        decision = judge_scores(dict(zip(CATEGORY_NAMES, row)), swept_thresholds)
+        tuned_pred.append([int(name in decision.labels) for name in CATEGORY_NAMES])
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -343,9 +347,10 @@ def train_model(
     _write_json(
         out_dir / "thresholds.json",
         {
-            "thresholds": {name: value["threshold"] for name, value in swept.items()},
+            "thresholds": swept_thresholds,
             "source": "val",
             "macro_f1_at_0.5": round(best_f1, 6),
+            "max_length": int(config.max_length),
         },
     )
     metrics: dict[str, Any] = {

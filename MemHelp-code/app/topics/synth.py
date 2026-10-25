@@ -16,7 +16,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
 
-from app.topics.taxonomy import CATEGORIES, Category, validate_labels
+from app.topics.taxonomy import Category, prompt_fragment, validate_labels
 
 _SYSTEM = (
     "你是电商客服质检的标注专家。你只输出机器可解析的 JSON，不写解释、不加代码围栏。"
@@ -36,6 +36,8 @@ class ParsedLabel:
     text: str
     labels: list[str]
     rationale: str
+    #: 批次内序号（prompt 里给的 id）。缺省 None 兼容没有 id 的旧输出/测试。
+    id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,13 +51,6 @@ class Conflict:
 class SynthResult:
     questions: list[ParsedQuestion] = field(default_factory=list)
     skipped: int = 0
-
-
-def _taxonomy_block() -> str:
-    lines = []
-    for category in CATEGORIES:
-        lines.append(f"{category.index}. {category.name}：{category.boundary}")
-    return "\n".join(lines)
 
 
 def generation_messages(
@@ -86,35 +81,41 @@ def generation_messages(
         multi = ""
     user = f"""照下面的权威类目表，写 {count} 条真实用户会说的电商客服问题，主题是「{category.name}」。
 
-类目表（编号. 名称：边界说明）：
-{_taxonomy_block()}
+{prompt_fragment()}
+
+商品词表（尽量从里面挑，别总写同一件东西）：
+卫衣、羽绒服、运动鞋、床垫、猫窝、猫抓板、狗窝、洗发水、吹风机、冰箱、婴儿车、手机壳、桌布、保温杯、行李箱、耳机
 
 规则：
-1. 每条一句话，20 到 40 个字，像真人打字，可以有错别字和口语。
+1. 每条一句话，8 到 40 个字，像真人打字，可以有错别字和口语，**不要**用「请问您」这种客服腔。
 2. 一条只写一个诉求，除非下面另有要求{multi}
 3. labels 只填句子字面提到的诉求，用类目表里的名称，一个不多一个不少。
 4. 句子只有寒暄、没有诉求的不要。
-5. 每行输出一个 JSON 对象：{{"text": "...", "labels": ["..."]}}，不要输出数组、不要代码围栏。"""
+5. 每行输出一个 JSON 对象：{{"text": "...", "labels": ["..."]}}，不要数组、不要编号、不要代码围栏。"""
     return [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}]
 
 
 def labeling_messages(texts: Sequence[str]) -> list[dict[str, str]]:
-    """预标 prompt：给一批句子，让模型逐条给标签 + 一句理由。"""
+    """预标 prompt：给一批句子，让模型逐条给标签 + 一句理由。
 
-    numbered = "\n".join(f"{i + 1}. {text}" for i, text in enumerate(texts))
+    每条带一个批次内序号 ``id``，解析时按 id 对回原句 —— 模型偶尔会顺手改标点或
+    补主语，按文本精确匹配会**静默丢掉**那条样本和它的分歧。
+    """
+
+    numbered = "\n".join(f"{i}. {text}" for i, text in enumerate(texts))
     user = f"""照下面的权威类目表，给每条问题打多标签。
 
-类目表（编号. 名称：边界说明）：
-{_taxonomy_block()}
+{prompt_fragment()}
 
-待标问题：
+待标问题（每行开头是 id）：
 {numbered}
 
 规则：
 1. 只打句子字面提到的诉求。一句话提到几个就打几个，一个不多一个不少。
 2. 标签必须用类目表里的名称，不许自造。
 3. 拿不准主题、或只是寒暄的，打「其他」。
-4. 每行输出一个 JSON 对象：{{"text": "...", "labels": ["..."], "rationale": "一句话说明为什么是这些标签"}}。"""
+4. 每行输出一个 JSON 对象，``id`` 必须原样抄回，``text`` 也原样抄回、一个字都不要改：
+{{"id": 0, "text": "...", "labels": ["..."], "rationale": "一句话说明为什么是这些标签"}}。"""
     return [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}]
 
 
@@ -164,7 +165,11 @@ def parse_labeled(raw: str) -> list[ParsedLabel]:
         labels = _clean_label_list(obj.get("labels"))
         if not text or not rationale or labels is None:
             continue
-        out.append(ParsedLabel(text=text, labels=labels, rationale=rationale))
+        raw_id = obj.get("id")
+        item_id = raw_id if isinstance(raw_id, int) else None
+        out.append(
+            ParsedLabel(text=text, labels=labels, rationale=rationale, id=item_id)
+        )
     return out
 
 

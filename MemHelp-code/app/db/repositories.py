@@ -2125,13 +2125,9 @@ class TopicClassificationRepository:
     async def count_pending(self) -> int:
         return await _run(self._count_pending)
 
-    def _upsert_many(
-        self, rows: Sequence[tuple[int, list[str]]], classified_at: datetime
-    ) -> int:
-        # 同批里同一道题出现两次时后写覆盖先写，否则第二次会撞唯一键。
-        deduped = dict(rows)
-        if not deduped:
-            return 0
+    def _write_topic_rows(
+        self, deduped: dict[int, list[str]], classified_at: datetime
+    ) -> None:
         existing = set(
             self._session.scalars(
                 select(TopicClassification.question_id).where(
@@ -2156,6 +2152,21 @@ class TopicClassificationRepository:
                 )
         # 单事务：一批要么全进，要么全不进，中断后重跑不会留下半批。
         self._session.commit()
+
+    def _upsert_many(
+        self, rows: Sequence[tuple[int, list[str]]], classified_at: datetime
+    ) -> int:
+        # 同批里同一道题出现两次时后写覆盖先写，否则第二次会撞唯一键。
+        deduped = dict(rows)
+        if not deduped:
+            return 0
+        try:
+            self._write_topic_rows(deduped, classified_at)
+        except IntegrityError:
+            # 两个批跑并发时，「先查后写」之间对方可能已经插了同一道题。
+            # 回滚后重来一次：这次它们都在 existing 里，走 UPDATE，不会重复插。
+            self._session.rollback()
+            self._write_topic_rows(deduped, classified_at)
         return len(deduped)
 
     async def upsert_many(
