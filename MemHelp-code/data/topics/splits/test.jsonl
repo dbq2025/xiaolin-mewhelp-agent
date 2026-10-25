@@ -157,4 +157,4 @@
 {"id": "r22", "text": "硅胶折叠水杯 K12 能装刚烧开的水吗？", "text_raw": "硅胶折叠水杯 K12 能装刚烧开的水吗？", "labels": ["商品信息"], "source": "real", "changes": [], "labels_prelabeled": []}
 {"id": "r24", "text": "猫窝可以扔洗衣机里洗吗", "text_raw": "猫窝可以扔洗衣机里洗吗", "labels": ["商品信息"], "source": "real", "changes": [], "labels_prelabeled": []}
 {"id": "r25", "text": "猫抓板用久了可以回收吗?", "text_raw": "猫抓板用久了可以回收吗?", "labels": ["其他"], "source": "real", "changes": [], "labels_prelabeled": []}
-{"id": "r28", "text": "小鸡窝可以回收吗?可以放在洗衣机中洗吗?", "text_raw": "小鸡窝可以回收吗?可以放在洗衣机中洗吗?", "labels": ["商品信息"], "source": "real", "changes": [], "labels_prelabeled": []}
+{"id": "r28", "text": "小鸡窝可以回收吗?可以放在洗衣机中洗吗?", "text_raw": "小鸡窝可以回收吗?可以放在洗衣机中洗吗?", "labels": ["其他"], "source": "real", "changes": [], "labels_prelabeled": []}

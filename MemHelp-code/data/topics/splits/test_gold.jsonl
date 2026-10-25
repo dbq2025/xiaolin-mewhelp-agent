@@ -157,4 +157,4 @@
 {"id": "r22", "text": "硅胶折叠水杯 K12 能装刚烧开的水吗？", "labels": ["商品信息"], "rationale": "耐热温度", "labeled_by": "agent"}
 {"id": "r24", "text": "猫窝可以扔洗衣机里洗吗", "labels": ["商品信息"], "rationale": "能否机洗", "labeled_by": "agent"}
 {"id": "r25", "text": "猫抓板用久了可以回收吗?", "labels": ["其他"], "rationale": "回收没有对应类目", "labeled_by": "agent"}
-{"id": "r28", "text": "小鸡窝可以回收吗?可以放在洗衣机中洗吗?", "labels": ["商品信息"], "rationale": "回收无类目，但机洗属商品信息；其他不共现", "labeled_by": "agent"}
+{"id": "r28", "text": "小鸡窝可以回收吗?可以放在洗衣机中洗吗?", "labels": ["其他"], "rationale": "回收在 17 类里没有对应类目，归其他；其他独占，不再叠商品信息（复核时改正）", "labeled_by": "agent"}
